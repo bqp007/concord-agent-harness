@@ -54,12 +54,15 @@ $WT new T2 --repo "$M" --no-fetch --base main --link data --link bench > /dev/nu
 [ "$(grep -c '^/bench$' "$M/.git/info/exclude")" = 1 ] && ok "exclude patterns added once" || bad "duplicate patterns: $(tr '\n' ' ' < "$M/.git/info/exclude")"
 plan "$W1"; plan "$W2"; plan "$M"; mkdir -p "$T/orig"; plan "$T/orig"
 echo "== parallel runs: T1 and T2 at once, main too"
-FAKE_SLEEP=4 FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/r1.txt" 2>&1 & P1=$!
-sleep 1
+# T1 holds its lock until $T/release exists (at most 30 s), so the same-checkout block does not depend on runner speed.
+FAKE_ACTIONS="i=0; while [ ! -e '$T/release' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
+  $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/r1.txt" 2>&1 & P1=$!
+L1="$(git -C "$W1" rev-parse --path-format=absolute --git-dir)/concord.lock"
+i=0; until [ -e "$L1" ] || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done
 FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$W2" > "$T/r2.txt" 2>&1; R2=$?
 FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$M" > "$T/r3.txt" 2>&1; R3=$?
 FAKE_ACTIONS='true' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/r4.txt" 2>&1; R4=$?
-wait $P1; R1=$?
+touch "$T/release"; wait $P1; R1=$?
 [ $R1 -eq 0 ] && grep -q "a.py" "$T/r1.txt" && ok "T1 run completed" || { bad "T1 run rc=$R1"; tail -4 "$T/r1.txt"; }
 [ $R2 -eq 0 ] && ok "T2 ran while T1 was running (no lock wait)" || { bad "T2 rc=$R2"; tail -3 "$T/r2.txt"; }
 [ $R3 -eq 0 ] && ok "main checkout ran while T1 was running" || { bad "main rc=$R3"; tail -3 "$T/r3.txt"; }
