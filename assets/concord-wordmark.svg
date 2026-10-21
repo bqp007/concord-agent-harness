@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="72" viewBox="0 0 360 72" role="img" aria-label="Concord">
+  <!-- One palette for light and dark pages: each color keeps at least 3.7:1 contrast on white and on #0d1117. -->
+  <style>
+    .t { font: 600 44px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #8b5cf6; }
+    .a { fill: none; stroke: #8b5cf6; stroke-width: 6; }
+    .b { fill: none; stroke: #0d9488; stroke-width: 6; }
+  </style>
+  <circle class="a" cx="30" cy="36" r="20"/>
+  <circle class="b" cx="52" cy="36" r="20"/>
+  <text class="t" x="88" y="52">Concord</text>
+</svg>

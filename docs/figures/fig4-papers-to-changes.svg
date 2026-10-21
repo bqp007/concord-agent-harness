@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 590" width="1000" height="590">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <style>text{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;fill:#111827}.p{font-size:13.5px;font-weight:600}.c{font-size:13.5px;fill:#1f2937}.h{font-size:12px;font-weight:700;fill:#64748b;letter-spacing:.06em}</style>
+  </defs>
+  <rect width="1000" height="590" fill="#ffffff"/>
+  <text x="500" y="30" text-anchor="middle" style="font-size:19px;font-weight:700">Nine papers, what each changed</text>
+  <text x="20" y="62" class="h">PAPER</text><text x="420" y="62" class="h">CHANGE IN CONCORD</text>
+  <g id="rows">
+    <rect x="20" y="74" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="101" class="p">[1] Agent-behaviour taxonomy · CHI EA '26</text>
+    <rect x="420" y="74" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="101" class="c">Behaviour tag on EXECUTOR failures · checklist grouped by 4 expectations</text>
+    <line x1="370" y1="96" x2="416" y2="96" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="130" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="157" class="p">[2] Code-review comments with ML · ICSE-SEIP</text>
+    <rect x="420" y="130" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="157" class="c">Deterministic finding filters · adoption rate per reviewer</text>
+    <line x1="370" y1="152" x2="416" y2="152" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="186" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="213" class="p">[3] When technical debt vanishes · IEEE Softw.</text>
+    <rect x="420" y="186" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="213" class="c">Judge on outcomes: frontier tokens per verdict, not throughput</text>
+    <line x1="370" y1="208" x2="416" y2="208" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="242" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="269" class="p">[4] Terminal-RSI</text>
+    <rect x="420" y="242" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="269" class="c">Post-run acceptance + TEST_DEFECT hint · NO CHANGES flag · plan-only review</text>
+    <line x1="370" y1="264" x2="416" y2="264" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="298" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="325" class="p">[5] Harmony Harness</text>
+    <rect x="420" y="298" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="325" class="c">Acceptance-file hashes block PASS · "general or repo-specific?"</text>
+    <line x1="370" y1="320" x2="416" y2="320" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="354" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="381" class="p">[6] MILO</text>
+    <rect x="420" y="354" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="381" class="c">Per-repository ledger of plan gaps, read at planning time</text>
+    <line x1="370" y1="376" x2="416" y2="376" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="410" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="437" class="p">[7] Self-evolving harness</text>
+    <rect x="420" y="410" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="437" class="c">Fresh-context review · re-read plan after compaction · self-edit budget</text>
+    <line x1="370" y1="432" x2="416" y2="432" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="466" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="493" class="p">[8] Agentic privacy and security</text>
+    <rect x="420" y="466" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="493" class="c">Executor web fetch denied in every mode; attempts reported</text>
+    <line x1="370" y1="488" x2="416" y2="488" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+    <rect x="20" y="522" width="350" height="44" rx="8" fill="#f1f5f9" stroke="#94a3b8"/><text x="34" y="549" class="p">[9] Deep Review</text>
+    <rect x="420" y="522" width="560" height="44" rx="8" fill="#ede9fe" stroke="#a78bfa"/><text x="434" y="549" class="c">Segmented review of big diffs · grounding against the full diff</text>
+    <line x1="370" y1="544" x2="416" y2="544" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  </g>
+</svg>

@@ -1,0 +1,16 @@
+---
+description: Investigate a task, write PLAN_<ticket>.md (phases with files, acceptance tests and a named executor per phase), settle open questions, wait for approval, then run every phase as /concord:delegate all would
+argument-hint: <task description>
+---
+Plan for: $ARGUMENTS. Chat: terse (tables for numbers). Plan text, commands, code: full.
+
+0. Planner check: planning, test writing and verification run on the strongest model available at high effort; a session on less → say so and ask. Code ticket not in its worktree → `python3 ~/.claude/concord/wt.py new <TICKET>` + `EnterWorktree`; `wt.py list` shows OVERLAP / DRIFT.
+1. Investigate cheap: `~/.claude/concord/repo-notes/<repo>.md` and `<repo>.gaps.md` first, then targeted reads (grep, the functions, the test runner), never whole files, no code edits. Trivial task → offer a direct edit, no plan.
+2. Gain table BEFORE the plan: each item names its metric and expected move; no move → cut. The ticket's row is the plan's `## Outcome`. `Minimal case:` = the smallest version that moves the metric; generality goes under Out of scope with a safe fallback.
+3. Write `PLAN_<ticket>.md` at repo root from ~/.claude/concord/PLAN_TEMPLATE.md (never `PLAN.md`; ask before overwriting; add it to `.git/info/exclude`). Map block first (`### Intent` I<n>, `### Structure` S<n> `<- I..`, `### Work` P<n> `<- S..`; each phase heading carries its ID `(P<n> <- S<n>)` and a blocking open question names its node `Q<n> -> S<n>`); Executors table; Open questions (executors cannot ask; the user settles every ambiguity before approval); per phase `Executor`, `Purpose`, `Files`, `Context`, `Interfaces`, `Inputs` (input and failure classes = the goal posts), `Steps`, `Example`, `Edge cases`, `Decisions`, `Acceptance` (deterministic commands; already-green ones marked `(characterization)`), `Out of scope`, `Risk`, `Budget` (≈ 2× changed lines).
+4. LEAN: tests (planner, Baseline: skip) → ONE executor run → table. Split a phase only after a PLAN_GAP. At most 2 plan revisions per ticket; a third → split the ticket or give the phase to `concord:implementer-opus48`.
+5. Executors: deepseek-flash (Go) by default; other Go models only when the user names them; zen-* only after asking. `concord:implementer-opus48` for a subtle-logic phase (high risk AND logic-dense: gates, state machines, security checks, untrusted parsers) when OpenCode would do worse; say why in the Executors table. Claude models only as subagents on the subscription.
+6. `concord.py --lint <phase> --plan <PLAN> --repo <repo>` (outside the sandbox) on every implementing phase before showing the plan: QUESTIONS → Open questions; fix FILES and RISKS. Go and Zen both out → skip it, say so. Read the ACCEPTANCE LINT lines first (zero tokens); after fixing the plan re-lint until QUESTIONS is empty, at most 2 rounds.
+7. Show the Executors table, open questions and `concord.py --map <PLAN>` output (the Intent/Structure/Work tree with per-phase status) instead of one line per phase. Stop until the user approves (partial approval = those phases only).
+8. On approval run every phase per `/concord:delegate`; update the plan's `## Handoff` after each phase.
+9. Before any PR is called ready: PR gate, `/concord:delegate` §6.

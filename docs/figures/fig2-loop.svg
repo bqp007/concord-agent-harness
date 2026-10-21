@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="1000" height="500">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <marker id="r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b91c1c"/></marker>
+    <style>text{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;fill:#111827}.t{font-size:14.5px;font-weight:700}.s{font-size:12px;fill:#334155}.n{font-size:11px;font-weight:700;fill:#ffffff}.m{font-size:12.5px;fill:#334155}</style>
+  </defs>
+  <rect width="1000" height="500" fill="#ffffff"/>
+  <text x="500" y="30" text-anchor="middle" class="t" style="font-size:19px">One ticket, end to end</text>
+
+  <!-- row 1: planning (purple) -->
+  <g>
+    <rect x="20" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+    <text x="90" y="92" text-anchor="middle" class="t">Ticket</text><text x="90" y="112" text-anchor="middle" class="s">own git worktree</text>
+    <rect x="180" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+    <text x="250" y="92" text-anchor="middle" class="t">Read cheaply</text><text x="250" y="112" text-anchor="middle" class="s">notes · gap ledger</text>
+    <rect x="340" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+    <text x="410" y="92" text-anchor="middle" class="t">Gain table</text><text x="410" y="112" text-anchor="middle" class="s">no metric → cut</text>
+    <rect x="500" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+    <text x="570" y="92" text-anchor="middle" class="t">Write plan</text><text x="570" y="112" text-anchor="middle" class="s">files · tests · budget</text>
+    <rect x="660" y="60" width="140" height="74" rx="10" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.8"/>
+    <text x="730" y="92" text-anchor="middle" class="t">Plan-only review</text><text x="730" y="112" text-anchor="middle" class="s">cheap model, --lint</text>
+    <rect x="820" y="60" width="160" height="74" rx="10" fill="#f3f4f6" stroke="#b91c1c" stroke-width="2.4"/>
+    <text x="900" y="92" text-anchor="middle" class="t">You approve</text><text x="900" y="112" text-anchor="middle" class="s">nothing runs before</text>
+  </g>
+  <line x1="160" y1="97" x2="177" y2="97" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="320" y1="97" x2="337" y2="97" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="480" y1="97" x2="497" y2="97" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="640" y1="97" x2="657" y2="97" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="800" y1="97" x2="817" y2="97" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="900" y1="134" x2="900" y2="186" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- row 2: building, right to left -->
+  <rect x="820" y="190" width="160" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+  <text x="900" y="222" text-anchor="middle" class="t">Tests first</text><text x="900" y="242" text-anchor="middle" class="s">must fail (red run)</text>
+  <rect x="660" y="190" width="140" height="74" rx="10" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.8"/>
+  <text x="730" y="222" text-anchor="middle" class="t">Implement</text><text x="730" y="242" text-anchor="middle" class="s">files locked</text>
+  <rect x="500" y="190" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+  <text x="570" y="222" text-anchor="middle" class="t">Verify</text><text x="570" y="242" text-anchor="middle" class="s">re-run + read diff</text>
+  <rect x="340" y="190" width="140" height="74" rx="10" fill="#fef3c7" stroke="#b45309" stroke-width="1.8"/>
+  <text x="410" y="222" text-anchor="middle" class="t">Review</text><text x="410" y="242" text-anchor="middle" class="s">fresh agents</text>
+  <rect x="180" y="190" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
+  <text x="250" y="222" text-anchor="middle" class="t">Verdict</text><text x="250" y="242" text-anchor="middle" class="s">PASS / FAIL + cause</text>
+  <rect x="20" y="190" width="140" height="74" rx="10" fill="#f3f4f6" stroke="#b91c1c" stroke-width="2.4"/>
+  <text x="90" y="222" text-anchor="middle" class="t">PR gate</text><text x="90" y="242" text-anchor="middle" class="s">you commit</text>
+  <line x1="820" y1="227" x2="803" y2="227" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="660" y1="227" x2="643" y2="227" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="500" y1="227" x2="483" y2="227" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="340" y1="227" x2="323" y2="227" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="180" y1="227" x2="163" y2="227" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- feedback loops -->
+  <path d="M410,264 C410,300 730,300 730,268" fill="none" stroke="#b91c1c" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#r)"/>
+  <text x="570" y="312" text-anchor="middle" class="m" style="fill:#b91c1c">confirmed findings → fix</text>
+  <path d="M250,264 C250,350 760,350 760,268" fill="none" stroke="#b91c1c" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#r)"/>
+
+  <rect x="180" y="370" width="640" height="112" rx="10" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="200" y="396" class="t" style="font-size:13.5px">A FAIL always names its cause, and the cause decides where work goes back</text>
+  <text x="200" y="420" class="m"><tspan font-weight="700">EXECUTOR</tspan> → implement again with evidence (max 3 attempts, tagged with a behaviour)</text>
+  <text x="200" y="442" class="m"><tspan font-weight="700">PLAN_GAP</tspan> → fix the plan, add a line to the repo's gap ledger</text>
+  <text x="200" y="464" class="m"><tspan font-weight="700">TEST_DEFECT</tspan> → fix the tests · <tspan font-weight="700">FLAKY</tspan> → re-run</text>
+
+  <rect x="20" y="300" width="14" height="14" fill="#ede9fe" stroke="#6d28d9"/><text x="40" y="312" class="s">planner</text>
+  <rect x="20" y="322" width="14" height="14" fill="#ccfbf1" stroke="#0f766e"/><text x="40" y="334" class="s">cheap model</text>
+  <rect x="20" y="344" width="14" height="14" fill="#fef3c7" stroke="#b45309"/><text x="40" y="356" class="s">reviewers</text>
+  <rect x="100" y="300" width="14" height="14" fill="#f3f4f6" stroke="#b91c1c" stroke-width="2"/><text x="120" y="312" class="s">human gate</text>
+</svg>

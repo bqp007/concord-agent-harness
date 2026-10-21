@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" width="1000" height="520">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <style>text{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;fill:#111827}.t{font-size:14.5px;font-weight:700}.s{font-size:12.5px;fill:#334155}.h{font-size:12px;font-weight:700;fill:#64748b;letter-spacing:.06em}</style>
+  </defs>
+  <rect width="1000" height="520" fill="#ffffff"/>
+  <text x="500" y="30" text-anchor="middle" style="font-size:19px;font-weight:700">Concord's layers, and what this repository builds today</text>
+  <text x="20" y="64" class="h">CONCORD LAYER</text><text x="430" y="64" class="h">IN THIS REPOSITORY</text><text x="880" y="64" class="h">STATUS</text>
+
+  <rect x="20" y="76" width="360" height="56" rx="8" fill="#ede9fe" stroke="#6d28d9"/><text x="36" y="100" class="t">L0 Constitution</text><text x="36" y="120" class="s">principles, mandatory rules, amendments</text>
+  <rect x="430" y="76" width="430" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8"/><text x="446" y="100" class="s">Global instruction file plus dated owner rules;</text><text x="446" y="120" class="s">owner approves every rule change</text>
+  <rect x="880" y="88" width="100" height="32" rx="16" fill="#fef3c7" stroke="#b45309"/><text x="930" y="109" text-anchor="middle" class="s" style="fill:#92400e;font-weight:700">partial</text>
+  <line x1="380" y1="104" x2="426" y2="104" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="20" y="146" width="360" height="56" rx="8" fill="#ede9fe" stroke="#6d28d9"/><text x="36" y="170" class="t">L1 Governance and change control</text><text x="36" y="190" class="s">classification, approval routing, integration</text>
+  <rect x="430" y="146" width="430" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8"/><text x="446" y="170" class="s">Plan approval, risk tiers, open questions settled</text><text x="446" y="190" class="s">first, pull-request gate, human merge</text>
+  <rect x="880" y="158" width="100" height="32" rx="16" fill="#dcfce7" stroke="#15803d"/><text x="930" y="179" text-anchor="middle" class="s" style="fill:#166534;font-weight:700">built</text>
+  <line x1="380" y1="174" x2="426" y2="174" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="20" y="216" width="360" height="56" rx="8" fill="#ede9fe" stroke="#6d28d9"/><text x="36" y="240" class="t">L2 Federated domains</text><text x="36" y="260" class="s">owned areas that change freely inside contracts</text>
+  <rect x="430" y="216" width="430" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8"/><text x="446" y="240" class="s">Short per-repository notes; per-phase file scope</text><text x="446" y="260" class="s">enforced on the executor's edit tools</text>
+  <rect x="880" y="228" width="100" height="32" rx="16" fill="#fef3c7" stroke="#b45309"/><text x="930" y="249" text-anchor="middle" class="s" style="fill:#92400e;font-weight:700">partial</text>
+  <line x1="380" y1="244" x2="426" y2="244" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="20" y="286" width="360" height="56" rx="8" fill="#ede9fe" stroke="#6d28d9"/><text x="36" y="310" class="t">L3 Contract registry</text><text x="36" y="330" class="s">shared interfaces, schemas, guarantees</text>
+  <rect x="430" y="286" width="430" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8"/><text x="446" y="310" class="s">Exact signatures in every plan phase; interface</text><text x="446" y="330" class="s">mismatch reported; contracts checked for presence</text>
+  <rect x="880" y="298" width="100" height="32" rx="16" fill="#fef3c7" stroke="#b45309"/><text x="930" y="319" text-anchor="middle" class="s" style="fill:#92400e;font-weight:700">partial</text>
+  <line x1="380" y1="314" x2="426" y2="314" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="20" y="356" width="360" height="56" rx="8" fill="#ede9fe" stroke="#6d28d9"/><text x="36" y="380" class="t">L4 Evidence and quality</text><text x="36" y="400" class="s">tests, fitness functions, evidence records</text>
+  <rect x="430" y="356" width="430" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8"/><text x="446" y="380" class="s">Tests first + red run, evidence report, independent</text><text x="446" y="400" class="s">re-run, reviews, verdicts with causes</text>
+  <rect x="880" y="368" width="100" height="32" rx="16" fill="#dcfce7" stroke="#15803d"/><text x="930" y="389" text-anchor="middle" class="s" style="fill:#166534;font-weight:700">built</text>
+  <line x1="380" y1="384" x2="426" y2="384" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="20" y="426" width="360" height="56" rx="8" fill="#ede9fe" stroke="#6d28d9"/><text x="36" y="450" class="t">L5 Execution and integration</text><text x="36" y="470" class="s">agents, tasks, worktrees, CI, merging</text>
+  <rect x="430" y="426" width="430" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8"/><text x="446" y="450" class="s">Dispatcher + mediated executors, one worktree per</text><text x="446" y="470" class="s">ticket, rule engine blocking destructive commands</text>
+  <rect x="880" y="438" width="100" height="32" rx="16" fill="#dcfce7" stroke="#15803d"/><text x="930" y="459" text-anchor="middle" class="s" style="fill:#166534;font-weight:700">built</text>
+  <line x1="380" y1="454" x2="426" y2="454" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+  <text x="500" y="508" text-anchor="middle" class="s">Partial = enforced by convention or presence checks, not yet by a machine-checked contract.</text>
+</svg>

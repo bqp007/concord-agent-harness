@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 420" width="1120" height="420">
+  <defs><style>text{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;fill:#111827}.d{font-size:13px;font-weight:700;fill:#6d28d9}.t{font-size:13px;font-weight:700}.s{font-size:11.5px;fill:#334155}</style></defs>
+  <rect width="1120" height="420" fill="#ffffff"/>
+  <text x="560" y="30" text-anchor="middle" style="font-size:19px;font-weight:700">How the workflow grew, October 2026</text>
+  <line x1="40" y1="210" x2="1080" y2="210" stroke="#cbd5e1" stroke-width="4" stroke-linecap="round"/>
+
+  <circle cx="80" cy="210" r="9" fill="#6d28d9"/>
+  <text x="80" y="60" text-anchor="middle" class="d">10–11 Oct</text>
+  <text x="80" y="80" text-anchor="middle" class="t">Literature review</text>
+  <text x="80" y="98" text-anchor="middle" class="s">intent + architecture,</text>
+  <text x="80" y="114" text-anchor="middle" class="s">15 canonical papers</text>
+  <text x="80" y="130" text-anchor="middle" class="s">→ plan-then-delegate;</text>
+  <text x="80" y="146" text-anchor="middle" class="s">first run: 9.9 s, ~44k tok</text>
+  <line x1="80" y1="156" x2="80" y2="200" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="215" cy="210" r="9" fill="#0f766e"/>
+  <text x="215" y="250" text-anchor="middle" class="d" style="fill:#0f766e">12–13 Oct</text>
+  <text x="215" y="270" text-anchor="middle" class="t">One cheap executor</text>
+  <text x="215" y="288" text-anchor="middle" class="s">billing research; DeepSeek</text>
+  <text x="215" y="304" text-anchor="middle" class="s">Flash for every phase;</text>
+  <text x="215" y="320" text-anchor="middle" class="s">lean plans: tests → one run</text>
+  <line x1="215" y1="220" x2="215" y2="236" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="350" cy="210" r="9" fill="#6d28d9"/>
+  <text x="350" y="94" text-anchor="middle" class="d">14 Oct</text>
+  <text x="350" y="114" text-anchor="middle" class="t">Metric first</text>
+  <text x="350" y="132" text-anchor="middle" class="s">no expected metric move</text>
+  <text x="350" y="148" text-anchor="middle" class="s">→ item cut before planning</text>
+  <line x1="350" y1="156" x2="350" y2="200" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="490" cy="210" r="9" fill="#b45309"/>
+  <text x="490" y="250" text-anchor="middle" class="d" style="fill:#b45309">15 Oct</text>
+  <text x="490" y="270" text-anchor="middle" class="t">Tiers + isolation</text>
+  <text x="490" y="288" text-anchor="middle" class="s">review tiers (Flash / Opus);</text>
+  <text x="490" y="304" text-anchor="middle" class="s">one worktree per ticket;</text>
+  <text x="490" y="320" text-anchor="middle" class="s">rule engine; 144-run snapshot</text>
+  <line x1="490" y1="220" x2="490" y2="236" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="630" cy="210" r="9" fill="#6d28d9"/>
+  <text x="630" y="78" text-anchor="middle" class="d">16 Oct</text>
+  <text x="630" y="98" text-anchor="middle" class="t">Independence + speed</text>
+  <text x="630" y="116" text-anchor="middle" class="s">reviewer = fresh agent;</text>
+  <text x="630" y="132" text-anchor="middle" class="s">parallel by default; PR gate;</text>
+  <text x="630" y="148" text-anchor="middle" class="s">Concord economic model</text>
+  <line x1="630" y1="156" x2="630" y2="200" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="770" cy="210" r="9" fill="#0f766e"/>
+  <text x="770" y="250" text-anchor="middle" class="d" style="fill:#0f766e">18 Oct (a)</text>
+  <text x="770" y="270" text-anchor="middle" class="t">Nine papers</text>
+  <text x="770" y="288" text-anchor="middle" class="s">10 changes: filters,</text>
+  <text x="770" y="304" text-anchor="middle" class="s">hashes, segmented review,</text>
+  <text x="770" y="320" text-anchor="middle" class="s">plan-only review, ledger</text>
+  <line x1="770" y1="220" x2="770" y2="236" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="905" cy="210" r="9" fill="#6d28d9"/>
+  <text x="905" y="78" text-anchor="middle" class="d">18 Oct (b)</text>
+  <text x="905" y="98" text-anchor="middle" class="t">Token economy</text>
+  <text x="905" y="116" text-anchor="middle" class="s">planner at max effort;</text>
+  <text x="905" y="132" text-anchor="middle" class="s">compact at 400k window;</text>
+  <text x="905" y="148" text-anchor="middle" class="s">terse prose; Flash #max</text>
+  <line x1="905" y1="156" x2="905" y2="200" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <circle cx="1030" cy="210" r="9" fill="#b45309"/>
+  <text x="1030" y="250" text-anchor="middle" class="d" style="fill:#b45309">20–21 Oct</text>
+  <text x="1030" y="270" text-anchor="middle" class="t">Packaged + linted</text>
+  <text x="1030" y="288" text-anchor="middle" class="s">released as Concord;</text>
+  <text x="1030" y="304" text-anchor="middle" class="s">acceptance lint, 0 tokens;</text>
+  <text x="1030" y="320" text-anchor="middle" class="s">big diffs reviewed by group</text>
+  <line x1="1030" y1="220" x2="1030" y2="236" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <text x="560" y="380" text-anchor="middle" class="s">Regression checks on Concord: 62 on 15 Oct, 154 on 18 Oct, 317 on 21 Oct. Dispatcher: ~2,300 lines on 15 Oct, ~3,400 on 18 Oct, ~5,000 on 21 Oct.</text>
+</svg>

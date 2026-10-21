@@ -1,0 +1,17 @@
+{
+  "name": "concord",
+  "description": "Concord keeps people in control of AI coding agents: plans you approve, scoped implementation by low-cost models, tests first, independent review and a ledger of every verdict.",
+  "owner": {
+    "name": "Bao Q. Pham",
+    "url": "https://github.com/bqp007"
+  },
+  "plugins": [
+    {
+      "name": "concord",
+      "source": "./adapters/claude-code",
+      "description": "Keep control of AI coding agents. Each task becomes a short plan you approve; low-cost models implement it inside a fixed file scope, against tests that must fail first; an independent reviewer checks every change at its risk level; every verdict is recorded with its cause. You commit; Concord never does. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
+      "version": "1.0.0",
+      "category": "development"
+    }
+  ]
+}

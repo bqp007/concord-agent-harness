@@ -1,0 +1,13 @@
+{
+  "name": "concord",
+  "version": "1.0.0",
+  "description": "Stay in control while AI agents write your code. A strong model turns each task into a short plan you approve and checks the result; low-cost models implement it inside a fixed file scope, against tests that must fail first; an independent reviewer checks every change at its risk level; you review the diff and commit. Adds /concord:plan-then-delegate, /concord:delegate and /concord:rules-review, plus implementer, reviewer and verifier agents. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
+  "author": {
+    "name": "Bao Q. Pham",
+    "url": "https://github.com/bqp007"
+  },
+  "homepage": "https://github.com/bqp007/concord-agent-harness",
+  "repository": "https://github.com/bqp007/concord-agent-harness",
+  "license": "MIT",
+  "keywords": ["ai-agents", "coding-agents", "governance", "human-in-the-loop", "planning", "delegation", "code-review", "test-first", "multi-model"]
+}

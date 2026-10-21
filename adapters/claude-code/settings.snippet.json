@@ -1,0 +1,7 @@
+{
+  "modelSettings": {
+    "claude-opus-5-5": {"autoCompactWindow": 400000},
+    "claude-fable-5-1": {"autoCompactWindow": 400000}
+  },
+  "sandbox": {"excludedCommands": ["gh *", "git push *", "git fetch *", "git pull *", "git clone *"]}
+}
