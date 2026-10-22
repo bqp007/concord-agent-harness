@@ -693,6 +693,32 @@ def acceptance_lint(repo, phase_text, files):
     return out
 
 
+def context_lint(phase_text):
+    """Context entries that name a file or directory without a function or line range: `no function or line
+    range: item` (advisory, no exit change). Prose entries are ignored."""
+    inline, body = field_block(phase_text, "Context")
+    items = []
+    for line in ([inline] if inline else []) + body:
+        line = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line)
+        items += [i.strip() for i in line.split(",")]
+    out = []
+    for item in items:
+        if not item:
+            continue
+        for m in re.finditer(r"[A-Za-z0-9_./-]+", item):
+            tok = m.group(0)
+            if "/" in tok or tok.endswith(LINT_SUFFIXES) or tok.endswith("/"):
+                break
+        else:
+            continue                                    # prose: no path token
+        rest = item[m.end():]
+        if (re.search(r":\s*\S", rest) or re.search(r"`[^`]*`", rest) or re.search(r"L\d", rest)
+                or re.search(r"\w\(\)", rest) or re.search(r"\d-\d", rest)):
+            continue                                    # scoped: a function, line range or note names what to read
+        out.append(f"no function or line range: {item}")
+    return out
+
+
 def parse_word(phase_text, name, choices, default):
     """First word of a one-word field such as `Risk: high (untrusted input)`."""
     inline, body = field_block(phase_text, name)
@@ -4674,6 +4700,8 @@ def cmd_lint(args, phase, target, conf):
     repo, plan, plan_rel, phase_text = load_plan_phase(args, phase)
     for f in acceptance_lint(repo, phase_text, parse_files(phase_text)):
         print(f"ACCEPTANCE LINT: {f}")
+    for f in context_lint(phase_text):
+        print(f"CONTEXT LINT: {f}")
     for f in map_lint(plan.read_text()):
         print(f"MAP LINT: {f}")
     gap_checklist, promote_lines = repo_gaps(repo)

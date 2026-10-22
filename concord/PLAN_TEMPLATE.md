@@ -52,7 +52,7 @@ Executor: deepseek-flash
 Risk: medium
 Purpose: <one sentence: what this phase achieves and why>
 Files: path/to/module.py
-Context: path/to/caller.py, path/to/config.yaml, tests/test_module.py   (read-only: the callers, callees, configs and tests the executor must consult; never edit)
+Context: path/to/caller.py:main() 40-90, path/to/config.yaml: retry block, tests/test_module.py:test_parse_empty()   (read-only, never edited: each entry names the function or line range to read, so the executor never reads a whole file)
 Interfaces:
 - `def parse(raw: str) -> Result` (new) - raises `ValueError` on empty input
 Inputs:   (goal posts, fixed here; `--lint` checks it; missing on a medium or high implementing phase = a report note)
@@ -80,7 +80,7 @@ Executor: deepseek-flash
 Risk: low
 Purpose: <why the structure changes; behaviour must not>
 Files: path/to/module.py, path/to/new_helper.py
-Context: tests/
+Context: tests/test_module.py:test_roundtrip()
 Baseline: pass
 Characterize: `python3 scripts/dump_outputs.py tests/fixtures/inputs/`
 Budget: 80 lines
@@ -130,7 +130,8 @@ Rules for the planner (evidence: docs/WORKFLOW.md in the Concord repository):
   outside Files:, and on OpenCode the harness refuses such edits outright, so an incomplete list makes the
   executor stop with STATUS: BLOCKED naming the file (recorded as BLOCKED; a second one on the phase is a PLAN_GAP).
 - Files: must be complete (every file that changes) and Context: must name the dependencies the
-  executor needs to read (callers, callees, configs, tests). `concord.py --lint <phase>` checks both.
+  executor needs to read (callers, callees, configs, tests), each as `path:function()` or `path:120-180`, never a
+  bare file or directory: the executor reads only that. `--lint` checks both (CONTEXT LINT for a bare entry).
 - Acceptance commands must be deterministic, runnable offline, written before execution, and able to
   distinguish the right implementation from plausible wrong ones.
 - Decisions + a structural acceptance check whenever a phase adds a module or crosses a layer.

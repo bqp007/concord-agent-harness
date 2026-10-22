@@ -1,9 +1,9 @@
 #!/bin/bash
 # concord.py (PLAN_kit-lint2): ACCEPTANCE LINT lines of --lint (A-C); a planner may edit its plan inside its own
-# --begin/--end run, an executor may not (D); --review/--packet scoped by --files/--exclude (E). No network.
-# Run: bash ~/.claude/concord/tests/acclint_test.sh [ABCDE]   (exit 0 = every selected check passed).
+# --begin/--end run, an executor may not (D); --review/--packet scoped by --files/--exclude (E); CONTEXT LINT (F). No network.
+# Run: bash ~/.claude/concord/tests/acclint_test.sh [ABCDEF]   (exit 0 = every selected check passed).
 set -u
-SEL="${1:-ABCDE}"
+SEL="${1:-ABCDEF}"
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/acclint-test.XXXXXX")" && pwd -P)"; export T
 trap 'rm -rf "$T"' EXIT
@@ -160,6 +160,44 @@ C0=$(calls); review "$BIG"; RC=$?
   && ok "E.5 over the cap without --files: refusal unchanged" || { bad "E.5 rc=$RC"; tail -3 "$T/out.txt"; }
 C0=$(calls); review "$BIG" --files 'docs/*'; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && ok "E.6 over the cap with --files on the small group: reviewer runs" || { bad "E.6 rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
+fi
+
+if sel F; then echo "== F. CONTEXT LINT: a Context file without a function or line range"
+cat > "$R/PLAN_C.md" <<'P'
+# Plan: ctx
+
+## Phase 1 - inline
+Executor: qwen
+Files: a.py
+Context: a.py, docs/, tests/exists.sh:run(), conf/x.yaml:10-40, b.py: parse_args main, c.py `helper`, d.py L12-30, e.py (read-only), see the callers
+Acceptance:
+- `test -f a.py`
+
+## Phase 2 - bullets
+Executor: qwen
+Files: a.py
+Context:
+- concord/concord.py:acceptance_lint()
+- tests/, f.md lines 3-9
+Acceptance:
+- `test -f a.py`
+
+## Phase 3 - none
+Executor: qwen
+Files: a.py
+Acceptance:
+- `test -f a.py`
+P
+ctx(){ sed -n 's/^CONTEXT LINT: //p' "$T/out.txt"; }
+$DP --lint 1 --dry-run --via qwen --model fake/m --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+printf '%s\n' 'no function or line range: a.py' 'no function or line range: docs/' 'no function or line range: e.py (read-only)' > "$T/want.txt"
+ctx > "$T/got.txt"; [ $RC -eq 0 ] && diff -u "$T/want.txt" "$T/got.txt" > "$T/diff.txt" && ok "F.1 inline Context: bare file, directory and a note flagged; :func(), :lines, ': names', backticks, L12-30 and prose pass" || { bad "F.1 rc=$RC"; cat "$T/diff.txt"; }
+L1=$(last "^CONTEXT LINT"); L2=$(first "^DRY RUN LINT")
+[ -n "$L1" ] && [ -n "$L2" ] && [ "$L1" -lt "$L2" ] && ok "F.2 CONTEXT LINT comes before DRY RUN LINT" || bad "F.2 order ${L1:-none} ${L2:-none}"
+$DP --lint 2 --dry-run --via qwen --model fake/m --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1
+[ "$(ctx)" = "no function or line range: tests/" ] && ok "F.3 bullet Context: each bullet split on commas, 'lines 3-9' passes" || { bad "F.3"; ctx; }
+$DP --lint 3 --dry-run --via qwen --model fake/m --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "CONTEXT LINT" && ok "F.4 no Context field: no line" || bad "F.4 rc=$RC"
 fi
 
 echo "passed $pass, failed $fail"
