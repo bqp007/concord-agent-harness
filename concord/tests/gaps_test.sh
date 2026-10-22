@@ -5,7 +5,7 @@
 # Zero model tokens, offline, fake HOME, fake qwen executor and reviewer.
 # Run: bash ~/.claude/concord/tests/gaps_test.sh [A-J]...   (no letter = every letter; exit 0 = every selected check passed).
 set -u
-SEL="${*:-ABCDEFGHIJ}"
+SEL="${*:-ABCDEFGHIJK}"
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/gaps-test.XXXXXX")" && pwd -P)"; export T
 trap 'chmod -R u+rwx "$T" 2> /dev/null; rm -rf "$T"' EXIT
@@ -507,6 +507,19 @@ st --since 2030-01-01
 newrepo jnone; st --since 2026-10-11
 has "no recorded runs in this repo" && ! has "plan gaps" && ok "J.4 no runs at all: today's message" || { bad "J.4"; head -3 "$T/out.txt"; }
 nogaps
+fi
+
+if sel K; then echo "== K. adoption counts land on the review that raised the finding"
+python3 -I - "$T/concord/concord.py" <<'PY' && ok "K.1 --adopt F1 counts on round 1 although a clean round 2 is newer" || bad "K.1"
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("concord", sys.argv[1]); c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+r1 = {"reviewer": "reviewer-opus48", "finding_ids": ["F1"]}
+r2 = {"reviewer": "reviewer-opus48", "finding_ids": []}
+meta = {"reviews": [r1, r2]}
+ledger = {"key": "k", "findings": [{"id": "F1", "reviewer": "reviewer-opus48"}]}
+touched = c._adjudicate_ids(meta, ledger, ["F1"], [], [], [])
+sys.exit(0 if r1.get("adopted") == 1 and "adopted" not in r2 and [e for _, e in touched] == [r1] else 1)
+PY
 fi
 
 echo "passed $pass, failed $fail"

@@ -3522,7 +3522,13 @@ def _adjudicate_ids(meta, ledger, adopt, wrong, decline, tests, reviewer=None):
     def target_entry(fid):
         if named is not None:
             return named
-        return _latest_review(meta, entries[fid].get("reviewer") or "")
+        reviewer_name = entries[fid].get("reviewer") or ""
+        target = norm(reviewer_name)
+        entry = None
+        for rev in meta.get("reviews") or []:
+            if norm(rev.get("reviewer") or "") == target and fid in (rev.get("finding_ids") or []):
+                entry = rev
+        return entry or _latest_review(meta, reviewer_name)
 
     ids = adopt + [i for i, _ in wrong] + [i for i, _ in decline] + [i for i, _ in tests]
     for fid in ids:
