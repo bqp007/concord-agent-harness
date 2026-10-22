@@ -98,7 +98,7 @@ Review depth follows risk. Low-risk phases get a cheap review; medium-risk phase
 
 Reviewer output is a claim, not evidence. The dispatcher downgrades to a NOTE, with the reason, any finding located outside the diff (three lines of slack), any fix that is only a to-do marker and any fix that only deletes code. After confirming a review the planner records what happened to each finding (adopted, wrong, declined); findings carry ledger ids (F1, F2, ...) that bind later rounds, so the choice of reviewer per tier rests on data. A repeated false finding is often a harness bug rather than a model failure: a cheap reviewer once reported a "committed cache" in five rounds because the dispatcher had passed it every file a run created, caches included. Reviews now leave out generated files.
 
-A run diff over the review cap (60,000 characters) is refused with the file groups to review separately: `--review <run> --files <globs>` (and `--exclude`), the same as `--review-pr`. A delta review after a fix truncates only the context, never the fix.
+A run diff over the review cap (60,000 characters) is refused with the file groups to review separately: `--review <run> --files <globs>` (and `--exclude`), the same as `--review-pr`. A delta review after a fix shows the fix with the touched functions as context; a fix diff over the cap needs a full review.
 
 ![Segmented review](figures/fig3-segmented-review.svg)
 *The segmented review as first built, and then retired: it added about 400 lines that no diff in daily use needed. The cap and the file-group split remain.*

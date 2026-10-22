@@ -76,7 +76,8 @@ P="$D/prompt.txt"
 clean "review"
 
 echo "== filters, cap, empty"
-$DP --review-pr 7 --via qwen --model fake/m --exclude 'vendor/*' --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+# --force-review: the FIX review above now credits c.py and vendor/v.py (PLAN_kit-fixreview P2); this checks the filter
+$DP --review-pr 7 --via qwen --model fake/m --exclude 'vendor/*' --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 D="$RUNS/$(rid)"; P="$D/prompt.txt"
 [ $RC -eq 0 ] && [ "$(mj "$D" 'sorted(m["files"])')" = "['a.py', 'c.py']" ] && [ "$(mj "$D" 'm["excluded"]')" = "['vendor/v.py']" ] \
   && ! grep -q "^diff --git a/vendor/v.py" "$P" && grep -q "vendor/v.py" "$P" \

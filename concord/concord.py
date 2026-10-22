@@ -77,6 +77,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 import urllib.parse
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -252,6 +253,26 @@ VERDICT: READY | NEEDS ANSWERS
 # --review: a cheap model reads the finished diff against the REVIEW.md checklists (read-only).
 REVIEW_FILE = HERE / "REVIEW.md"
 REVIEW_DIFF_CAP = 60_000
+REWRITE_MIN_LINES = 40
+FUNC_CONTEXT_CAP = 12_000
+DOC_SUFFIXES = (".md", ".rst", ".adoc")
+C_SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
+FUNC_CONTEXT_ATTRS = (
+    "*.py diff=python\n"
+    "*.c diff=cpp\n"
+    "*.cc diff=cpp\n"
+    "*.cpp diff=cpp\n"
+    "*.cxx diff=cpp\n"
+    "*.h diff=cpp\n"
+    "*.hh diff=cpp\n"
+    "*.hpp diff=cpp\n"
+    "*.hxx diff=cpp\n"
+    "*.sh diff=bash\n"
+    "*.md diff=markdown\n"
+    "*.go diff=golang\n"
+    "*.rs diff=rust\n"
+    "*.java diff=java\n"
+)
 PR_TIMEOUT = 120          # seconds for every gh / git subprocess on the --review-pr / --pr-status path
 PR_TEXT_CAP = 4_000       # chars kept of a PR title and of a PR body in the review prompt
 CHECKLIST_BY_EXT = {
@@ -262,6 +283,7 @@ CHECKLIST_BY_EXT = {
 }
 ML_PATH = re.compile(r"(train|eval|model|feature|dataset|classif|calibrat|encoder|fusion)", re.I)
 TEST_PATH = re.compile(r"(^|/)(tests?|spec)(/|_)|(^|/)test_|_test\.|\.test\.", re.I)
+LIGHT_TEST_PATH = re.compile(r"(^|/)(tests?|spec)/|(^|/)test_|_test\.|\.test\.", re.I)
 REVIEW_JSON_START = "REVIEW-JSON"
 REVIEW_JSON_END = "END-REVIEW-JSON"
 REVIEW_TASK = """You are reviewing ONE finished code change, read-only. Its acceptance tests already pass. Answer three closed
@@ -3303,8 +3325,9 @@ def required_tier_rank(repo, meta):
 
 
 def covered_hits(reviews, repo, files, want, cur=None):
-    """{path: (reviewer, rank)} for files a clean recorded review already covers at the current content: a
-    review that stored a `covered` blob map of rank >= `want` holding the file's current blob. A review of a
+    """{path: (reviewer, rank)} for files a recorded review already covers at the current content: a
+    review that stored a `covered` blob map of rank >= `want` holding the file's current blob. A `covered` map
+    comes from a clean review, or from a FIX/BLOCK PR review for its finding-free files. A review of a
     given tier covers a request of its own tier or lower, never a higher one (lower tier never covers higher).
     `cur` (the {path: blob sha} to match against) defaults to the working-tree blobs; a PR reuse passes the
     blobs at the fetched head. The highest-ranked covering review wins per file."""
@@ -3323,6 +3346,23 @@ def covered_hits(reviews, repo, files, want, cur=None):
             if cov.get(f) == sha and (f not in hits or rank > hits[f][1]):
                 hits[f] = (name, rank)
     return hits
+
+
+def cover_blobs(blobs, findings):
+    """The subset of `blobs` ({path: sha}) a review with findings still covers: a copy with the files any
+    BLOCKER/HIGH/MEDIUM finding names dropped. A finding whose path matches no blob (unplaceable) -> {} (nothing
+    covered). NOTE findings are ignored. PR reviews only (blobs are exact at the fetched head)."""
+    covered = dict(blobs)
+    for f in findings or []:
+        if not isinstance(f, dict) or f.get("severity") not in REVIEW_OPEN_STATUSES:
+            continue
+        p = _coerce_str(f.get("path"))
+        named = [k for k in blobs if p == k or p == "./" + k or (p[:2] in ("a/", "b/") and p[2:] == k)]
+        if not named:
+            return {}
+        for k in named:
+            covered.pop(k, None)
+    return covered
 
 
 def review_reuse(args, repo, meta, meta_path, files, want):
@@ -3468,16 +3508,21 @@ def cmd_review_record(args):
              "blockers": counts["blockers"], "highs": counts["highs"], "mediums": counts["mediums"],
              "report": str(report), "downgraded": result["downgraded"],
              "finding_ids": [f.get("id") for f in result["findings"]], "retried": False}
-    if result["verdict"] == "CLEAN":                      # a clean review covers its content for later reuse
-        if meta.get("kind") == "pr-review":               # a PR review is reviewed at its fetched head
-            pf, phead = meta.get("files") or [], meta.get("head")
-            if pf and phead:
-                entry["covered"] = blob_shas_at(repo, phead, pf)
+    if meta.get("kind") == "pr-review":                   # a PR review is reviewed at its fetched head
+        pf, phead = meta.get("files") or [], meta.get("head")
+        if pf and phead and result["verdict"] in ("CLEAN", "FIX", "BLOCK"):
+            seen = blob_shas_at(repo, phead, pf)
+            blobs = seen
+            if result["verdict"] != "CLEAN":              # a review with findings keeps its clean files' credit
+                blobs = cover_blobs(seen, result["findings"])
+                entry["flagged"] = {k: v for k, v in seen.items() if k not in blobs}
+            if blobs:
+                entry["covered"] = blobs
                 entry["cover_tier"] = TIER_RANK.get(meta.get("tier"), 2)
-        else:
-            rfiles = review_files(repo, meta)
-            if rfiles:
-                entry["covered"], entry["cover_tier"] = blob_shas(repo, rfiles), reviewer_rank(args.reviewer)
+    elif result["verdict"] == "CLEAN":                    # a clean phase review covers its content for later reuse
+        rfiles = review_files(repo, meta)
+        if rfiles:
+            entry["covered"], entry["cover_tier"] = blob_shas(repo, rfiles), reviewer_rank(args.reviewer)
     record_review(meta_path, meta, entry)
     dg = sum(result["downgraded"].values())
     print(f"{run_dir.name}: review by {args.reviewer} recorded: verdict {result['verdict']}, "
@@ -3800,6 +3845,11 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         entry.update(entry_extra)
     if cover and verdict == "CLEAN":          # a clean review covers its content for later reuse
         entry["covered"], entry["cover_tier"] = cover
+    elif cover and meta.get("kind") == "pr-review" and verdict in ("FIX", "BLOCK"):
+        blobs = cover_blobs(cover[0], result["findings"])     # a PR review with findings keeps its clean files
+        entry["flagged"] = {k: v for k, v in cover[0].items() if k not in blobs}
+        if blobs:
+            entry["covered"], entry["cover_tier"] = blobs, cover[1]
     record_review(meta_path, meta, entry)
     print(result_line({"run": run_dir.name, "name": res["name"], "executor": executor, "model": model,
                        "rc": rc, "secs": int(secs), "verdict": verdict, "blockers": counts["blockers"],
@@ -3976,15 +4026,6 @@ def pr_diff(repo, base, ref, files):
     return out
 
 
-def delta_part_name(changed, h0):
-    """D7/D9/D10: the key of the fix block's own part: `(fix commits since <h0 8>)`, made unique against the
-    changed files (the block is never merged into a file's part)."""
-    name = f"(fix commits since {str(h0)[:8]})"
-    while name in changed:
-        name = "_" + name
-    return name
-
-
 def diff_names(repo, revs, no_renames=False, fail_msg=None):
     """File names of `git diff revs` as a list: `-z` (NUL-separated, never C-quoted, so names with `"`, `\\` or
     control characters survive) and `core.quotePath=false`. Exit 3 when git fails, with `fail_msg` when given."""
@@ -4051,9 +4092,6 @@ def pr_task(n, slug, head, base, tier, info, files, excluded, names, rubric, dif
     )
 
 
-DELTA_TRUNCATED = "[full PR change truncated at the cap; read the file for the rest]"
-
-
 def pr_cap_exit(files, parts, total, subject="PR diff"):
     """Refuse an oversized diff: print the file groups (top folder, chars) and exit 2, no model call."""
     groups = {}
@@ -4069,17 +4107,11 @@ def pr_cap_exit(files, parts, total, subject="PR diff"):
     raise SystemExit(2)
 
 
-def truncate_delta_diff(fix_block, rest, cap=REVIEW_DIFF_CAP):
-    """D7: the fix block stays first and whole; the full-PR-change text after it is cut so the whole diff fits the
-    cap, and the cut is marked on its own line."""
-    marker = f"\n{DELTA_TRUNCATED}\n"
-    budget = max(0, cap - len(fix_block) - len(marker))
-    return fix_block + rest[:budget] + marker
-
-
 def pr_covering_reviews(root):
-    """Every clean recorded review across the run root that stored a `covered` blob map and `cover_tier`
-    (phase reviews and clean PR reviews): the entry dicts covered_hits reads (reviewer, cover_tier, covered)."""
+    """Every recorded review across the run root that carries PR-reuse credit: clean reviews and FIX/BLOCK PR
+    reviews, with their `covered` and `flagged` maps. An entry is returned when it stored a `covered` blob map
+    with `cover_tier` (phase reviews and clean PR reviews, read by covered_hits) or a `flagged` dict (the files a
+    FIX/BLOCK PR review saw but did not clear, read by pr_review_reuse)."""
     out = []
     for meta_path in sorted(Path(root).glob("*/meta.json")):
         try:
@@ -4087,22 +4119,27 @@ def pr_covering_reviews(root):
         except (OSError, ValueError):
             continue
         for rev in meta.get("reviews") or []:
-            if isinstance(rev, dict) and isinstance(rev.get("covered"), dict) \
-                    and isinstance(rev.get("cover_tier"), int):
+            if isinstance(rev, dict) and ((isinstance(rev.get("covered"), dict)
+                    and isinstance(rev.get("cover_tier"), int)) or isinstance(rev.get("flagged"), dict)):
                 out.append(rev)
     return out
 
 
 def pr_review_reuse(args, repo, root, n, slug, base, head, tier, files):
     """PR content reuse (Phase 13b): suppress or narrow a full PR review when the files' head blobs are already
-    cleared at tier >= this review's tier by a recorded review (a phase run or a clean PR review anywhere in the
-    run root). Returns ("done", 0) (COVERED printed, a suppression review recorded at `head` so --pr-status
+    cleared at tier >= this review's tier by a recorded review anywhere in the run root (a phase run, a clean PR
+    review, or a FIX/BLOCK PR review for its finding-free files). A file any review flagged at its current blob is
+    always reviewed. Returns ("done", 0) (COVERED printed, a suppression review recorded at `head` so --pr-status
     reports the gate met), ("narrow", uncovered) or ("full", files). --force-review returns ("full", files)."""
     if getattr(args, "force_review", False):
         return "full", files
     want = TIER_RANK[tier]
     cur = blob_shas_at(repo, head, files)
-    hits = covered_hits(pr_covering_reviews(root), repo, files, want, cur=cur)
+    covering = pr_covering_reviews(root)
+    hits = covered_hits(covering, repo, files, want, cur=cur)
+    for f in list(hits):                                  # a file flagged by any review at its current content is never credited
+        if any(isinstance(e.get("flagged"), dict) and e["flagged"].get(f) == cur.get(f) for e in covering):
+            del hits[f]
     reused = [f for f in files if f in hits]
     uncovered = [f for f in files if f not in hits]
     if not reused:
@@ -4160,7 +4197,7 @@ def cmd_review_pr(args, target, conf):
             die("no files left after filters (check --files/--exclude)")
         parts = pr_diff(repo, base, ref, files)
         diff = "".join(parts[f] for f in files)
-        since, delta_files = None, []
+        since, delta_files, is_light = None, [], False
         if args.delta:
             heads = pr_reviews_by_head(root, n)
             trees, cache = {}, {}
@@ -4180,40 +4217,47 @@ def cmd_review_pr(args, target, conf):
             if h0_state["status"] == "OPEN" and not h0_state["basis"]:   # D10: no reviewed basis, no delta
                 die(f"delta review not sufficient for PR {n}: the open head {str(h0)[:8]} has no reviewed basis; "
                     f"run a full review", code=2)
-            changed, unreferenced = delta_sufficiency(root, repo, n, h0, head)
+            changed, rewritten = delta_changes(repo, h0, head)
             if not changed:
                 die(f"nothing changed since {str(h0)[:8]}", code=2)
-            if unreferenced:
-                die(f"delta review not sufficient for PR {n}: {', '.join(unreferenced)} changed since "
-                    f"{str(h0)[:8]} and no finding references them; run a full review", code=2)
+            if rewritten:                              # only a rewrite refuses the delta (before any model call)
+                die(f"delta review not sufficient for PR {n}: "
+                    + "; ".join(f"{p} rewritten since {str(h0)[:8]} ({a}+/{d}- of {k} lines)"
+                                for p, a, d, k in rewritten)
+                    + "; run a full review", code=2)
+            light = [f for f in changed if light_file(repo, h0, head, f)]
+            tree_h0 = _tree_paths(repo, h0, trees)
             if h0_state["status"] == "OPEN":           # D3(2): fix commits must touch the open review's files
                 if h0_state.get("open_unknown"):
                     die(f"delta review not sufficient for PR {n}: the open review at {str(h0)[:8]} records no "
                         f"finding paths; run a full review", code=2)
                 touched = set(changed)
-                tree_h0 = _tree_paths(repo, h0, trees)
-                untouched = [f for f in h0_state.get("open_files") or []
+                open_files = h0_state.get("open_files") or []
+                untouched = [f for f in open_files
                              if not _touched(repo, h0, f, touched, tree_h0)]   # D9/D10: tree at H0 decides
                 if untouched:
                     die(f"delta review not sufficient for PR {n}: open findings at {str(h0)[:8]} on "
                         f"{', '.join(untouched)} are not touched since; fix them or run a full review", code=2)
+                unnamed = [f for f in changed if f not in light
+                           and not any(_touched(repo, h0, p, {f}, tree_h0) for p in open_files)]
+                if unnamed:
+                    print(f"note: no open finding names {', '.join(unnamed)}; batch NOTE fixes in one final commit")
+            elif changed and all(f in light for f in changed):   # a reviewed head + a cosmetics-only fix -> low
+                if TIER_RANK[tier] > TIER_RANK["low"]:
+                    print(f"note: tier lowered to low: the fix changes only tests, docs or comments "
+                          f"({', '.join(changed)})")
+                tier, is_light = "low", True
             since, delta_files = h0, changed
             files, excluded = changed, []
-            parts = pr_diff(repo, base, ref, changed)
-            fix_res = run_git(["--literal-pathspecs", "diff", "--no-color", str(h0), str(head), "--", *changed],
-                              repo, timeout=PR_TIMEOUT)
-            if fix_res.returncode != 0:
-                die(f"git diff {str(h0)[:8]} {str(head)[:8]} failed: {fix_res.stderr.strip()}", code=3)
-            fix_block = (f"Changed since the last reviewed head {str(h0)[:8]} (the fix commits; the review of "
-                         f"that head stands for everything else):\n{fix_res.stdout}")
-            if len(fix_block) > REVIEW_DIFF_CAP:       # D7: a fix block over the cap refuses the delta
+            fix_block = (f"Changed since the last reviewed head {str(h0)[:8]} (the fix commits with the touched "
+                         f"functions as context; the review of that head stands for everything else):\n"
+                         + fix_block_text(repo, root, h0, head, changed))
+            if len(fix_block) > REVIEW_DIFF_CAP:       # a fix diff over the cap refuses the delta
                 die(f"fix diff since {str(h0)[:8]} is {len(fix_block):,} chars, over the {REVIEW_DIFF_CAP:,} cap; "
                     f"run a full review", code=2)
-            fix_name = delta_part_name(changed, h0)
-            parts[fix_name] = fix_block                # D7/D9: the fix block is its own part, placed first
-            diff = "".join(parts[f] for f in [fix_name] + changed)
-            if len(diff) > REVIEW_DIFF_CAP:            # D7: never refuse a delta for size; cut the change after
-                diff = truncate_delta_diff(fix_block, "".join(parts[f] for f in changed))
+            base_sha = git(repo, "rev-parse", base, timeout=PR_TIMEOUT).strip()
+            diff = fix_block + (f"Full PR change of a file, when the function context is not enough: "
+                                f"git diff {base_sha}...{head} -- <file>\n")
         if not since:                                  # Phase 13b: content reuse for a full PR review
             status, data = pr_review_reuse(args, repo, root, n, slug, base_branch, head, tier, files)
             if status == "done":
@@ -4237,13 +4281,15 @@ def cmd_review_pr(args, target, conf):
                            ledger=ledger, delta=delta_line, notes=notes)
             rc = write_pr_packet(root, n, slug, base_branch, head, tier, files, excluded, names, task,
                                  tag=("delta-packet" if since else "packet"), since=since,
-                                 delta_files=delta_files)
+                                 delta_files=delta_files, light=is_light)
         else:
             res, executor, model, binary = resolve_review_model(args, conf, target)
             run_dir = pr_run_dir(root, n, head, f"delta-{model}" if since else (model or "review"))
             meta = pr_meta(n, slug, base_branch, head, files, excluded, names, tier)
             if since:
                 meta["since"], meta["delta_files"] = since, delta_files
+            if is_light:
+                meta["light"] = True
             meta["run_id"] = run_dir.name
             meta_path = run_dir / "meta.json"
             meta_path.write_text(json.dumps(meta, indent=1))
@@ -4272,12 +4318,14 @@ def cmd_review_pr(args, target, conf):
 
 
 def write_pr_packet(root, n, slug, base, head, tier, files, excluded, names, task, tag="packet",
-                    since=None, delta_files=None):
+                    since=None, delta_files=None, light=False):
     """Write the PR review prompt for a Claude reviewer subagent; no model is called here."""
     run_dir = pr_run_dir(root, n, head, tag)
     meta = pr_meta(n, slug, base, head, files, excluded, names, tier)
     if since:
         meta["since"], meta["delta_files"] = since, delta_files or []
+    if light:
+        meta["light"] = True
     meta["run_id"] = run_dir.name
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
     k = len(list(run_dir.glob("review-packet-*.md"))) + 1
@@ -4498,7 +4546,7 @@ def _head_state(root, n, head, depth, seen, repo, heads, trees, intermediate, ca
             reviewer = (rev.get("reviewer") or "").strip()
             open_revs.append((meta, reviewer, rev, info))
             open_list.append((reviewer, rev, info))
-    basis, via, tier = bool(full), None, None
+    basis, via, tier, light = bool(full), None, None, False
     if full:                                           # D2(a): full entries at this head, judged on their own set
         tier = _deciding_tier(kept_full)
     else:                                              # D2(b): deltas only; the newest delta decides
@@ -4509,6 +4557,8 @@ def _head_state(root, n, head, depth, seen, repo, heads, trees, intermediate, ca
                                   cache=cache, active=active)
             if ancestor["status"] == "REVIEWED":
                 basis, via = True, h0
+                if meta.get("light"):                  # a light fix ran at low; the reviewed tier carries forward
+                    tier, light = ancestor["tier"], True
             elif ancestor["status"] == "OPEN" and ancestor["basis"] and ancestor["open_files"] \
                     and not ancestor["open_unknown"] \
                     and all(_touched(repo, h0, f, set(meta.get("delta_files") or []),
@@ -4517,30 +4567,237 @@ def _head_state(root, n, head, depth, seen, repo, heads, trees, intermediate, ca
                 basis, via = True, h0
         if basis and intermediate:                     # D10: an open head skipped in between reopens the gate
             if _intermediate_open(root, repo, n, h0, head, heads, trees, cache, active):
-                basis, via = False, None
+                basis, via, light = False, None, False
     if open_revs:                                      # any open review among either set keeps the gate shut
         open_files, open_unknown = _open_paths(root, n, open_revs)
         return {"status": "OPEN", "tier": tier, "via": via, "open": open_list,
                 "basis": basis, "open_files": open_files, "open_unknown": open_unknown}
     if basis:
         return {"status": "REVIEWED", "tier": tier, "via": via, "open": [],
-                "basis": True, "open_files": [], "open_unknown": False}
+                "basis": True, "open_files": [], "open_unknown": False, "light": light}
     return {"status": "UNREVIEWED", "tier": tier, "via": None, "open": [],
             "basis": False, "open_files": [], "open_unknown": False}
 
 
-def delta_sufficiency(root, repo, n, h0, head):
-    """D3/D6: (files changed since h0, those among them that no ledger finding of PR n references). Renames list
-    both paths (`--no-renames`), non-ASCII paths stay verbatim (`core.quotePath=false`, `-z`), and a ledger path p
-    references a changed file f when p == f, p == "./" + f, or p is "a/"/"b/" + f."""
+def blob_text(repo, rev, path):
+    """The UTF-8 text of `<rev>:<path>` via `git cat-file blob` (bytes). None when git fails (missing path,
+    bad rev) or the bytes are not valid UTF-8. The path lives inside the `<rev>:<path>` object name, so a leading
+    dash or spaces are literal, never options."""
+    try:
+        res = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", f"{rev}:{path}"],
+                             capture_output=True, timeout=PR_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    try:
+        return res.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def strip_c_comments(text):
+    """C/C++ source with comments removed and whitespace normalized, or None when it cannot be parsed (an
+    unterminated `/* */` or string/char literal, a `//` line continued with a backslash, a raw string `R"..."`,
+    a trigraph, a lone CR, or a `'` that cannot open a char literal). String, char and header-name literals are
+    copied verbatim (so a `//` or `/*` inside them is kept, and whitespace inside a literal is never normalized:
+    each whole literal is held out as a `\\0` placeholder and restored at the end). Preprocessor `<...>` header
+    names are found by the scan itself (a comment before `#`, a block comment inside the directive, or a C++20
+    `import` cannot hide them), and the candidate is a superset of real header names, refused on any quote or
+    comment opener inside it."""
+    if "\0" in text or re.search(r"\?\?[=/'()!<>-]", text) or re.search(r"\r(?!\n)", text) \
+            or re.search(r"\\[ \t\f\v]+\r?\n", text):
+        return None                                    # placeholder clash, a trigraph, a lone CR, or a ws line splice
+    text = re.sub(r"\\\r?\n", "", text)                # translation phase 2: splice continued lines
+    out, literals = [], []
+    i, nlen = 0, len(text)
+    directive = False                                  # inside a preprocessor line (header names: <...> not operators)
+    quote_open = " \t\n\f\v" + "()[]{},;=:?!~&|^<>%*/#"   # chars after which a `'` opens a char literal
+    while i < nlen:
+        ch = text[i]
+        if ch == "/" and i + 1 < nlen and text[i + 1] == "/":
+            j = i + 2
+            while j < nlen and text[j] != "\n":
+                j += 1
+            if text[i:j].rstrip().endswith("\\"):       # a line-continued // comment (backslash + trailing ws): give up
+                return None
+            i = j
+            continue
+        if ch == "/" and i + 1 < nlen and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            if end == -1:
+                return None
+            out.append(" ")
+            i = end + 2
+            continue
+        if directive and ch == "<":                    # a header name (superset): hold it out verbatim
+            j = i + 1
+            while j < nlen and text[j] not in ">\n":
+                j += 1
+            cand = text[i:j + 1] if j < nlen and text[j] == ">" else text[i:j]
+            if '"' in cand or "'" in cand or "//" in cand or "/*" in cand:
+                return None                            # a quote or comment opener in the candidate
+            literals.append(cand)
+            out.append("\0")
+            i += len(cand)
+            continue
+        if ch in "\"'":
+            if ch == "'":
+                prev = text[i - 1] if i > 0 else ""
+                prev2 = text[i - 2] if i > 1 else ""
+                if not (prev == "" or prev in quote_open
+                        or (prev in "+-" and prev2 not in ("e", "E", "p", "P"))):
+                    return None                        # a `'` that cannot open a char literal (digit separator, prefix)
+            if ch == "\"" and i > 0 and text[i - 1] == "R":   # a raw string literal: give up
+                return None
+            lit = [ch]
+            j = i + 1
+            closed = False
+            while j < nlen:
+                c = text[j]
+                if c == "\\":
+                    if j + 1 >= nlen:
+                        return None
+                    lit.append(text[j:j + 2])
+                    j += 2
+                    continue
+                if c == "\n":
+                    return None
+                lit.append(c)
+                j += 1
+                if c == ch:
+                    closed = True
+                    break
+            if not closed:
+                return None
+            literals.append("".join(lit))
+            out.append("\0")
+            i = j
+            continue
+        if ch == "\n":                                 # a newline outside comments/literals ends the directive
+            directive = False
+        elif ch == "#":
+            directive = True
+        elif ch == "%" and i + 1 < nlen and text[i + 1] == ":":   # the %: digraph for #
+            directive = True
+        elif ch == "i" and text[i:i + 6] == "import" \
+                and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")) \
+                and (i + 6 >= nlen or not (text[i + 6].isalnum() or text[i + 6] == "_")):
+            directive = True                           # the C++20 `import` keyword (header unit)
+        out.append(ch)
+        i += 1
+    lines = [" ".join(line.split()) for line in "".join(out).split("\n")]
+    normalized = "\n".join(line for line in lines if line)
+    it = iter(literals)
+    return "".join(next(it) if c == "\0" else c for c in normalized)
+
+
+def py_code_tokens(text):
+    """The Python tokens of `text` dropping COMMENT and NL tokens, or None on a tokenize/syntax error. Two COMMENT
+    kinds that change how the file runs are kept as (type, string): a `#!` interpreter line on line 1, and a PEP 263
+    encoding cookie (`coding[:=]`) on line 1 or 2."""
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError, ValueError):
+        return None
+    kept = []
+    for t in toks:
+        if t.type == tokenize.NL:
+            continue
+        if t.type == tokenize.COMMENT:
+            row = t.start[0]
+            if (row == 1 and t.string.startswith("#!")) or \
+                    (row in (1, 2) and re.search(r"coding[:=]", t.string)):
+                kept.append((t.type, t.string))
+            continue
+        kept.append((t.type, t.string))
+    return kept
+
+
+def code_equal_ignoring_comments(path, old, new):
+    """True when `old` and `new` are the same code once comments are ignored. Python (.py) uses the token
+    stream, C/C++ the comment stripper; any other language is code (False, never equal)."""
+    low = path.lower()
+    if low.endswith(".py"):
+        a, b = py_code_tokens(old), py_code_tokens(new)
+    elif low.endswith(C_SUFFIXES):
+        a, b = strip_c_comments(old), strip_c_comments(new)
+    else:
+        return False
+    return a is not None and b is not None and a == b
+
+
+def light_file(repo, h0, head, path):
+    """True when a change to `path` is cosmetic: a test or spec path, a doc suffix, or code equal once comments are
+    ignored (both blobs must read as UTF-8 and parse). Anything else is code."""
+    if LIGHT_TEST_PATH.search(path) or path.lower().endswith(DOC_SUFFIXES):
+        return True
+    if not (path.lower().endswith(".py") or path.lower().endswith(C_SUFFIXES)):
+        return False
+    old, new = blob_text(repo, h0, path), blob_text(repo, head, path)
+    if old is None or new is None:
+        return False
+    return code_equal_ignoring_comments(path, old, new)
+
+
+def delta_changes(repo, h0, head):
+    """(changed, rewritten): `changed` is every file changed since h0 (renames list both paths, non-ASCII verbatim);
+    `rewritten` is [(path, added, deleted, lines_at_h0)] for a file that is largely rewritten (>= REWRITE_MIN_LINES
+    changed lines and over half of its lines at h0 touched). Binary files and files whose blob is missing or not
+    UTF-8 at either end are never rewritten (skipped)."""
     changed = diff_names(repo, [str(h0), str(head)], no_renames=True,
                          fail_msg=f"last reviewed head {str(h0)[:8]} not available locally; run a full review")
-    known = [f.get("path") for f in load_ledger(root, f"pr{n}").get("findings") or [] if f.get("path")]
+    res = run_git(["-c", "core.quotePath=false", "diff", "--numstat", "-z", "--no-renames", str(h0), str(head)],
+                  repo, timeout=PR_TIMEOUT)
+    if res.returncode != 0:                            # a failed numstat must never fail open to []
+        die(f"git diff --numstat {str(h0)[:8]} {str(head)[:8]} failed: {res.stderr.strip()}", code=3)
+    rewritten = []
+    for rec in res.stdout.split("\0"):
+        if not rec:
+            continue
+        parts = rec.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added_s, deleted_s, path = parts
+        if added_s == "-" or deleted_s == "-":         # binary
+            continue
+        text_h0 = blob_text(repo, h0, path)            # read each blob once per side
+        text_head = blob_text(repo, head, path)
+        if text_h0 is None or text_head is None:
+            continue
+        added, deleted = int(added_s), int(deleted_s)
+        lines_at_h0 = text_h0.count("\n") + (1 if text_h0 and not text_h0.endswith("\n") else 0)
+        if added + deleted >= REWRITE_MIN_LINES and 2 * max(added, deleted) > lines_at_h0:
+            rewritten.append((path, added, deleted, lines_at_h0))
+    return changed, rewritten
 
-    def referenced(f):
-        return any(p == f or p == "./" + f or (p[:2] in ("a/", "b/") and p[2:] == f) for p in known)
 
-    return changed, [f for f in changed if not referenced(f)]
+def fix_block_text(repo, root, h0, head, changed):
+    """The fix diff (h0..head) of every changed file with the touched functions as context (`-W`, driven by the
+    function-context gitattributes). A file whose `-W` diff is over FUNC_CONTEXT_CAP falls back to `-U10` plus a
+    marker line. When the joined total is over REVIEW_DIFF_CAP, one plain diff over all files (no context) replaces it."""
+    attrs = str(Path(root) / "function-context.gitattributes")
+    Path(attrs).write_text(FUNC_CONTEXT_ATTRS)
+
+    def diff(flags, files):
+        res = run_git(["-c", f"core.attributesFile={attrs}", "--literal-pathspecs", "diff", "--no-color",
+                       *flags, str(h0), str(head), "--", *files], repo, timeout=PR_TIMEOUT)
+        if res.returncode != 0:
+            die(f"git diff {str(h0)[:8]} {str(head)[:8]} failed: {res.stderr.strip()}", code=3)
+        return res.stdout
+
+    pieces = []
+    for f in changed:
+        w = diff(["-W"], [f])                           # the function-context diff decides the cap, never the blob
+        if len(w) > FUNC_CONTEXT_CAP:
+            pieces.append(diff(["-U10"], [f])
+                          + f"[function context of {f} over 12,000 chars; 10 lines of context shown]\n")
+        else:
+            pieces.append(w)
+    joined = "".join(pieces)
+    if len(joined) > REVIEW_DIFF_CAP:
+        return diff([], changed)
+    return joined
 
 
 def review_base(root, repo, n, head, heads=None, states=None):
@@ -4638,8 +4895,9 @@ def cmd_pr_status(args):
             return 0
         if state["status"] == "REVIEWED":
             if state["via"]:
+                light = "; light fix at low" if state.get("light") else ""
                 print(f"CURRENT HEAD {current[:8]}: REVIEWED at {state['tier']} "
-                      f"(via delta from {str(state['via'])[:8]})")
+                      f"(via delta from {str(state['via'])[:8]}{light})")
             else:
                 print(f"CURRENT HEAD {current[:8]}: REVIEWED at {state['tier']}")
             return 0
@@ -4664,8 +4922,9 @@ def cmd_pr_status(args):
                 print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (head moved; last reviewed {str(h0)[:8]} has open "
                       f"findings without a reviewed basis: full review needed)")
                 return 0
-            changed, unreferenced = delta_sufficiency(root, repo, n, h0, current)
+            changed, rewritten = delta_changes(repo, h0, current)
             changed_s = ", ".join(changed) or "-"
+            rewritten_s = ", ".join(f"{p} ({a}+/{d}- of {k} lines)" for p, a, d, k in rewritten)
             if state_h0["status"] == "OPEN":
                 open_files = state_h0.get("open_files") or []
                 touched = set(changed)
@@ -4674,14 +4933,14 @@ def cmd_pr_status(args):
                 if state_h0.get("open_unknown"):        # D5: no path to check, no delta
                     tail = "full review needed (open review without finding paths)"
                 else:
-                    why = [w for w in (f"unreferenced: {', '.join(unreferenced)}" if unreferenced else "",
+                    why = [w for w in (f"rewritten: {rewritten_s}" if rewritten else "",
                                        f"open findings not touched: {', '.join(untouched)}" if untouched else "") if w]
                     tail = f"full review needed ({'; '.join(why)})" if why else "delta review possible"
                 print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (head moved; last reviewed {str(h0)[:8]} "
                       f"(findings open on: {', '.join(open_files)}); changed since: {changed_s}; {tail})")
-            elif unreferenced:
+            elif rewritten:
                 print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (head moved; last reviewed {str(h0)[:8]}; "
-                      f"changed since: {changed_s}; full review needed (unreferenced: {', '.join(unreferenced)}))")
+                      f"changed since: {changed_s}; full review needed (rewritten: {rewritten_s}))")
             else:
                 print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (head moved; last reviewed {str(h0)[:8]}; "
                       f"changed since: {changed_s}; delta review possible)")

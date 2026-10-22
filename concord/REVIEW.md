@@ -8,10 +8,10 @@ lines), whose fix is a TODO, or whose fix only deletes code becomes `[NOTE] ... 
 Since 2026-10-19 every reviewer answers with one REVIEW-JSON block (REVIEW_TASK in concord.py): a BLOCKER/HIGH/MEDIUM
 needs a reproduction from a real input source or it becomes a NOTE, the dispatcher computes the verdict and renders the
 report, and the ticket's (or PR's) review ledger (finding ids, adjudications, decisions, assumptions) is binding for
-every later reviewer. After a fix commit a PR gets a delta review (`--review-pr N --delta`): the fix diff first,
-then the full PR change of the touched files, plus the ledger. The nearest reviewed ancestor head is the base,
-never skipped; when it has open findings the fix must touch their files. Any other shape (files no finding
-references, merged reviewed lineages, a rebuilt branch, a broken chain) needs a full review.
+every later reviewer. After a fix commit a PR gets a delta review (`--review-pr N --delta`): the fix diff with the
+touched functions as context, plus the ledger. The nearest reviewed ancestor head is the base,
+never skipped; when it has open findings the fix must touch their files. A file rewritten past half of
+its lines, merged reviewed lineages, a rebuilt branch or a broken chain needs a full review.
 
 ## any
 Grouped by the four expectations of the CHI '26 agent-behaviour taxonomy (2026-10-18). Before any finding, read the

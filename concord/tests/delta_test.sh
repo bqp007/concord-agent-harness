@@ -1,8 +1,8 @@
 #!/bin/bash
 # concord.py delta-review regression (2026-10-19, PLAN_kit-delta): after a fix commit, `--review-pr N --delta`
-# reviews only the fix (full PR change of the touched files + the fix diff + the ledger), and `--pr-status` carries
-# the evidence of the previously reviewed head forward when every file changed since is referenced by a ledger
-# finding; otherwise it asks for a full review. No network: fake gh, bare origin, fake qwen reviewer.
+# reviews only the fix (the fix diff with function context + the ledger), and `--pr-status` carries the evidence
+# of the previously reviewed head forward (2026-10-22, PLAN_kit-fixreview: whatever files the fix touches; only a
+# file rewritten past half of its lines needs a full review). No network: fake gh, bare origin, fake qwen reviewer.
 # Run: bash ~/.claude/concord/tests/delta_test.sh   (exit 0 = all passed).
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -102,10 +102,10 @@ has "CURRENT HEAD ${H3:0:8}: FINDINGS OPEN ($FL: FIX, 1 HIGH)" && ok "a delta re
 rec "$(basename "$D3")" "$FL"; st
 has "REVIEWED at high (via delta from ${H2:0:8})" && ok "clean follow-up on the delta head -> REVIEWED via the chain" || { bad "delta follow-up"; cat "$T/out.txt"; }
 push7 "printf 'q = 2\n' > b.py"; H4=$(head7)
+st; has "CURRENT HEAD ${H4:0:8}: UNREVIEWED (head moved; last reviewed ${H3:0:8}; changed since: b.py; delta review possible)" \
+  && ok "--pr-status: a fix touching a file no finding references still allows a delta" || { bad "unreferenced hint"; cat "$T/out.txt"; }
 FAKE_CLEAN=1 $DP --review-pr 7 --delta --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "delta review not sufficient" && has "b.py" && ok "fix touching a file no finding references: --delta refuses (exit 2) and names it" || { bad "unreferenced rc=$RC"; tail -3 "$T/out.txt"; }
-st; has "CURRENT HEAD ${H4:0:8}: UNREVIEWED (head moved; last reviewed ${H3:0:8}; changed since: b.py; full review needed (unreferenced: b.py))" \
-  && ok "--pr-status asks for a full review when the delta would not cover the change" || { bad "full needed hint"; cat "$T/out.txt"; }
+[ $RC -eq 0 ] && ok "fix touching a file no finding references: --delta runs" || { bad "unreferenced rc=$RC"; tail -3 "$T/out.txt"; }
 FAKE_CLEAN=1 $DP --review-pr 7 --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; st
 has "CURRENT HEAD ${H4:0:8}: REVIEWED at medium" && ! has "via delta" && ok "a full review at the new head is REVIEWED directly" || { bad "full after delta"; cat "$T/out.txt"; }
 $DP --review-pr 7 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
@@ -171,9 +171,9 @@ has "CURRENT HEAD ${P3:0:8}: REVIEWED at high" && ! has "via delta" && ok "clean
 
 echo "== renames list both paths"
 pushn 8 "git mv z.py y.py"; P4=$(headn 8); stn 8
-has "changed since: y.py, z.py; full review needed (unreferenced: y.py))" && ok "--no-renames: a rename lists the old and the new path" || { bad "rename"; cat "$T/out.txt"; }
+has "changed since: y.py, z.py; delta review possible)" && ok "--no-renames: a rename lists the old and the new path" || { bad "rename"; cat "$T/out.txt"; }
 
-echo "== the fix block comes first and is never cut"
+echo "== the fix block is the whole delta context; a rewrite needs a full review"
 newpr 9 "python3 $T/gen.py; printf 's = 1\\n' > s.py"; Q0=$(headn 9)
 FAKE_PATH=big.py $DP --review-pr 9 --exclude big.py --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1; RD="$RUNS/$(rid)"
 rec "$(basename "$RD")" "$FL"; stn 9
@@ -184,16 +184,16 @@ DR=$(sed -n 's/^DRY RUN PR REVIEW \([^:]*\):.*/\1/p' "$T/out.txt" | head -1)
 SP=$(grep -l "^Changed since the last reviewed head ${Q0:0:8}" "$RUNS/$DR/prompt.txt" 2> /dev/null | head -1)
 if [ $RC -eq 0 ] && [ -n "$SP" ] && grep -q "^+v_1999 = 0$" "$SP"; then
   LC=$(grep -n "^Changed since the last reviewed head" "$SP" | head -1 | cut -d: -f1); LD=$(grep -n "^diff --git a/big.py" "$SP" | head -1 | cut -d: -f1)
-  [ "$LC" -lt "$LD" ] && grep -q "^\[full PR change truncated at the cap; read the file for the rest\]$" "$SP" \
-    && ok "delta over the cap: one prompt, fix block first and whole, full-change context truncated" || bad "fix block after the full change or no truncation line ($LC >= $LD)"
+  [ "$LC" -lt "$LD" ] && ! grep -q "truncated at the cap" "$SP" && [ "$(grep -c '^diff --git a/big.py' "$SP")" = 1 ] \
+    && ok "big PR file: one prompt, the fix block alone, no full-change context" || bad "full-change context in the delta prompt ($LC >= $LD)"
 else bad "fix block lost over the cap rc=$RC prompt=${SP:-none}"; tail -3 "$T/out.txt"; fi
 $DP --review-pr 9 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-[ $RC -eq 0 ] && [ -f "$PK" ] && grep -q "^+v_1999 = 0$" "$PK" && grep -q "^\[full PR change truncated at the cap; read the file for the rest\]$" "$PK" \
-  && ok "--delta --packet over the cap: packet written, fix block whole, context truncated" || { bad "delta packet cap rc=$RC"; tail -3 "$T/out.txt"; }
+[ $RC -eq 0 ] && [ -f "$PK" ] && grep -q "^+v_1999 = 0$" "$PK" && ! grep -q "truncated at the cap" "$PK" \
+  && ok "--delta --packet on a big PR file: packet written, fix block whole" || { bad "delta packet cap rc=$RC"; tail -3 "$T/out.txt"; }
 pushn 9 "sed -i.bak 's/x/y/g' big.py && rm big.py.bak"
 FAKE_CLEAN=1 $DP --review-pr 9 --delta --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "fix diff since ${Q0:0:8} is" && has "cap; run a full review" && ok "fix block over the cap: --delta refuses (exit 2)" || { bad "huge fix rc=$RC"; tail -3 "$T/out.txt"; }
+[ $RC -eq 2 ] && has "big.py rewritten since ${Q0:0:8} (2000+/2000- of 2000 lines); run a full review" && ok "every line of big.py rewritten: --delta refuses (exit 2)" || { bad "rewrite rc=$RC"; tail -3 "$T/out.txt"; }
 
 echo "== ledger paths: non-ASCII names, a/ b/ prefixes, open review without paths"
 newpr 10 "printf 'e = 1\n' > é.py; printf 'w = 1\n' > w.py"; U0=$(headn 10)

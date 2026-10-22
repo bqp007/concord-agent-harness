@@ -111,6 +111,14 @@ packet "$H"; RC=$?
   && ok "the same phase once an opus55 (high) review exists: COVERED, no packet" \
   || { bad "high covers high rc=$RC pk='$(pk)'"; tail -3 "$T/out.txt"; }
 
+echo "== a phase review with findings stores no credit (partial credit is for PR reviews only)"
+run 1 "echo '# u' >> a.py; echo '# u' >> b.py"; U=$(rid)
+printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": 1, "problem": "wrong", "fix": "f", "repro": {"input": "x", "expected": "1", "actual": "2"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/fix.txt"
+FAKE_ACTIONS="cat $T/fix.txt" $DP --review "$U" --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
+[ "$(lastrev "$U" verdict)" = FIX ] && [ "$(lastrev "$U" covered)" = None ] && [ "$(lastrev "$U" flagged)" = None ] \
+  && ok "a flash phase review with a HIGH on a.py: no covered or flagged map" \
+  || { bad "phase FIX credit: verdict=$(lastrev "$U" verdict) covered=$(lastrev "$U" covered) flagged=$(lastrev "$U" flagged)"; tail -3 "$T/out.txt"; }
+
 echo "== --lint skips a Claude-model phase but still lints acceptance"
 C0=$(calls); $DP --lint 3 --plan PLAN_R.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$C0" ] && has "LINT SKIPPED: executor concord:implementer-opus48 is a Claude model" \
