@@ -13,8 +13,8 @@ Goal: frontier tokens only for planning and verification; cheap models write the
 - PR gate: no PR, own or others', is called ready, mergeable or put in a merge order before a PR review of its full diff at its risk tier on its current head (`concord.py --review-pr`, `--pr-status`). "Mergeable" on the hosting site is not a review.
 - Planner model: planning, test writing and verification run in this session on the strongest model available at high effort; a session on less → say so and ask before planning.
 - Tests first, written by the planner, never by the implementer; the implementer never edits test files. Acceptance must fail on the untouched code before an implementing phase (red run, checked by `concord.py`) unless the phase preserves behaviour, which then needs a before/after characterization.
-- Every FAIL verdict gets a cause: EXECUTOR, PLAN_GAP, TEST_DEFECT or FLAKY. Only EXECUTOR failures count as attempts; plan gaps and test defects are fixed at the plan or the tests.
-- Executors cannot ask questions: every ambiguity goes under "Open questions" in the plan and is settled by the user before approval.
+- Every FAIL verdict gets a cause: EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER or BLOCKED; a PASS whose review found a case the plan never specified carries SPEC_GAP and the gap becomes sub-phase N.1 on the kept diff. Only EXECUTOR failures count as attempts; plan gaps and test defects are fixed at the plan or the tests.
+- Settle every known ambiguity under "Open questions" before approval; an executor that still meets one stops with BLOCKED and its question, once per phase.
 - Never commit; the user reviews the diff and commits.
 - Token economy: auto-compact at a 400k window (`modelSettings.<model-id>.autoCompactWindow` in `~/.claude/settings.json`, see `settings.snippet.json`); after a compaction re-read the ticket's `PLAN_<ticket>.md` Outcome and Handoff blocks. Chat and agent prose: terse. Plan files, docs, commands, code, commit and PR text: full prose.
 - No bloat: every change to this file, the commands or Concord's files carries a line budget; `/concord:rules-review` retires rules that produced no change in a month.

@@ -36,7 +36,7 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 2. **Tests first.** The planner writes tests that fail on the current code. The dispatcher refuses to start an implementing phase whose acceptance already passes.
 3. **Delegate.** `concord.py deepseek-flash <phase>` runs the phase on a cheap model. On OpenCode, edits outside the phase's `Files:` are refused by the harness itself.
 4. **Verify.** The dispatcher re-runs the acceptance commands and writes an evidence report: changes in and out of scope, the red run, acceptance after the run, the budget. `concord.py --card` condenses it to one screen plus a verify packet, which a fresh verifier agent checks, so the planner's own context stays small. An independent reviewer reads the diff at the phase's risk tier: a cheap model for low risk, Opus 4.8 for medium, Opus 5.5 for high. A review already done at the same or a higher tier on unchanged files is reused, not repeated.
-5. **Record.** Every verdict carries a cause (EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER). Three executor failures stop a phase until you decide. `concord.py --stats` reports first-attempt rates, review adoption, rounds per phase and spend.
+5. **Record.** Every verdict carries a cause (EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER, BLOCKED; a PASS whose review found a case the plan never specified carries SPEC_GAP). Three executor failures stop a phase until you decide. `concord.py --stats` reports first-attempt rates, review adoption, rounds per phase and spend.
 6. **Commit.** You review the diff and commit. Concord never commits or pushes.
 
 [docs/WORKFLOW.md](docs/WORKFLOW.md) walks through one ticket from plan to commit.

@@ -12,7 +12,7 @@ Usage:
   concord.py --review RUN_ID|last --packet                                # prompt file for a Claude reviewer subagent (subscription)
   concord.py --review-record RUN_ID|last --reviewer NAME --file F         # store that reviewer's verdict on the run
   concord.py --close-round RUN_ID [--adopt F1,F2] [--wrong "F3=why"] [--decline "F4=why"] [--test "F1=tests/x::t"]
-              --verdict-result PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER] [--note TEXT]
+              --verdict-result PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED|SPEC_GAP] [--note TEXT]
               [--user-approved QUOTE]
                                               # adjudicate ids from any reviewer + record the verdict, one call
   concord.py --review-pr PR [MODEL] [--delta] [--repo DIR] [--files GLOBS] [--exclude GLOBS] [--checklist a,b]
@@ -24,7 +24,7 @@ Usage:
                                               # before a Claude implementer / planner run
   concord.py --end RUN_ID|last [--repo DIR]                                # after it: same report as a CLI run
   concord.py --abort RUN_ID|last [--repo DIR]
-  concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER] [--note TEXT]
+  concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED|SPEC_GAP] [--note TEXT]
               [--tokens N] [--user-approved QUOTE]
   concord.py --stats [--all] [--repo DIR]                                 # pass rates, time, tokens, reviewer adoption
   concord.py --resolve "MODEL WORDS"
@@ -78,7 +78,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -127,7 +127,13 @@ GUARDS_NOTE = ("guards: the contract and bash deny rules are advisory; Files: sc
 # Git metadata an executor must never touch (hooks run as the user on the next commit).
 GIT_INTERNAL_FILES = ("config", "info/exclude", "info/attributes")
 CHECK_TIMEOUT_S = 300          # per baseline / characterization command (executors.conf: check_timeout)
-CAUSES = ("EXECUTOR", "PLAN_GAP", "TEST_DEFECT", "FLAKY", "PROVIDER")
+CAUSES = ("EXECUTOR", "PLAN_GAP", "TEST_DEFECT", "FLAKY", "PROVIDER", "BLOCKED", "SPEC_GAP")
+PASS_CAUSES = ("SPEC_GAP",)
+CAUSE_CODE = {"EXECUTOR": "E", "PLAN_GAP": "P", "TEST_DEFECT": "T", "FLAKY": "F", "PROVIDER": "R",
+              "BLOCKED": "B"}
+STATUS_LINE = re.compile(r"^[\s*_\x60>#-]*STATUS:[\s*_\x60]*(PASS|FAIL|BLOCKED)\b(?![\s*_\x60]*\|)", re.M)
+QUESTIONS_LINE = re.compile(r"^[\s*_\x60>#-]*QUESTIONS:[\s*_\x60]*(.*)$")
+REPORT_FIELD = re.compile(r"^[\s*_\x60>#-]*[A-Z][A-Z ]+:")
 # CLAUDE.md caps a failing phase at three EXECUTOR attempts and binds the reviewer to the phase's risk tier.
 # The two guards below enforce both here; the user's go-ahead is recorded with --user-approved.
 MAX_EXECUTOR_ATTEMPTS = 3
@@ -169,6 +175,28 @@ def provider_refusals(text):
     """[(label, advice)] for every known provider refusal found in executor output (case-insensitive)."""
     low = (text or "").lower()
     return [(label, advice) for needle, label, advice in PROVIDER_REFUSALS if needle.lower() in low]
+
+
+def executor_blocked(log_text):
+    """The executor's blocking question when the last STATUS line says BLOCKED, else None (ANSI already stripped)."""
+    matches = list(STATUS_LINE.finditer(log_text or ""))
+    if not matches or matches[-1].group(1) != "BLOCKED":
+        return None
+    lines = (log_text or "")[matches[-1].start():].splitlines()[1:]    # the lines after the STATUS line
+    question, found = "", False
+    for line in lines:
+        m = QUESTIONS_LINE.match(line) if not found else None
+        if m:
+            question, found = m.group(1), True
+        elif found and (not line.strip() or REPORT_FIELD.match(line)):
+            break
+        elif found:
+            question += " " + line
+    question = " ".join(question.split())
+    if re.sub(r"[^a-z]", "", question.lower()) in ("", "none"): question = "(no question given)"
+    return question[:297] + "..." if len(question) > 300 else question
+
+
 # Behaviour taxonomy for EXECUTOR failures (condensed from the CHI EA '26 review taxonomy):
 # context = did not read code/docs/examples or misread intent; scope = left the task;
 # validate = did not check its work; incremental = big-bang change; standards = broke style/conventions/robustness.
@@ -212,10 +240,12 @@ FILES: completeness of the `Files:` list. Follow the callers, callees, configs a
   Write "complete" if the list is right.
 INPUTS: completeness of the phase's Inputs field: every input source with its classes (valid kinds, malformed,
   missing, failures the platform documents) and the expected behaviour per class; name any class the code handles
-  or must handle that is missing, and any listed class no acceptance command exercises. Write "complete", or
-  "no Inputs field" when the phase has none.
+  or must handle that is missing, and any listed class no acceptance command exercises.
+  Write "complete", "no Inputs field" when the phase has none, or "not required (Risk: low)" for a Risk: low phase without one.
 RISKS: places where the steps conflict with the current code, or where the acceptance commands
   would not detect a wrong implementation. Write "none" if there are none.
+GAPS: the "gap checklist" items (if the task has one) that this phase touches but does not settle, one per
+  line as "[<class>] <question>: <the field that should settle it>". Write "none" when there is no checklist or nothing is open.
 VERDICT: READY | NEEDS ANSWERS
 """
 
@@ -295,7 +325,7 @@ VERIFY-JSON
  "read": ["cart.py:1-20"]}
 END-VERIFY-JSON
 
-"verdict" is PASS or FAIL; "cause" is null for PASS, else one of EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY.
+"verdict" is PASS or FAIL; "cause" is null for PASS, else one of EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, BLOCKED.
 """
 
 
@@ -507,20 +537,41 @@ def file_hash(path):
 
 # ---------- plan parsing ----------
 
-PHASE_HEAD = re.compile(r"^(#{1,6})\s*Phase\s+(\d+)\b.*$", re.I | re.M)
+PHASE_HEAD = re.compile(r"^(#{1,6})\s*Phase\s+(\d+(?:\.\d+)*)\b.*$", re.I | re.M)
+PHASE_WORD = re.compile(r"(\d+)(?:\.([1-9]\d*))?")
 FIELD_NAMES = ("Executor|Purpose|Risk|Files|Context|Interfaces|Inputs|Steps|Examples?|Edge cases|Decisions|"
                "Budget|Baseline|Characterize|Acceptance|Out of scope")
 FIELD = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(" + FIELD_NAMES + r")\s*\**\s*:", re.I)
 
 
+def phase_key(value):
+    """2 for a whole phase ("02" gives 2), "N.k" for a sub-phase, None for anything else."""
+    text = str(value).strip()
+    m = PHASE_WORD.fullmatch(text)
+    if not m:
+        return None
+    return int(m.group(1)) if m.group(2) is None else f"{int(m.group(1))}.{int(m.group(2))}"
+
+
+def phase_arg(text):
+    """argparse type for --lint and --begin."""
+    key = phase_key(text)
+    if key is None:
+        raise argparse.ArgumentTypeError(f"invalid phase {text!r}: use a number such as 2, or 2.1 for a sub-phase")
+    return key
+
+
 def extract_phase(plan_text, number):
-    heads = list(PHASE_HEAD.finditer(plan_text))
+    heads = [h for h in PHASE_HEAD.finditer(plan_text) if phase_key(h.group(2)) is not None]
+    wanted = phase_key(number)
     for head in heads:
-        if int(head.group(2)) == number:
+        if phase_key(head.group(2)) == wanted:
             level = len(head.group(1))
             nxt = re.compile(r"^#{1,%d}\s" % level, re.M).search(plan_text, head.end())
-            return plan_text[head.start():nxt.start() if nxt else len(plan_text)].strip()
-    found = ", ".join(h.group(2) for h in heads) or "none"
+            later = next((h for h in heads if h.start() > head.end()), None)
+            stops = [p for p in (nxt.start() if nxt else None, later.start() if later else None) if p]
+            return plan_text[head.start():min(stops) if stops else len(plan_text)].strip()
+    found = ", ".join(str(phase_key(h.group(2))) for h in heads) or "none"
     die(f"phase {number} not found in plan (phases found: {found})")
 
 
@@ -660,9 +711,9 @@ def parse_budget(phase_text):
 
 MAP_HEAD = re.compile(r"^(#{1,6})\s*Map\b.*$", re.I | re.M)
 MAP_SUB = re.compile(r"^#{1,6}\s*(Intent|Structure|Work)\b", re.I)
-MAP_BULLET = re.compile(r"^[\s>]*[-*]\s*([ISP]\d+)\b(.*)$")
-MAP_ID = re.compile(r"[ISP]\d+")
-PHASE_ID = re.compile(r"\((P\d+)\b[^)]*\)")
+MAP_BULLET = re.compile(r"^[\s>]*[-*]\s*([ISP]\d+(?:\.\d+)?)\b(.*)$")
+MAP_ID = re.compile(r"[ISP]\d+(?:\.\d+)?")
+PHASE_ID = re.compile(r"\((P\d+(?:\.\d+)?)\b[^)]*\)")
 MAP_CAPS = {"intent": 6, "structure": 8, "work": 8}
 
 
@@ -709,12 +760,13 @@ def parse_map(plan_text):
 
 
 def phase_ids(plan_text):
-    """{work-id: phase-number} from phase headings that carry `(Pn <- ...)`."""
+    """{work-id: phase-key} from phase headings that carry `(Pn <- ...)`."""
     out = {}
     for head in PHASE_HEAD.finditer(plan_text):
         m = PHASE_ID.search(head.group(0))
-        if m:
-            out[m.group(1)] = int(head.group(2))
+        key = phase_key(head.group(2))
+        if m and key is not None:
+            out[m.group(1)] = key
     return out
 
 
@@ -723,7 +775,7 @@ def map_questions(plan_text):
     out = []
     for m in re.finditer(r"(?m)^[\s>]*[-*]\s*(Q\d+)\b([^\n]*)", plan_text):
         rest = m.group(2).strip()
-        tm = re.match(r"->\s*([ISP]\d+)\s*(.*)", rest)
+        tm = re.match(r"->\s*([ISP]\d+(?:\.\d+)?)\s*(.*)", rest)
         if tm:
             out.append({"id": m.group(1), "target": tm.group(1), "text": tm.group(2).strip()})
         else:
@@ -784,8 +836,9 @@ def map_lint(plan_text):
     structures = {n["id"] for n in m["structure"]}
     struct_by_id = {n["id"]: n for n in m["structure"]}
     for kind, cap in MAP_CAPS.items():
-        if len(m[kind]) > cap:
-            out.append(f"cap exceeded: {kind.capitalize()} has {len(m[kind])} items (max {cap})")
+        n = (sum(1 for x in m[kind] if "." not in x["id"]) if kind == "work" else len(m[kind]))
+        if n > cap:
+            out.append(f"cap exceeded: {kind.capitalize()} has {n} items (max {cap})")
     for n in m["structure"]:
         for p in n["parents"]:
             if p not in intents:
@@ -809,6 +862,8 @@ def map_lint(plan_text):
         if n["id"] not in served:
             out.append(f"intent with no work item: {n['id']}")
     for head in PHASE_HEAD.finditer(plan_text):
+        if phase_key(head.group(2)) is None:
+            continue
         if not PHASE_ID.search(head.group(0)):
             out.append(f"phase heading without an ID: Phase {head.group(2)}")
     return out
@@ -947,6 +1002,67 @@ def repo_notes(repo):
     if len(text) > NOTES_CAP_CHARS:
         text = text[:NOTES_CAP_CHARS] + "\n[notes truncated: keep repo-notes under 4000 characters]"
     return text
+
+
+GAP_LINE = re.compile(r"^\s*[-*]\s*\[([A-Za-z0-9][\w-]*)\]\s*(.+?)\s*\(([^,()]+),\s*(\d{4}-\d{2}-\d{2}),\s*"
+                      r"found:\s*(review|lint|blocked|verify)\s*(?:,\s*rule:\s*([^()]*?))?\s*\)\s*$", re.I)
+RULE_MARK = re.compile(r"rule:\s*[^\s)]", re.I)
+
+
+def read_gap_file(path):
+    """The gap log's text (one leading byte-order mark removed), or "" when it is missing or unreadable."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError: return ""
+    return text[1:] if text.startswith("\ufeff") else text
+
+
+def parse_gaps(text):
+    """One dict per well-formed gap line: class, question, ticket, date, found, rule (None when no rule)."""
+    out = []
+    for line in (text or "").splitlines():
+        m = GAP_LINE.match(line)
+        if not m:
+            continue
+        try:
+            datetime.strptime(m.group(4), "%Y-%m-%d")
+        except ValueError: continue
+        rule = m.group(6).strip() if m.group(6) else ""
+        out.append({"class": m.group(1).lower(), "question": m.group(2), "ticket": m.group(3).strip(),
+                    "date": m.group(4), "found": m.group(5).lower(), "rule": rule or None})
+    return out
+
+
+def repo_gaps(repo):
+    """(checklist, promote) from the repository's gap log: rule-less bullet lines (newest kept over the cap) and
+    one PROMOTE line per class with two or more of them."""
+    text = read_gap_file(NOTES_DIR / f"{repo_name(repo)}.gaps.md")
+    lines = [line for line in text.splitlines()
+             if re.match(r"^\s*[-*]\s", line) and not RULE_MARK.search(line)]
+    dropped = 0
+
+    def render():
+        return "\n".join(lines) if not dropped else f"[{dropped} older gap lines omitted]\n" + "\n".join(lines)
+
+    while len(lines) > 1 and len(render()) > NOTES_CAP_CHARS:
+        lines.pop(0)
+        dropped += 1
+    checklist = render()
+    if len(checklist) > NOTES_CAP_CHARS:
+        checklist = checklist[:NOTES_CAP_CHARS]
+    groups = {}
+    for entry in parse_gaps(text):
+        if entry["rule"] is None:
+            groups.setdefault(entry["class"], []).append(entry)
+    promote = []
+    for cls, entries in groups.items():
+        if len(entries) < 2:
+            continue
+        tickets = list(dict.fromkeys(e["ticket"] for e in entries))
+        promote.append(f"PROMOTE {cls}: {len(entries)} gaps without a rule ({', '.join(tickets)}): make it a rule "
+                       f"(a line in repo-notes/{repo_name(repo)}.md, a test or a hook), then add \"rule: <where>\" "
+                       f"to those lines")
+    return checklist, promote
 
 
 def parse_risk_floors(text):
@@ -1623,7 +1739,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     # Inputs field (D3): missing on an implementing phase is a report note, not a refusal. Present only when the
     # inline value or the body is non-empty.
     inline_inputs, body_inputs = field_block(phase_text, "Inputs")
-    if executor != "planner" and baseline_mode in ("fail", "pass") \
+    if executor != "planner" and baseline_mode in ("fail", "pass") and risk != "low" \
             and not (inline_inputs.strip() or any(line.strip() for line in body_inputs)):
         notes.append("no Inputs field: input and failure classes are not fixed at planning (PLAN_TEMPLATE.md)")
     if char_cmds:
@@ -2038,6 +2154,11 @@ def finish_run(run_dir, rc, secs=None):
     ] + [f"note: {note}" for note in st["notes"]] \
       + ([f"note: {acceptance_oversize_note}"] if acceptance_oversize_note else []) \
       + [f"note: {GUARDS_NOTE}"]
+    log_path = run_dir / "output.log"
+    if log_path.exists():
+        question = executor_blocked(ANSI.sub("", log_path.read_bytes().decode("utf-8", "replace")))
+        if question is not None:
+            lines.insert(1, f"EXECUTOR BLOCKED: {question} (answer it in the phase's Decisions, record FAIL --cause BLOCKED: not an attempt; a second BLOCKED on this phase is a PLAN_GAP)")
     refusals = (provider_refusals((run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
                 if (run_dir / "output.log").exists() else [])
     for label, advice in refusals:
@@ -2114,9 +2235,8 @@ def build_task(repo, plan_rel, phase, phase_text, extra):
     return task
 
 
-def executor_attempts(root, repo, plan_rel, phase):
-    """Run ids, oldest first, of this checkout, plan and phase's FAIL+EXECUTOR runs that started after its newest
-    PASS run (all of them when there is no PASS). Old, hand-edited or partial meta.json files are skipped."""
+def phase_runs(root, repo, plan_rel, phase):
+    """(started, run_id, meta) for this checkout, plan and phase's runs; dry, lint, review and partial runs skipped."""
     runs = []
     for meta_path in root.glob("*/meta.json"):
         if meta_path.parent.name == "ledger":            # the review ledger directory is not a run
@@ -2132,17 +2252,36 @@ def executor_attempts(root, repo, plan_rel, phase):
             continue
         if rec.get("kind") == "pr-review" or rec.get("repo") != str(repo) or rec.get("plan") != plan_rel:
             continue
-        if str(phase) != str(rec.get("phase")):          # a missing phase never matches
-            continue
-        started = rec.get("started")
-        if not isinstance(started, (int, float)) or isinstance(started, bool):
-            started = 0
-        runs.append((started, run_id, rec))
+        if str(phase) == str(rec.get("phase")):          # a missing phase never matches
+            started = rec.get("started")
+            runs.append((started if isinstance(started, (int, float)) and not isinstance(started, bool) else 0,
+                         run_id, rec))
+    return runs
+
+
+def executor_attempts(root, repo, plan_rel, phase):
+    """Run ids, oldest first, of this checkout, plan and phase's FAIL+EXECUTOR runs that started after its newest
+    PASS run (all of them when there is no PASS)."""
+    runs = phase_runs(root, repo, plan_rel, phase)
     passes = [started for started, _, rec in runs if rec.get("verdict") == "PASS"]
     newest_pass = max(passes) if passes else None
     return [run_id for started, run_id, rec in sorted(runs, key=lambda r: r[0])
             if rec.get("verdict") == "FAIL" and rec.get("cause") == "EXECUTOR"
             and (newest_pass is None or started > newest_pass)]
+
+
+def second_blocked(repo, meta):
+    """None, or the refusal text when this plan and phase already has a FAIL BLOCKED run."""
+    if meta.get("plan") is None or meta.get("phase") is None:
+        return None
+    phase = meta["phase"]
+    earlier = sorted((started, run_id) for started, run_id, rec in
+                     phase_runs(runs_root(repo), repo, meta["plan"], phase)
+                     if run_id != meta.get("run_id") and rec.get("verdict") == "FAIL"
+                     and rec.get("cause") == "BLOCKED")
+    if not earlier:
+        return None
+    return (f"second BLOCKED on phase {phase} (first: {earlier[0][1]}): the plan lacks a decision; fix the plan and record --cause PLAN_GAP")
 
 
 def attempt_cap_refusal(root, repo, plan_rel, phase):
@@ -2347,6 +2486,30 @@ def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
         if f not in tracked:
             parts.append(subprocess.run(["git", "-C", str(repo), "diff", "--no-color", "--no-index", "--", "/dev/null", f],
                                         capture_output=True, text=True).stdout)
+    diff = "".join(parts)
+    if cap is not None and len(diff) > cap:
+        diff = diff[:cap] + f"\n[diff truncated at {cap} characters; read the files for the rest]\n"
+    return diff
+
+
+def review_diff(repo, run_dir, meta, files, cap=REVIEW_DIFF_CAP, base=None):
+    """Whole-phase runs: change_diff. Sub-phase runs: only the change since start_state's copy (no copy: change_diff)."""
+    if base is None:
+        base = run_diff_base(repo, meta)
+    if not isinstance(phase_key(meta.get("phase")), str):
+        return change_diff(repo, files, cap=cap, base=base)
+    parts = []
+    for f in files:
+        try:
+            before = (Path(run_dir) / "backup" / f).read_text(errors="replace")
+            after = (Path(repo) / f).read_text(errors="replace")
+        except OSError:
+            parts.append(change_diff(repo, [f], cap=None, base=base))
+            continue
+        diff = list(difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                         fromfile=f"a/{f}", tofile=f"b/{f}", lineterm="", n=0))
+        if diff:
+            parts.append(f"diff --git a/{f} b/{f}\n" + "\n".join(diff) + "\n")
     diff = "".join(parts)
     if cap is not None and len(diff) > cap:
         diff = diff[:cap] + f"\n[diff truncated at {cap} characters; read the files for the rest]\n"
@@ -3207,8 +3370,14 @@ def review_context(args, repo, root, with_diff=True, base=None, only=None):
             + ("\nFindings from earlier review rounds, already sent back to the implementer: check that each fix is "
                "right; do not repeat a finding the diff resolves:\n" + "\n".join(prior) + "\n" if prior else "")
             + f"\nChecklists ({', '.join(names)}):\n{rubric}\n"
-            + (diff_base_note(meta, base) + f"\nDiff:\n```\n{change_diff(repo, files, base=base)}```\n"
+            + (diff_base_note(meta, base) + f"\nDiff:\n```\n{review_diff(repo, run_dir, meta, files, base=base)}```\n"
                if with_diff else ""))
+    key = phase_key(meta.get("phase"))
+    if isinstance(key, str):
+        first, sep, rest = task.partition("\n")
+        task = (first + sep + f"Sub-phase {key}: the diff shows only this run's change, from the files as they were "
+                f"when it started (a file without a start copy shows every change since the run's start commit); "
+                f"the parent phase's change was reviewed in its own run.\n" + rest)
     return run_dir, meta_path, meta, files, names, task
 
 
@@ -3254,7 +3423,7 @@ def cmd_review_record(args):
     if meta.get("kind") != "pr-review":       # a PR run has no phase diff here; its reviewer saw the PR diff
         files = review_files(repo, meta)
         if files:                             # no surviving files = no diff to anchor to: keep findings as written
-            diff_text = change_diff(repo, files, base=run_diff_base(repo, meta))
+            diff_text = review_diff(repo, run_dir, meta, files, base=run_diff_base(repo, meta))
     result = process_review(text, meta, root, repo, args.reviewer, run_dir.name, diff_text)
     if not result["ok"]:
         print(f"delegate: review not recorded: {'; '.join(result['errors'])}", file=sys.stderr)
@@ -3461,9 +3630,11 @@ def cmd_close_round(args):
     if verdict not in ("PASS", "FAIL"):
         die("verdict must be PASS or FAIL")
     if verdict == "FAIL" and not args.cause:
-        die(f"--close-round FAIL needs --cause {'|'.join(CAUSES)}")
-    if verdict == "PASS" and args.cause:
-        die("--cause applies to FAIL verdicts only")
+        die(f"--close-round FAIL needs --cause {'|'.join(c for c in CAUSES if c not in PASS_CAUSES)}")
+    if verdict == "PASS" and args.cause and args.cause not in PASS_CAUSES:
+        die("--cause applies to FAIL verdicts only (a PASS takes only SPEC_GAP)")
+    if verdict == "FAIL" and args.cause in PASS_CAUSES:
+        die("SPEC_GAP applies to PASS verdicts only")
     if args.behaviour:
         if verdict != "FAIL" or args.cause != "EXECUTOR":
             die("--behaviour applies to FAIL verdicts with --cause EXECUTOR only")
@@ -3474,6 +3645,9 @@ def cmd_close_round(args):
     run_dir = find_run(root, args.close_round, want="reported")
     meta_path = run_dir / "meta.json"
     meta = json.loads(meta_path.read_text())
+    blocked = second_blocked(repo, meta) if verdict == "FAIL" and args.cause == "BLOCKED" else None
+    if blocked:
+        die(blocked)
     adopt = _parse_ids(args.adopt)
     wrong = _parse_id_reasons_all(args.wrong)
     decline = _parse_id_reasons_all(args.decline)
@@ -3623,14 +3797,14 @@ def cmd_review(args, target, conf):
             args, repo, root, with_diff=False, only=data)
     base = run_diff_base(repo, meta)
     header += diff_base_note(meta, base)
-    raw_diff = change_diff(repo, files, cap=None, base=base)
+    raw_diff = review_diff(repo, run_dir, meta, files, cap=None, base=base)
     for warning in diff_base_warnings(meta, base, raw_diff, files):
         print(warning)
     if len(raw_diff) > REVIEW_DIFF_CAP:       # over the cap: refuse, with the file groups; no model call
-        parts = {f: change_diff(repo, [f], cap=None, base=base) for f in files}
+        parts = {f: review_diff(repo, run_dir, meta, [f], cap=None, base=base) for f in files}
         pr_cap_exit(files, parts, len(raw_diff), subject=f"diff of {run_dir.name}")
     rev_dir = new_run_dir(root, res["name"], meta.get("phase") or 0, prefix="review-")
-    diff_text = change_diff(repo, files, base=base)
+    diff_text = review_diff(repo, run_dir, meta, files, base=base)
     task = header + f"\nDiff:\n```\n{diff_text}```\n"      # what review_context builds with with_diff=True
     print_floor_note(repo, meta)
     return run_model_review(
@@ -4496,6 +4670,9 @@ def cmd_lint(args, phase, target, conf):
         print(f"ACCEPTANCE LINT: {f}")
     for f in map_lint(plan.read_text()):
         print(f"MAP LINT: {f}")
+    gap_checklist, promote_lines = repo_gaps(repo)
+    for line in promote_lines:
+        print(line)
     phase_executor = parse_executor(phase_text)
     if claude_executor(phase_executor):       # a Claude implementer: a cheap second reading would only repeat us
         print(f"LINT SKIPPED: executor {phase_executor} is a Claude model")
@@ -4519,8 +4696,10 @@ def cmd_lint(args, phase, target, conf):
     if not binary:
         die(f"{executor}: binary not found")
     notes = repo_notes(repo)
+    gap_block = (f"\nGap checklist (past plan gaps in this repository; check each against this phase):\n{gap_checklist}\n" if gap_checklist else "")
     task = (f"Plan file: {plan_rel} (repository root: {repo}).\n"
             + (f"\nRepository notes (binding):\n{notes}\n" if notes else "")
+            + gap_block
             + f"\nPhase {phase} under review:\n\n{phase_text}\n")
     root = runs_root(repo)
     run_dir = new_run_dir(root, res["name"], phase, prefix="lint-")
@@ -4754,8 +4933,13 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
     verdict = (verdict or "").upper()
     if verdict not in ("PASS", "FAIL"):
         die("verdict must be PASS or FAIL")
-    if verdict == "PASS" and cause:
-        die("--cause applies to FAIL verdicts only")
+    if verdict == "PASS" and cause and cause not in PASS_CAUSES:
+        die("--cause applies to FAIL verdicts only (a PASS takes only SPEC_GAP)")
+    if verdict == "FAIL" and cause in PASS_CAUSES:
+        die("SPEC_GAP applies to PASS verdicts only")
+    blocked = second_blocked(repo, meta) if verdict == "FAIL" and cause == "BLOCKED" else None
+    if blocked:
+        die(blocked)
     if behaviour:
         if verdict != "FAIL" or cause != "EXECUTOR":
             die("--behaviour applies to FAIL verdicts with --cause EXECUTOR only")
@@ -4778,7 +4962,7 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
         print(tier_refusal)
         return 9
     meta["verdict"] = verdict
-    meta["cause"] = cause if verdict == "FAIL" else None
+    meta["cause"] = cause
     meta["behaviour"] = (behaviour or meta.get("behaviour")) if verdict == "FAIL" else None
     note = note or ""
     if tier_refusal:
@@ -4817,7 +5001,7 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
           + (f"  frontier tokens: {meta['frontier_tokens']} ({meta['frontier_tokens_mode']})"
              if meta.get("frontier_tokens") is not None else ""))
     if verdict == "FAIL" and not cause:
-        print("note: add --cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER so --stats can separate executor failures "
+        print("note: add --cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED so --stats can separate executor failures "
               "from plan and test problems")
         after = meta.get("acceptance_after_rc") or []
         if after and all(rc == 0 for rc in after):
@@ -4923,12 +5107,64 @@ def load_runs(repo, all_repos):
     return [r for r in runs.values() if not r["run_id"].split("-", 2)[-1].startswith(("dry-", "lint-", "review-"))]
 
 
+def parse_day(text, flag):
+    """A YYYY-MM-DD date for --since/--until, else a usage error naming the flag."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text or ""):
+        die(f"{flag} takes a date YYYY-MM-DD")
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        die(f"{flag} takes a date YYYY-MM-DD")
+
+
+def plan_gap_counts(repo, runs, since, until, all_repos):
+    """The five figures of the --stats plan-gap block over the (already windowed) run records."""
+    numeric = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+    key = lambda r: (r.get("repo"), r.get("plan"), str(r.get("phase")))
+    implementing = {key(r) for r in runs
+                    if r.get("verdict") in ("PASS", "FAIL") and r.get("executor") != "planner"}
+    accepted = {key(r) for r in runs if r.get("verdict") == "PASS" and r.get("executor") != "planner"}
+    p, s, b = (sum(1 for r in runs if r.get("verdict") == v and r.get("cause") == c)
+               for v, c in (("FAIL", "PLAN_GAP"), ("PASS", "SPEC_GAP"), ("FAIL", "BLOCKED")))
+    by_key = {}
+    for r in runs:
+        by_key.setdefault(key(r), []).append(r)
+    f = sum(1 for r in runs if r.get("verdict") == "FAIL" and r.get("cause") == "PLAN_GAP"
+            and numeric(r.get("started"))
+            and any(o is not r and numeric(o.get("started")) and o["started"] > r["started"]
+                    for o in by_key[key(r)]))
+    k = sum(1 for r in runs if "." in str(r.get("phase")))
+    tokens = sum(r["frontier_tokens"] for r in runs if r.get("verdict") in ("PASS", "FAIL")
+                 and numeric(r.get("frontier_tokens")))
+    paths = sorted(NOTES_DIR.glob("*.gaps.md")) if all_repos else [NOTES_DIR / f"{repo_name(repo)}.gaps.md"]
+    lo, hi = (since.isoformat() if since else None), (until.isoformat() if until else None)
+    found = {"review": 0, "verify": 0, "lint": 0, "blocked": 0}
+    for path in paths:
+        for entry in parse_gaps(read_gap_file(path)):
+            if (not lo or entry["date"] >= lo) and (not hi or entry["date"] <= hi) \
+                    and entry["found"] in found:
+                found[entry["found"]] += 1
+    return {"N": len(implementing), "A": len(accepted), "p": p, "s": s, "b": b, "f": f, "k": k,
+            "tokens": tokens, **found}
+
+
 def cmd_stats(args):
     repo = repo_root(args.repo or os.getcwd())
     runs = load_runs(repo, args.all)
     if not runs:
         print("no recorded runs" + (" in the cross-repo index" if args.all else " in this repo"))
         return 0
+    since = parse_day(args.since, "--since") if args.since is not None else None
+    until = parse_day(args.until, "--until") if args.until is not None else None
+    if since or until:
+        lo = datetime(since.year, since.month, since.day).timestamp() if since else None
+        hi = (datetime(until.year, until.month, until.day) + timedelta(days=1)).timestamp() if until else None
+        runs = [r for r in runs
+                if isinstance(r.get("started"), (int, float)) and not isinstance(r.get("started"), bool)
+                and (lo is None or r["started"] >= lo) and (hi is None or r["started"] < hi)]
+        if not runs:
+            print("no recorded runs in the window")
+            return 0
     # first attempt per (repo, plan, phase) = earliest start
     first = {}
     for r in sorted(runs, key=lambda r: r.get("started") or 0):
@@ -4938,7 +5174,7 @@ def cmd_stats(args):
     for r in runs:
         key = f"{r.get('executor') or '?'} {r.get('model') or ''}".strip()
         g = groups.setdefault(key, {"runs": 0, "pass": 0, "fail": 0, "first": 0, "first_pass": 0,
-                                    "secs": [], "causes": {c: 0 for c in CAUSES},
+                                    "secs": [], "causes": {c: 0 for c in CAUSE_CODE},
                                     "front_tok": [], "cost": []})
         g["runs"] += 1
         v = r.get("verdict")
@@ -4964,7 +5200,7 @@ def cmd_stats(args):
     for key, g in sorted(groups.items(), key=lambda kv: -kv[1]["runs"]):
         fp = f"{g['first_pass']}/{g['first']}" if g["first"] else "-"
         mean = f"{sum(g['secs']) / len(g['secs']) / 60:.1f}" if g["secs"] else "-"
-        causes = " ".join(f"{c[0]}{n}" for c, n in g["causes"].items()) if g["fail"] else "-"
+        causes = " ".join(f"{CAUSE_CODE[c]}{n}" for c, n in g["causes"].items()) if g["fail"] else "-"
         cost = f"{sum(g['cost']):.3f}" if g["cost"] else "-"
         print(f"{key[:44]:44s} {g['runs']:>4d} {g['pass']:>4d} {g['fail']:>4d} {fp:>8s} "
               f"{mean:>8s} {mean_k(g['front_tok']):>9s} {cost:>8s}  {causes}")
@@ -5018,8 +5254,19 @@ def cmd_stats(args):
             behaviours[r["behaviour"]] = behaviours.get(r["behaviour"], 0) + 1
     if behaviours:
         print("behaviours: " + ", ".join(f"{k} {v}" for k, v in sorted(behaviours.items())))
+    gaps = plan_gap_counts(repo, runs, since, until, args.all)
+    label = f"{since.isoformat() if since else 'start'}..{until.isoformat() if until else 'now'}" if since or until else "(all dates)"
+    rate = f"{(gaps['p'] + gaps['s'] + gaps['b']) / gaps['N']:.2f}" if gaps["N"] else "-"
+    frontier = f"{gaps['tokens'] / gaps['A'] / 1e6:.2f}M" if gaps["A"] else "-"
+    print(f"plan gaps {label}: implementing phases {gaps['N']} (accepted {gaps['A']})\n"
+          f"  gap verdicts: PLAN_GAP {gaps['p']}, SPEC_GAP {gaps['s']}, BLOCKED {gaps['b']} "
+          f"({rate} per implementing phase)\n"
+          f"  after a gap: full re-runs {gaps['f']}, sub-phase runs {gaps['k']}\n"
+          f"  found (gaps.md): review {gaps['review']}, verify {gaps['verify']}, lint {gaps['lint']}, "
+          f"blocked {gaps['blocked']}\n"
+          f"  frontier tokens per accepted implementing phase: {frontier}")
     print("1st-pass = PASS on the first attempt; front tok = Claude-session tokens per verdict; causes "
-          "E/P/T/F = executor / plan gap / test defect / flaky")
+          "E/P/T/F/R/B = executor / plan gap / test defect / flaky / provider / blocked")
     return 0
 
 
@@ -5493,16 +5740,16 @@ def main():
     parser.add_argument("--extra", help="extra instructions, e.g. verifier feedback for a retry (use --extra=TEXT)")
     parser.add_argument("--no-ignored", action="store_true", help="do not monitor gitignored paths")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--lint", metavar="PHASE", type=int, help="read-only pre-flight review of a phase")
+    parser.add_argument("--lint", metavar="PHASE", type=phase_arg, help="read-only pre-flight review of a phase")
     parser.add_argument("--map", metavar="PLAN", help="print the plan's Intent/Structure/Work map with per-phase status (zero tokens)")
     parser.add_argument("--mermaid", action="store_true", help="with --map: print a Mermaid mindmap instead of the tree")
-    parser.add_argument("--begin", metavar="PHASE", type=int, help="open a session run (Claude implementer or planner)")
+    parser.add_argument("--begin", metavar="PHASE", type=phase_arg, help="open a session run (Claude implementer or planner)")
     parser.add_argument("--label", help="with --begin: executor label for the report (default: plan's Executor)")
     parser.add_argument("--end", metavar="RUN_ID", help="close a session run and write its report")
     parser.add_argument("--abort", metavar="RUN_ID", help="release a session run's lock without a report")
     parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the verifier's outcome")
     parser.add_argument("--note", help="with --verdict: short reason")
-    parser.add_argument("--cause", choices=CAUSES, help="with --verdict FAIL: why it failed")
+    parser.add_argument("--cause", choices=CAUSES, help="with --verdict: why a FAIL failed, or SPEC_GAP on a PASS whose review found a case the plan never specified")
     parser.add_argument("--tokens", metavar="N|auto",
                         help="with --verdict: Claude-session tokens for this phase; 'auto' sums the repository's newest "
                              "session transcript since the previous verdict")
@@ -5560,6 +5807,8 @@ def main():
                         help="the user's words allowing a run beyond the attempt cap (exit 8) or a PASS below the "
                              "phase's review tier (exit 9); recorded in the report or verdict note")
     parser.add_argument("--stats", action="store_true", help="pass rates, time, tokens and reviewer adoption")
+    parser.add_argument("--since", metavar="YYYY-MM-DD", help="with --stats: only runs started on or after this local date")
+    parser.add_argument("--until", metavar="YYYY-MM-DD", help="with --stats: only runs started on or before this local date")
     parser.add_argument("--all", action="store_true", help="with --stats: use the cross-repo index")
     parser.add_argument("--resolve", metavar="MODEL", help="print how a model name resolves, then exit")
     parser.add_argument("--models", action="store_true", help="print the model registry")
@@ -5628,9 +5877,9 @@ def main():
         return cmd_verdict(args)
     if args.stats:
         return cmd_stats(args)
-    if not args.words or not args.words[-1].isdigit():
-        parser.error("usage: concord.py [MODEL WORDS ...] PHASE   (PHASE is a number)")
-    phase = int(args.words[-1])
+    if not args.words or phase_key(args.words[-1]) is None:
+        parser.error("usage: concord.py [MODEL WORDS ...] PHASE   (PHASE is a number such as 2, or 2.1 for a sub-phase)")
+    phase = phase_key(args.words[-1])
     target = " ".join(args.words[:-1]).strip()
     return cmd_run(args, target, phase, conf)
 

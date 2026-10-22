@@ -47,9 +47,9 @@ Permissions keyed by tool names are not enough. Early on, a read-only pre-flight
 1. **One ticket, one git worktree** (`wt.py new <TICKET>`). Parallel sessions sharing one clone produced 15 lock collisions and 22 unwanted branch switches in one measured stretch, before tickets were isolated.
 2. **Read cheaply.** Repository notes (`repo-notes/<repo>.md`), the ledger of past plan gaps in this repository (`repo-notes/<repo>.gaps.md`), then only the code the task touches.
 3. **Gain table first.** Every item names the metric it should move and by how much; an item that moves nothing is cut before planning. The ticket's row becomes the plan's Outcome block, with a minimal case and guardrails.
-4. **Write the plan.** `PLAN_<ticket>.md` from `PLAN_TEMPLATE.md`: phases with exact files, interfaces, input classes, examples, edge cases, acceptance commands, a line budget, an executor and a risk level per phase, and every open question. Plans stay lean: tests, then one executor run for the ticket's code, then a measurement. Split a run only after it fails for being too big; at most two plan revisions per ticket.
+4. **Write the plan.** `PLAN_<ticket>.md` from `PLAN_TEMPLATE.md`: phases with exact files, interfaces, input classes, examples, edge cases, acceptance commands, a line budget, an executor and a risk level per phase, and every open question. Plans stay lean: tests, then one executor run for the ticket's code, then a measurement. Split a run only after it fails for being too big; a gap found by review on a green, in-scope diff becomes a sub-phase on the kept diff.
 5. **Plan-only review** (`concord.py --lint <phase>`). First the dispatcher prints ACCEPTANCE LINT lines at zero model tokens, for four defects plan reviews kept rediscovering: a count piped into `grep -qx 0` (true on empty input), a string comparison of `wc` output, an acceptance bullet without backticks (never run) and a missing file outside `Files:`. Then a cheap model reads the plan and the repository, never the future code, and lists the questions it would need answered, the files it would need, the input classes no acceptance command exercises, and the risks.
-6. **Human approval.** Nothing runs before it. Executors cannot ask questions, so every ambiguity is settled here.
+6. **Human approval.** Nothing runs before it. Every known ambiguity is settled here; an executor that still meets one may stop once with BLOCKED and its question.
 7. **Tests first.** The planner writes them; they must fail on the untouched code, unless the phase preserves behaviour, which then needs a before/after characterization command. Acceptance commands that already pass carry the literal marker `(characterization)`.
 8. **Implement.** One executor run per phase, inside the guarantees listed above.
 9. **Verify from evidence.** The planner re-runs the acceptance commands and reads the diff of the changed files only. Any of the report's failure lines fails the phase (see below). A planner's own run may edit its plan; any other run that does fails.
@@ -88,6 +88,7 @@ Every report starts with `DELEGATE RESULT <run id>` and uses fixed vocabulary. T
 | `ACCEPTANCE FILES CHANGED` | a file the acceptance commands read was changed, removed or added |
 | `STATIC NEW` | the static checks report a problem that was not there before |
 | `ACCEPTANCE AFTER RUN: 0/N pass` | nothing passes after the run |
+| `EXECUTOR BLOCKED` | the executor stopped with a question instead of guessing; record FAIL --cause BLOCKED, answer it in the plan, re-run |
 
 A run that exits successfully without changing a file is flagged `NO CHANGES`, the early-completion case. If the planner records a FAIL without a cause after every acceptance command passed, the dispatcher suggests TEST_DEFECT: the tests did not catch what the planner caught.
 
@@ -104,13 +105,15 @@ A run diff over the review cap (60,000 characters) is refused with the file grou
 
 ## Verdicts and failure causes
 
-Every FAIL names a cause, so the right thing gets fixed:
+Every FAIL names a cause, so the right thing gets fixed; a PASS may carry SPEC_GAP:
 
 - **EXECUTOR**: the implementer got it wrong. This is the only cause that counts as an attempt; three in a row stop the phase until the user decides. The retry carries structured feedback: evidence, suspected files, the change needed.
-- **PLAN_GAP**: the plan was missing something. Fix the plan; the gap goes into the repository's gaps ledger, one line, read at the next planning.
+- **PLAN_GAP**: the plan was missing something and the diff cannot stand. Restore, fix the plan, re-run; the gap goes into the repository's gap log, one line, which `--lint` asks of every later phase.
 - **TEST_DEFECT**: the tests were wrong. Fix the tests.
 - **FLAKY**: the environment failed.
 - **PROVIDER**: the model provider refused or limited the run.
+- **BLOCKED**: the executor stopped with a question instead of guessing. Answer it in the plan and re-run; not an attempt; a second BLOCKED on the same phase is a PLAN_GAP.
+- **SPEC_GAP** (on a PASS): a review found a case the plan never specified while acceptance was green and the scope clean. The diff stays; a sub-phase N.1 adds the missing test and change, and its review reads only that change.
 
 Most failures are plan gaps, not executor mistakes: in the first ten days only 7 of 35 failures were the executor's. That is why the plan gets a lint, a review of its own and a ledger of past gaps.
 

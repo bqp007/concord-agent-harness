@@ -8,8 +8,8 @@ worktree reads its main checkout's notes.
   request) for that repository, truncated at 4000 characters.
 - A `Risk floor <tier>: <globs>` line in that file (tier low, medium or high) raises the review tier of any
   phase or pull request that changes a matching non-test file; a phase PASS below it is refused (exit 9).
-- `<repo-dir-name>.gaps.md`: the planner's gap log, one line per entry. Writing it is a convention
-  of the `/concord:plan-then-delegate` and `/concord:delegate` commands; the planner reads it before planning and
-  it is never sent to executors.
+- `<repo-dir-name>.gaps.md`: the planner's gap log, one line per gap: `- [<class>] <question> (<ticket>,
+  <YYYY-MM-DD>, found: review|verify|lint|blocked[, rule: <where>])`. `--lint` asks the lines without `rule:` as a
+  checklist and prints `PROMOTE <class>` at two; `--stats` counts them by found. Never sent to executors or reviewers.
 
 This README is the only file shipped in `~/.claude/concord/repo-notes/`.

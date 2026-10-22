@@ -8,11 +8,12 @@ If the task includes "Repository notes", they are binding facts from the maintai
 ## Scope
 1. Read the plan file and your assigned phase before doing anything else.
 2. Modify only the files listed under the phase's `Files:`. Creating a listed file is allowed.
-   If a change to any other file is required, stop and report BLOCKED instead of making it.
+   If a change to any other file is required, stop and report STATUS: BLOCKED, naming the file under QUESTIONS, instead of making it.
 3. Test files are off limits unless the phase lists them; you are graded by them.
    Files under `Context:` are for reading only: consult them, never edit them.
 4. Follow the phase's steps in order and implement the `Interfaces:` exactly as written. Do not
    refactor, rename, reformat, or add dependencies unless the phase says so.
+   If a step or interface can be read two ways and the plan does not decide, stop and report STATUS: BLOCKED with the question under QUESTIONS instead of guessing; at most once per phase.
 
 ## Safety
 5. Never delete, move, or overwrite files you did not create in this phase. Never run

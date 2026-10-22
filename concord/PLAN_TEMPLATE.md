@@ -55,7 +55,7 @@ Files: path/to/module.py
 Context: path/to/caller.py, path/to/config.yaml, tests/test_module.py   (read-only: the callers, callees, configs and tests the executor must consult; never edit)
 Interfaces:
 - `def parse(raw: str) -> Result` (new) - raises `ValueError` on empty input
-Inputs:   (goal posts, fixed here; `--lint` checks it; missing on an implementing phase = a report note)
+Inputs:   (goal posts, fixed here; `--lint` checks it; missing on a medium or high implementing phase = a report note)
 - raw: `key=value` text from the config file (untrusted). Classes: well-formed; empty; whitespace-only;
   missing `=`; non-UTF-8 bytes. Expected: Result / ValueError / ValueError / ValueError / UnicodeDecodeError.
 - documented failure classes of the platform the code calls (e.g. read fails with OSError) and the behaviour.
@@ -122,11 +122,13 @@ Rules for the planner (evidence: docs/WORKFLOW.md in the Concord repository):
 - Structural checks (Decisions) stay one-off acceptance commands; never commit tests that pin structure.
 - Purpose / Interfaces / Example / Edge cases are the vocabulary that raises cheap-model pass rates;
   exact signatures and one worked example matter more than prose. The report checks Interfaces verbatim.
-- Executors cannot ask questions. Every ambiguity goes under "Open questions" and is settled before approval.
+- Settle every known ambiguity under "Open questions" before approval; an executor that still meets one stops with BLOCKED and its question, once per phase.
+- Risk: low phases need only Executor, Risk, Purpose, Files, Acceptance and Out of scope, plus Interfaces when a signature changes; medium and high keep the full block.
+- A gap found by review on a green, in-scope diff becomes "## Phase N.1 - <gap> (PN.1 <- S..)" at the parent's heading level with the parent's Executor and Risk, run on the kept diff; sub-phases do not count toward the Work cap.
 - One phase = one independently verifiable change; roughly 5 files and 7 steps or fewer.
 - List exact file paths (no annotations in parentheses; commas between paths). The dispatcher flags any change
   outside Files:, and on OpenCode the harness refuses such edits outright, so an incomplete list makes the
-  executor report BLOCKED (a plan gap, not an executor failure).
+  executor stop with STATUS: BLOCKED naming the file (recorded as BLOCKED; a second one on the phase is a PLAN_GAP).
 - Files: must be complete (every file that changes) and Context: must name the dependencies the
   executor needs to read (callers, callees, configs, tests). `concord.py --lint <phase>` checks both.
 - Acceptance commands must be deterministic, runnable offline, written before execution, and able to
