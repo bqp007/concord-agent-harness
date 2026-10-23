@@ -3,7 +3,9 @@
 # repo's binding notes (flash prompt, phase packet, PR packet); a `Risk floor <tier>: <globs>` line raises the review
 # tier of a phase or PR whose change touches a matching non-test file. For a phase run, --review and --packet name the
 # floor, and --packet reuses a prior clean review only when its reviewer reaches the raised tier; --review-pr records
-# the raised tier of a PR. No network: fake qwen and gh.
+# the raised tier of a PR. A review of a low-tier phase is approve-only: it keeps only BLOCKER and HIGH findings
+# (2026-10-23, PLAN_kit-review-tier); --review-record --tokens stores the reviewer's token count. No network: fake
+# qwen and gh.
 # Run: bash ~/.claude/concord/tests/reviewfocus_test.sh   (exit 0 = all passed).
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -51,10 +53,11 @@ notes(){ printf '# clone: binding facts\n- %s\n- Risk floor high: sec/*, *.lock\
 notes
 git init -q --bare -b main "$O" && git clone -q "$O" "$R" 2> /dev/null || { echo "setup failed: repos"; exit 1; }
 ( set -e; cd "$R" && git config user.email t@t && git config user.name t && git config diff.renames true
-  mkdir sec docs big; printf 'x = 1\n' > a.py; printf 'k = 1\n' > sec/key.py; printf 'o = 1\n' > sec/old.py
+  mkdir sec docs big lib other; printf 'm = 1\n' > lib/m.py; printf 'o = 1\n' > other/o.py; printf 'x = 1\n' > a.py; printf 'k = 1\n' > sec/key.py; printf 'o = 1\n' > sec/old.py
   printf 't = 1\n' > sec/key_test.py; printf 'doc\n' > docs/x.md; printf 'b = 1\n' > big/f.py; printf '.claude/\n' > .gitignore
   { echo '# Plan'; phase 1 medium sec/key.py; phase 2 medium a.py; phase 3 low docs/x.md; phase 4 high docs/x.md
-    phase 5 low sec/key_test.py; phase 6 medium sec/old.py; phase 7 medium big/f.py; } > PLAN_F.md
+    phase 5 low sec/key_test.py; phase 6 medium sec/old.py; phase 7 medium big/f.py; phase 8 low lib/m.py
+    phase 9 medium 'lib/m.py, other/o.py'; phase 10 medium lib/m.py | sed 's/^Risk: medium$/&\nBaseline: skip/'; } > PLAN_F.md
   git add -A && git commit -qm init && git push -q origin main
   git checkout -qb pr7; printf 'x = 2\n' > a.py; git commit -qam pr7; git push -q origin HEAD:refs/pull/7/head
   git checkout -q main; git checkout -qb pr9; printf 'x = 3\n' > a.py; printf 'k = 9\n' > sec/key.py
@@ -177,6 +180,49 @@ prpacket 11; P=$(pk)
 python3 -I -B -c "import sys; sys.path.insert(0, sys.argv[1]); import concord as d; sys.exit(0 if d.parse_risk_floors('\ufeff- Risk floor high: sec/*\n') == [('high', ['sec/*'])] else 1)" "$T/concord" 2> /dev/null \
   && ok "a floor line right after a UTF-8 byte-order mark still parses" || bad "a byte-order mark hid the first floor line"
 
+echo "== approve-only low tier"
+lastrev(){ python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or [{}]; print(r[-1].get(sys.argv[2]))" "$RUNS/$1" "$2"; }
+nrevs(){ python3 -I -c "import json,sys; print(len(json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or []))" "$RUNS/$1"; }
+ledsev(){ python3 -I -c "import json,sys; L=json.load(open(sys.argv[1])); print(','.join(sorted(f['severity'] for f in L.get('findings', []) if f.get('run') == sys.argv[2])))" "$RUNS/ledger/PLAN_F.json" "$1"; }
+clean(){ git -C "$R" checkout -q -- lib other; }
+f(){ printf '{"severity": "%s", "path": "lib/m.py", "line": 2, "line_end": 2, "problem": "%s", "fix": "f", "repro": {"input": "i", "expected": "e", "actual": "a"}, "clause": "", "test": "", "reraise_of": ""}' "$1" "$2"; }
+printf 'REVIEW-JSON\n{"findings": [%s], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$(f MEDIUM "m only")" > "$T/med.txt"
+printf 'REVIEW-JSON\n{"findings": [%s, %s, %s], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' \
+  "$(f HIGH "h one")" "$(f MEDIUM "m two")" "$(f NOTE "n three")" > "$T/mix.txt"
+clean; run 8 "echo '# a1' >> lib/m.py"; X1=$(rid)
+FAKE_ACTIONS="cat $T/med.txt" flash "$X1"
+[ "$(lastrev "$X1" verdict)" = CLEAN ] && [ "$(lastrev "$X1" mediums)" = 0 ] \
+  && ok "low tier, a MEDIUM-only answer: recorded CLEAN (an approval)" || { bad "MEDIUM-only low review"; tail -3 "$T/out.txt"; }
+clean; run 8 "echo '# a2' >> lib/m.py"; X2=$(rid)
+FAKE_ACTIONS="cat $T/mix.txt" flash "$X2"; RV4=$(sed -n 's/^REVIEW \([^ ]*\) of .*/\1/p' "$T/out.txt" | head -1)
+[ -n "$RV4" ] && grep -qF "APPROVE-ONLY REVIEW" "$RUNS/$RV4/prompt.txt" && [ "$(lastrev "$X2" highs)" = 1 ] \
+  && [ "$(lastrev "$X2" mediums)" = 0 ] && [ "$(ledsev "$RV4")" = HIGH ] \
+  && ok "low tier, HIGH + MEDIUM + NOTE: prompt says approve-only, meta and ledger keep only the HIGH" \
+  || { bad "approve-only '$RV4' ledger='$(ledsev "$RV4")'"; tail -3 "$T/out.txt"; }
+[ -n "$RV" ] && ! grep -qF "APPROVE-ONLY REVIEW" "$RUNS/$RV/prompt.txt" \
+  && ok "a medium-tier flash prompt has no approve-only text" || bad "approve-only text on a medium run ('$RV')"
+clean; run 10 "echo '# a4' >> lib/m.py"; X4=$(rid)
+FAKE_ACTIONS="cat $T/mix.txt" flash "$X4"; RV5=$(sed -n 's/^REVIEW \([^ ]*\) of .*/\1/p' "$T/out.txt" | head -1)
+[ -n "$RV5" ] && ! grep -qF "APPROVE-ONLY REVIEW" "$RUNS/$RV5/prompt.txt" && [ "$(lastrev "$X4" mediums)" = 1 ] \
+  && ok "Baseline: skip with Risk: medium is not approve-only: the MEDIUM is kept" || { bad "skip+medium approve-only '$RV5'"; tail -3 "$T/out.txt"; }
+clean; run 9 "echo '# a3' >> lib/m.py; echo '# a3' >> other/o.py"; X3=$(rid)
+$DP --review-record "$X3" --reviewer concord:reviewer-opus55 --file "$T/mix.txt" --repo "$R" > "$T/out.txt" 2>&1
+[ "$(lastrev "$X3" mediums)" = 1 ] && [ "$(ledsev "$X3")" = "HIGH,MEDIUM,NOTE" ] \
+  && ok "medium tier: --review-record keeps HIGH, MEDIUM and NOTE" || { bad "medium record ledger='$(ledsev "$X3")'"; tail -3 "$T/out.txt"; }
+clean
+
+echo "== review tokens"
+$DP --review-record "$X1" --reviewer concord:reviewer-opus55 --file "$T/clean.txt" --tokens 12345 --repo "$R" > "$T/out.txt" 2>&1
+[ "$(lastrev "$X1" tokens)" = 12345 ] && ok "--review-record --tokens 12345 stores tokens on the entry" || { bad "tokens not stored"; tail -3 "$T/out.txt"; }
+N0=$(nrevs "$X1")
+$DP --review-record "$X1" --reviewer concord:reviewer-opus55 --file "$T/clean.txt" --tokens auto --repo "$R" > "$T/out.txt" 2>&1; R1=$?
+$DP --review-record "$X1" --reviewer concord:reviewer-opus55 --file "$T/clean.txt" --tokens x --repo "$R" > "$T/out.txt" 2>&1; R2=$?
+L0=$(ledsev "$X2")
+$DP --review-record "$X2" --reviewer concord:reviewer-opus55 --file "$T/mix.txt" --tokens ² --repo "$R" > "$T/out.txt" 2>&1; R3=$?
+[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ $R3 -eq 2 ] && [ "$(nrevs "$X1")" = "$N0" ] && [ "$(ledsev "$X2")" = "$L0" ] && ! has "Traceback" \
+  && ok "--tokens auto, x or ² on --review-record: exit 2, nothing recorded, ledger untouched" \
+  || bad "bad --tokens rc=$R1/$R2/$R3 reviews $N0 -> $(nrevs "$X1") ledger '$L0' -> '$(ledsev "$X2")'"
+
 echo "== property tests (seed 7, 400 cases)"
 python3 -I -B - "$T/concord" > "$T/prop.txt" 2>&1 <<'PY'
 import random, sys
@@ -186,7 +232,8 @@ rng = random.Random(7)
 TIERS = ["low", "medium", "high"]
 PATS = ["sec/*", "*.lock", "docs/*", "a.py", "*allowlist*", "include/*", "x/y/*", "*_dto.cpp"]
 FILES = ["sec/key.py", "sec/key_test.py", "docs/x.md", "a.py", "b.lock", "tests/t.py", "lib/allowlist.csv",
-         "include/api.hpp", "x/y/z.py", "README.md", "SEC/Upper.py", "test_sec.py", "src/user_dto.cpp", "spec/a.py"]
+         "include/api.hpp", "x/y/z.py", "README.md", "SEC/Upper.py", "test_sec.py", "src/user_dto.cpp", "spec/a.py",
+         "src/spec_parser.py", "lib/tests_util.py"]
 JUNK = ["Risk floor extreme: a.py", "Risk floor high:", "Risk floors high: a.py", "# Risk floor high: a.py",
         "Risk-floor high: a.py", "plain text", "", "- risk  floor: high a.py", "Risk floor high a.py"]
 
@@ -198,7 +245,7 @@ def rank(tier):
 def oracle(floors, files):
     best = (None, None, None)
     for f in files:
-        if d.TEST_PATH.search(f):
+        if d.LIGHT_TEST_PATH.search(f):      # whole path parts: src/spec_parser.py is no test file
             continue
         for tier, pats in floors:
             for p in pats:
@@ -233,11 +280,15 @@ for case in range(400):
     if rank(d.pick_floor(want, files + [rng.choice(FILES)])[0]) < rank(result[0]):
         bad += 1
         print("MONOTONE", case, want, files)
+for must in ("src/spec_parser.py", "lib/tests_util.py"):    # must-not-match: source files that look like tests
+    if d.pick_floor([("high", ["src/*", "lib/*"])], [must])[0] != "high":
+        bad += 1
+        print("MUST-FLOOR", must)
 print("property failures:", bad)
 sys.exit(1 if bad else 0)
 PY
 RC=$?
-[ $RC -eq 0 ] && ok "parse_risk_floors and pick_floor match the oracle; adding a file never lowers the floor" \
+[ $RC -eq 0 ] && ok "parse_risk_floors and pick_floor match the oracle; adding a file never lowers the floor; src/spec_parser.py floors" \
   || { bad "property tests rc=$RC"; tail -5 "$T/prop.txt"; }
 
 echo "passed $pass, failed $fail"

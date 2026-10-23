@@ -26,10 +26,11 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: terse (tables); commands, plan te
 - PLAN_GAP: `--restore <run>`, fix the plan (ask on the user's calls), retry.
 - BLOCKED: answer in the phase's Decisions (ask on the user's calls), `--restore <run>` if files changed, re-run with `--extra "ANSWERS: ..."`; a second BLOCKED is a PLAN_GAP.
 - TEST_DEFECT, FLAKY: fix the tests here. Out-of-scope edits, deletions or a modified plan: stop, show them, offer `--restore`.
+- A defect found after the gate (a later review, a PR comment, production) is fixed with a test or lint that fails on the old code, never a REVIEW.md line.
 
 ## 5. Full revision
 - After the last pass, at once: every suite (one checking the checkout itself, such as `tests/demo_test.sh`, alone) and one review of the whole diff: the PR gate (§6), else each implementing run's review.
-- Tier = the phase's Risk (default medium), raised for matching non-test files by a repo-notes `Risk floor <tier>: <globs>` line. low: `concord.py --review <run>` (flash). medium, high: `--review <run> --packet`, a fresh `concord:reviewer-opus55` Agent per round given your acceptance results, `--review-record` its answer. Over the 60,000-character cap: `--files <globs>` per group.
+- Tier = the phase's Risk (default medium), raised for matching non-test files by a repo-notes `Risk floor <tier>: <globs>` line. low: `concord.py --review <run>` (flash), approve-only: only BLOCKER and HIGH are kept. medium, high: `--review <run> --packet`, a fresh `concord:reviewer-opus55` Agent per round given your acceptance results, `--review-record` its answer with `--tokens <the Agent's total_tokens>`. Over the 60,000-character cap: `--files <globs>` per group.
 - Unchanged files cleared at that tier or higher print `COVERED` (`--force-review` overrides).
 - Review a fork (`wt.py fork <TICKET> r`); Monitor `<packet>.stream`, fix each streamed finding in the ticket worktree as it lands (small: here, else its executor, `--extra`); one delta review after the final verdict.
 
