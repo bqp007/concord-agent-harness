@@ -1,0 +1,34 @@
+(version 1)
+;; Concord: launch profile for the OpenCode executor. concord.py:sandbox_cmd() fills the {{...}}
+;; placeholders for one run and loads the result with `/usr/bin/sandbox-exec -f <run>/sandbox.sb`.
+;; Baseline: everything allowed; the denies below are the confinement.
+(allow default)
+
+;; The harness starts the opencode binary, which forks its own shells and plugins.
+(allow process-fork)
+(allow process-exec*)
+
+;; Q1=A: Seatbelt cannot filter egress by hostname, so the network stays open; the guarantee is
+;; filesystem + credential confinement (no ~/.ssh or ~/.aws to exfiltrate, no writes outside).
+(allow network*)
+
+;; Reads: everything the bun binary, its node_modules and the toolchain need, minus the credential
+;; stores and any repository roots listed in opencode.sandbox_deny.
+(allow file-read*)
+{{READ_DENY}}
+
+;; Writes: denied by default; only the run's worktree, OpenCode's data/cache dirs, $TMPDIR, the Concord
+;; run folder and the standard streams are writable. The config dir (~/.config/opencode) is deliberately NOT
+;; writable: it holds live plugins/*.js, package.json and node_modules, so a planted file there would run
+;; on the next (possibly unsandboxed) OpenCode launch — a persistent escape. It stays readable by default.
+(deny file-write*)
+(allow file-write*
+  (subpath {{WORKTREE}})
+  (subpath {{OC_DATA}})
+  (subpath {{OC_CACHE}})
+  (subpath {{TMP}})
+  (subpath {{RUN}})
+  (literal "/dev/null")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr")
+  (literal "/dev/tty"))

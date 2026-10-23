@@ -51,11 +51,11 @@ put() { if [ "${3:-}" = keep ] && [ -e "$2" ]; then
 
 # Back up every concord file this install would overwrite (never backup/ itself or runs.jsonl).
 if [ -e "$DEST/concord/concord.py" ]; then
-  for f in "$DEST"/concord/*.py "$DEST"/concord/*.md "$DEST"/concord/*.conf; do backup_into "$f" "$(basename "$f")"; done
+  for f in "$DEST"/concord/*.py "$DEST"/concord/*.md "$DEST"/concord/*.conf "$DEST"/concord/*.sb; do backup_into "$f" "$(basename "$f")"; done
   [ -d "$DEST/concord/tests" ] && backup_into "$DEST/concord/tests" tests
   [ -d "$DEST/concord/repo-notes" ] && backup_into "$DEST/concord/repo-notes" repo-notes
 fi
-for f in "$SRC"/concord/*.py "$SRC"/concord/*.md; do put "$f" "$DEST/concord/$(basename "$f")"; done
+for f in "$SRC"/concord/*.py "$SRC"/concord/*.md "$SRC"/concord/*.sb; do [ -e "$f" ] && put "$f" "$DEST/concord/$(basename "$f")"; done
 for f in "$SRC"/concord/tests/*.sh; do put "$f" "$DEST/concord/tests/$(basename "$f")"; done
 if [ -n "${BK:-}" ] && [ -d "$DEST/concord/tests" ]; then   # suites this source no longer ships; the backup above keeps them
   for f in "$DEST"/concord/tests/*_test.sh; do [ -e "$SRC/concord/tests/$(basename "$f")" ] && continue

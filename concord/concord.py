@@ -1264,7 +1264,93 @@ def clean_env():
             if not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_EXACT}
 
 
-def build_command(executor, binary, task, contract, model, mode, wall_text, run_dir, conf, allow_edit=None):
+# ---------- OpenCode seatbelt sandbox ----------
+
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+PROFILE = HERE / "opencode.sandbox.sb"      # template; sandbox_cmd renders it per run
+# Foreign credential stores the executor never needs: denied so a compromised run cannot read or exfiltrate them.
+# Notes from probing a live Go run under the profile (2026-10-23):
+#  - OpenCode's OWN creds are NOT denied (service.json, ~/.config/concord-keys): the binary reads them to
+#    authenticate to the Go/Zen endpoints, so denying them breaks every run. Their readability to the agent is the
+#    limit the ticket already accepts; the stronger fix is the OpenShell pilot.
+#  - ~/Library/Keychains IS denied and safe: that is where Claude Code's own OAuth token lives, and OpenCode runs
+#    fine without the keychain.
+#  - ~/.claude is NOT denied wholesale: OpenCode reads some benign part of it (e.g. the live concord install) and a
+#    blanket deny makes every run fail. Only the sensitive data under it is denied: the config file (~/.claude.json,
+#    which can hold MCP tokens), conversation transcripts (projects/), session state and command history.
+SANDBOX_DENY_READ = ("~/.ssh", "~/.aws", "~/.config/gcloud", "~/.config/gh", "~/.gnupg", "~/.docker",
+                     "~/Library/Keychains", "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.git-credentials",
+                     "~/.cache/huggingface/token", "~/.cache/huggingface/stored_tokens", "~/.kube",
+                     "~/.claude.json", "~/.claude/projects", "~/.claude/sessions", "~/.claude/session-data",
+                     "~/.claude/history.jsonl")
+
+
+def opencode_dirs():
+    """(data, cache, config) of OpenCode, honouring XDG_* the way OpenCode does."""
+    home = Path.home()
+
+    def pick(var, fallback):
+        base = os.environ.get(var)
+        return (Path(base) if base else home / fallback) / "opencode"
+
+    return (pick("XDG_DATA_HOME", ".local/share"), pick("XDG_CACHE_HOME", ".cache"),
+            pick("XDG_CONFIG_HOME", ".config"))
+
+
+def sandbox_cmd(cmd, repo, run_dir, conf, args):
+    """cmd under sandbox-exec with the OpenCode Seatbelt profile, or cmd unchanged when the off-switch is set or
+    sandbox-exec cannot apply here (nested Seatbelt) — the harness never hard-breaks where Seatbelt is unavailable.
+    The on/off state (with the reason when off) is recorded to run_dir/sandbox.state so the run report and runs.jsonl
+    show whether a run was protected; a silent fail-open would hide an unprotected run."""
+    def record(state):
+        try:
+            (Path(run_dir) / "sandbox.state").write_text(state)
+        except OSError:
+            pass
+        return cmd
+
+    if getattr(args, "no_sandbox", False):
+        return record("off (--no-sandbox)")
+    if os.environ.get("CONCORD_NO_SANDBOX"):
+        return record("off (CONCORD_NO_SANDBOX)")
+    if not conf_flag(conf, "opencode.sandbox", True):
+        return record("off (opencode.sandbox = no)")
+    if not os.path.isfile(SANDBOX_EXEC) or not PROFILE.is_file():
+        print("note: sandbox-exec or its profile is missing; launching opencode unsandboxed", file=sys.stderr)
+        return record("off (sandbox-exec or profile missing)")
+    try:
+        probe = subprocess.run([SANDBOX_EXEC, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+                               capture_output=True, timeout=PR_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        probe = None
+    if probe is None or probe.returncode != 0:
+        print("note: sandbox-exec cannot apply here (nested sandbox?); launching opencode unsandboxed",
+              file=sys.stderr)
+        return record("off (sandbox-exec cannot apply; nested sandbox?)")
+    data, cache, _config = opencode_dirs()      # config dir stays readable (not writable), so it is not templated
+    deny = [Path(os.path.expanduser(p)) for p in SANDBOX_DENY_READ]
+    for raw in conf.get("opencode.sandbox_deny", "").split(":"):
+        if raw.strip():
+            p = Path(raw.strip()).expanduser()
+            deny.append(p if p.is_absolute() else Path(repo) / p)
+    # Render the template to a concrete per-run profile (like dsh.patch.yml): the {{...}} write-subpaths and the
+    # {{READ_DENY}} block are substituted, and sandbox-exec loads the rendered copy with -f (no -D params).
+    values = {"WORKTREE": Path(repo), "OC_DATA": data, "OC_CACHE": cache,
+              "TMP": Path(os.environ.get("TMPDIR") or "/tmp"), "RUN": Path(run_dir)}
+    values = {k: str(v.resolve()) for k, v in values.items()}
+    text = PROFILE.read_text()
+    for name, value in values.items():
+        text = text.replace("{{" + name + "}}", json.dumps(value))
+    text = text.replace("{{READ_DENY}}", "\n".join(
+        f"(deny file-read* (subpath {json.dumps(str(p.resolve()))}))" for p in deny))
+    rendered = Path(run_dir) / "sandbox.sb"
+    rendered.write_text(text)
+    (Path(run_dir) / "sandbox.state").write_text("on")
+    return [SANDBOX_EXEC, "-f", str(rendered), *cmd]
+
+
+def build_command(executor, binary, task, contract, model, mode, wall_text, run_dir, conf, allow_edit=None,
+                  repo=None, args=None):
     """mode: full (edits + shell), edit (edits only), readonly (lint: no edits, no shell).
     allow_edit: OpenCode edit allow-patterns (from edit_patterns); everything else is denied to the edit tools."""
     env = clean_env()
@@ -1293,6 +1379,7 @@ def build_command(executor, binary, task, contract, model, mode, wall_text, run_
         env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
         cmd = [binary, "run", "--standalone", "--auto", "--title", f"delegate {run_dir.name}",
                "-m", model, combined]
+        cmd = sandbox_cmd(cmd, repo, run_dir, conf, args)
     elif executor == "pi":
         # --no-approve: never execute repo-local .pi/ extension code; --no-context-files: skip AGENTS.md/CLAUDE.md
         cmd = [binary, "-p", "--no-session", "--no-approve", "--no-context-files",
@@ -2156,7 +2243,11 @@ def finish_run(run_dir, rc, secs=None):
         lines.append(static_line)
     if usage:
         lines.append(usage_line(usage, st.get("model", ""), tool_calls["tool_calls"] if tool_calls else None))
+    sandbox_state = None
     if st.get("executor") == "opencode":
+        sb_path = run_dir / "sandbox.state"
+        sandbox_state = sb_path.read_text().strip() if sb_path.exists() else "unknown"
+        lines.append(f"sandbox: {sandbox_state}")
         lines.append("network: webfetch denied; shell network not mediated")
         if tool_calls and tool_calls["webfetch_attempts"]:
             lines.append("WEBFETCH ATTEMPTED (denied): " + ", ".join(tool_calls["webfetch_attempts"]))
@@ -2228,6 +2319,7 @@ def finish_run(run_dir, rc, secs=None):
         "baseline_rc": [b["rc"] for b in st.get("baseline") or []],
         "diff_lines": diff_lines, "dependency_changes": dep_changes,
         "characterization": char_line or None, "staged": staged_new, "git_internals_changed": internals_changed,
+        "sandbox": sandbox_state,
         "plan_hash_after": file_hash(plan), "executor_tokens": exec_tokens,
         "executor_cache_read": usage["cache_read"] if usage else None, "static_new": static_new,
         "executor_cost": usage["cost_usd"] if usage else None, "usage": usage,
@@ -2236,7 +2328,7 @@ def finish_run(run_dir, rc, secs=None):
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
     index_append({k: meta[k] for k in ("run_id", "repo", "executor", "model", "name", "mode", "rc",
                                        "seconds", "plan", "phase", "plan_modified", "started", "verdict",
-                                       "executor_tokens", "executor_cost")}
+                                       "executor_tokens", "executor_cost", "sandbox")}
                  | {"out_of_scope_n": len(source_oos), "generated_n": len(generated), "deleted_n": len(deleted),
                     "staged_n": len(staged_new), "git_internals_n": len(internals_changed),
                     "outside_n": len(outside_changed)})
@@ -2444,7 +2536,7 @@ def cmd_run(args, target, phase, conf):
     run_dir = new_run_dir(root, name or executor, phase, prefix="dry-" if args.dry_run else "")
     allow_edit = edit_patterns(repo, files) if executor == "opencode" and files else None
     cmd, env, combined = build_command(executor, binary, task, contract, model, args.mode,
-                                       wall_text, run_dir, conf, allow_edit=allow_edit)
+                                       wall_text, run_dir, conf, allow_edit=allow_edit, repo=repo, args=args)
     (run_dir / "prompt.txt").write_text(combined)
     shown = redact_cmd(cmd, contract, combined, task)
     (run_dir / "cmd.json").write_text(json.dumps(shown, indent=1))
@@ -2461,6 +2553,8 @@ def cmd_run(args, target, phase, conf):
 
     if args.dry_run:
         print(f"DRY RUN {run_dir.name}\nexecutor: {who}\ncwd: {repo}\ncmd: {json.dumps(shown)}")
+        if (run_dir / "sandbox.state").exists():
+            print(f"sandbox: {(run_dir / 'sandbox.state').read_text().strip()}")
         if "OPENCODE_CONFIG_CONTENT" in env:
             print(f"opencode permission: {env['OPENCODE_CONFIG_CONTENT']}")
         print(f"files in scope: {files or '-'}\nacceptance: {parse_acceptance(phase_text) or '-'}")
@@ -3778,7 +3872,8 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     # D2: a model review is recorded under the model that ran (its models.conf name when neither --model nor --via
     # changed the model, else the model id).
     reviewer = res["name"] if (executor == res["executor"] and model == res["model"]) else model
-    cmd, env, combined = build_command(executor, binary, task, styled_review_task(), model, "readonly", wall, run_dir, conf)
+    cmd, env, combined = build_command(executor, binary, task, styled_review_task(), model, "readonly", wall,
+                                       run_dir, conf, repo=repo, args=args)
     (run_dir / "prompt.txt").write_text(combined)
     if args.dry_run:
         print(dry_line({"name": res["name"], "executor": executor, "model": model, "chars": len(combined)}))
@@ -3813,7 +3908,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         retry_task = task + (f"\n\nYour previous answer could not be used: {'; '.join(result['errors'])}. "
                              f"Answer again with only the REVIEW-JSON block.")
         cmd, env, combined = build_command(executor, binary, retry_task, styled_review_task(), model, "readonly",
-                                           wall, run_dir, conf)
+                                           wall, run_dir, conf, repo=repo, args=args)
         (run_dir / "prompt-retry.txt").write_text(combined)            # the prompt artifact of the retry
         rc, secs = run_process(cmd, env, repo, run_dir / "output-retry.log", timeout_s)
         out = ANSI.sub("", (run_dir / "output-retry.log").read_bytes().decode("utf-8", "replace"))
@@ -5099,7 +5194,7 @@ def cmd_lint(args, phase, target, conf):
     root = runs_root(repo)
     run_dir = new_run_dir(root, res["name"], phase, prefix="lint-")
     cmd, env, combined = build_command(executor, binary, task, LINT_TASK, model, "readonly",
-                                       args.wall or "10m", run_dir, conf)
+                                       args.wall or "10m", run_dir, conf, repo=repo, args=args)
     (run_dir / "prompt.txt").write_text(combined)
     if args.dry_run:
         print(f"DRY RUN LINT {run_dir.name}\nexecutor: {res['name']} -> {executor} {model}")
@@ -6018,6 +6113,9 @@ def main():
     parser.add_argument("--repo", help="repository directory (default: current directory)")
     parser.add_argument("--extra", help="extra instructions, e.g. feedback for a retry (use --extra=TEXT)")
     parser.add_argument("--no-ignored", action="store_true", help="do not monitor gitignored paths")
+    parser.add_argument("--no-sandbox", action="store_true",
+                        help="launch the opencode executor without sandbox-exec (also CONCORD_NO_SANDBOX=1, "
+                             "opencode.sandbox = no)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--lint", metavar="PHASE", type=phase_arg, help="read-only pre-flight review of a phase")
     parser.add_argument("--begin", metavar="PHASE", type=phase_arg, help="open a session run (Claude implementer or planner)")

@@ -16,7 +16,7 @@ The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 bash install.sh --dry-run            # shows every link, copy, keep and backup; writes nothing
-bash install.sh                      # the default: links the commands and agents, installs the dispatcher, then runs Concord's twenty test suites from the installed copy
+bash install.sh                      # the default: links the commands and agents, installs the dispatcher, then runs Concord's twenty-one test suites from the installed copy
 bash install.sh --plugin             # the marketplace layout instead of the links; prints the /plugin commands
 bash install.sh --repo ~/src/myrepo  # also drops the hook rules into that repository's .claude/
 ```
@@ -70,7 +70,7 @@ Reports, ledgers, red runs, scope enforcement on OpenCode, attempt caps and the 
 ```bash
 bash tests/package_test.sh                 # the repository's contract (about a minute; installs into temporary HOMEs)
 bash tests/demo_test.sh                    # the credential-free demo, end to end
-bash concord/tests/run_all.sh              # the dispatcher's twenty suites against this checkout
+bash concord/tests/run_all.sh              # the dispatcher's twenty-one suites against this checkout
 bash ~/.claude/concord/tests/run_all.sh   # the same suites against the installed copy
 ```
 

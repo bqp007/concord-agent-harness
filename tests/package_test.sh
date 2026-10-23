@@ -90,10 +90,10 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6138 ] || { wc -l $K/concord.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6236 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
-  check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
+  check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 17 ]"
   check budgets/static_checks "grep -q '^static_checks = yes' $K/executors.conf"
   check budgets/track_ignored "grep -q '^track_ignored = yes' $K/executors.conf"; }
 
