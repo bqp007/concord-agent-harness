@@ -138,7 +138,11 @@ inst_e() { inst --bogus 2>/dev/null; [ $? = 2 ] && { inst --repo 2>/dev/null; [ 
 inst_f() { mkdir "$H/bin" && printf '#!/bin/sh\nexit 1\n' > "$H/bin/python3" && chmod +x "$H/bin/python3"
   PATH="$H/bin:$PATH" inst --no-tests >/dev/null 2>"$H/err"; [ $? = 2 ] && grep -q python3 "$H/err"; }
 inst_g() { env HOME=$H CLAUDE_HOME=$H/x bash install.sh --no-tests >/dev/null && [ -f "$H/x/concord/concord.py" ] && [ ! -e "$H/.claude" ]; }
-s_install() { local c; for c in a b c d e f g; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+inst_h() { local g="$H/.claude/concord/tests/gone_test.sh"   # a suite the source dropped: removed, kept in the backup
+  inst --no-tests >/dev/null && echo old > "$g" && inst --dry-run > "$H/out" && grep -qF "would remove $g" "$H/out" && [ -f "$g" ] &&
+  inst --no-tests > "$H/out" && [ ! -e "$g" ] && grep -qF "remove $g" "$H/out" &&
+  [ "$(cat "$H"/.claude/concord/backup/*-pre-install*/tests/gone_test.sh)" = old ] && [ -f "$H/.claude/concord/tests/run_all.sh" ]; }
+s_install() { local c; for c in a b c d e f g h; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 s_docs() { local h f
   for h in Contents 'How it works' Install 'Try it without credentials' 'Run a ticket' Components Safety Results Citation Contributing License; do
