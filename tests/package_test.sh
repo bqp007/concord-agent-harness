@@ -90,7 +90,7 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6121 ] || { wc -l $K/concord.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6122 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
@@ -173,7 +173,7 @@ inst_n() { mkdir -p "$H/.claude" && printf 'MINE\n<!-- concord:begin -->\nold\nM
 inst_o() { mkdir -p "$H/.claude" "$H/dot" && printf 'DOTFILES\n' > "$H/dot/CLAUDE.md" && ln -s "$H/dot/CLAUDE.md" "$H/.claude/CLAUDE.md" &&
   inst --no-tests >/dev/null && [ -L "$H/.claude/CLAUDE.md" ] && grep -qF "<!-- concord:begin -->" "$H/dot/CLAUDE.md" && grep -qxF DOTFILES "$H/dot/CLAUDE.md" &&
   b=$(ls "$H"/.claude/concord/backup/*/CLAUDE.md | head -1) && [ ! -L "$b" ] && [ "$(cat "$b")" = DOTFILES ]; }
-inst_p() { mkdir -p "$H/.claude" && { echo MINE; git -C "$K/.." show f811c1d:adapters/claude-code/CLAUDE.md; echo AFTER; } > "$H/.claude/CLAUDE.md" &&
+inst_p() { mkdir -p "$H/.claude" && { echo MINE; cat "$K/../tests/fixtures/CLAUDE-2.0.md"; echo AFTER; } > "$H/.claude/CLAUDE.md" &&   # the 2.0 block, merged by hand
   inst --no-tests >/dev/null && [ "$(grep -c '^# Default workflow' "$H/.claude/CLAUDE.md")" = 1 ] &&
   [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" = 1 ] && [ "$(head -1 "$H/.claude/CLAUDE.md")" = MINE ] &&
   [ "$(tail -1 "$H/.claude/CLAUDE.md")" = AFTER ] && ! grep -qF free-deepseek-flash "$H/.claude/CLAUDE.md"; }

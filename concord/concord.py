@@ -2285,7 +2285,8 @@ def cmd_lesson(text, tags):
     stored = LESSONS_NEXT.read_text().strip() if LESSONS_NEXT.is_file() else ""
     n = max([int(stored) if stored.isdigit() else 1] + [i + 1 for i in ids])
     LESSONS_NEXT.write_text(f"{n + 1}\n")
-    line = f"L{n} {time.strftime('%Y-%m-%d')} {' '.join('[' + t + ']' for t in tags)} {' '.join(text.split())}"
+    text = re.sub(r"^(?:\s*\[(?:plan|exec)\])+", "", " ".join(text.split())).strip()   # tags come only from --tag
+    line = f"L{n} {time.strftime('%Y-%m-%d')} {' '.join('[' + t + ']' for t in tags)} {text}"
     with LESSONS.open("a") as f:
         f.write(line + "\n")
     print(line)

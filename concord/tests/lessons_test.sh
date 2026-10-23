@@ -23,6 +23,8 @@ check fold-new-id 'run --lesson "after fold" | grep -q "^L4 "'
 check fold-delta 'hook "{\"session_id\":\"s1\"}" | grep -q "after fold"'
 run --lesson "never pass [exec] flags to wt.py" --tag plan >/dev/null
 check tag-in-text 'python3 -c "import sys;sys.path.insert(0,\"$T/c\");import concord;assert not any(\"wt.py\" in l for _,l in concord.lesson_lines(\"exec\"))"'
+run --lesson "[exec] wt.py flags are planner-only" >/dev/null
+check tag-at-start 'python3 -c "import sys;sys.path.insert(0,\"$T/c\");import concord;assert not any(\"planner-only\" in l for _,l in concord.lesson_lines(\"exec\"))"'
 check bad-json-exit0 'echo nope | python3 "$T/c/concord.py" --lessons-hook >/dev/null; [ $? = 0 ]'
 check exec-in-task 'python3 -c "import sys;sys.path.insert(0,\"$T/c\");import concord;t=concord.build_task(\"$T/r\",\"P.md\",1,\"do\",\"\");assert \"Lessons (current; binding):\" in t and \"name exact checks\" in t and \"plan only\" not in t"'
 echo "passed $P, failed $F"
