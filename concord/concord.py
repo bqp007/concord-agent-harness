@@ -6,17 +6,13 @@ Usage:
               [--wall 30m] [--repo DIR] [--extra TEXT] [--no-ignored] [--no-baseline] [--force] [--dry-run]
               [--user-approved QUOTE]
   concord.py --lint PHASE [MODEL] [--plan PLAN.md] [--repo DIR]           # read-only pre-flight: questions a cheap model would need answered
-  concord.py --map PLAN [--mermaid] [--repo DIR]                          # zero-token Intent/Structure/Work map with per-phase status (--mermaid: a Mermaid mindmap)
   concord.py --review RUN_ID|last [MODEL] [--checklist a,b] [--repo DIR] [--files GLOBS] [--exclude GLOBS]
                                               # read-only review of a run's diff against REVIEW.md checklists
   concord.py --review RUN_ID|last --packet                                # prompt file for a Claude reviewer subagent (subscription)
   concord.py --review-record RUN_ID|last --reviewer NAME --file F         # store that reviewer's verdict on the run
-  concord.py --close-round RUN_ID [--adopt F1,F2] [--wrong "F3=why"] [--decline "F4=why"] [--test "F1=tests/x::t"]
-              --verdict-result PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED|SPEC_GAP] [--note TEXT]
-              [--user-approved QUOTE]
-                                              # adjudicate ids from any reviewer + record the verdict, one call
   concord.py --review-pr PR [MODEL] [--delta] [--repo DIR] [--files GLOBS] [--exclude GLOBS] [--checklist a,b]
               [--tier low|medium|high] [--packet] [--dry-run] [--wall 10m] [--via X] [--model M]
+              [--user-approved QUOTE]          # the user's go-ahead: this review counts at its --tier
                                               # read-only review of an open GitHub PR at its head (N | owner/repo#N | URL)
                                               # --delta: review only the fix commits since the latest reviewed head
   concord.py --pr-status PR [--repo DIR]                                 # recorded PR reviews, and whether the current head has one
@@ -24,14 +20,15 @@ Usage:
                                               # before a Claude implementer / planner run
   concord.py --end RUN_ID|last [--repo DIR]                                # after it: same report as a CLI run
   concord.py --abort RUN_ID|last [--repo DIR]
-  concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED|SPEC_GAP] [--note TEXT]
-              [--tokens N] [--user-approved QUOTE]
-  concord.py --stats [--all] [--plan PLAN] [--repo DIR]                   # pass rates, time, tokens, reviewer adoption
+  concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED] [--note TEXT]
+              [--tokens N]
   concord.py --resolve "MODEL WORDS"
   concord.py --models [--verify]
   concord.py --list | --check
   concord.py --show RUN_ID|last [--repo DIR]
   concord.py --restore RUN_ID|last [--repo DIR]
+  concord.py --mutate RUN_ID|last [--max 10] [--seed 0] [--repo DIR]      # opt-in: mutants of the run's own lines,
+                                              # in an isolated copy; a mutant's first failing check stops it
 
 MODEL is a name from models.conf ("deepseek pro", "kimi", "glm 5.3"), a raw provider/model ID,
 or an executor name (qwen, opencode, pi, dsh, kimi). Without MODEL, the phase's `Executor:` line
@@ -49,11 +46,11 @@ phase's `Files:` list (source counted; untracked build/cache output listed separ
 staged edits, git hooks/config edits, branch or HEAD movement, and any edit to the plan file. On
 OpenCode the `Files:` list is enforced through its edit permission rules; elsewhere it is advisory.
 The calling agent re-runs the acceptance commands printed in the report (captured before the run)
-and records its verdict with --verdict so --stats can rank executors on evidence.
+and records its verdict with --verdict.
 Before the executor starts, the acceptance commands run once on the untouched tree (red run): a
 phase whose acceptance already passes is not run (exit 6), because its tests do not test it.
 Exit codes: 2 usage/plan/lock, 3 session executor, 4 unknown model, 5 billing guard, 6 baseline,
-7 PASS refused (acceptance files changed), 8 attempt cap, 9 review tier, 124 timeout.
+7 PASS refused (acceptance files changed), 8 attempt cap, 124 timeout.
 Run artifacts live in <git-common-dir>/concord/<run-id>/ (outside the working tree).
 Repository notes for executors: ~/.claude/concord/repo-notes/<repo-dir-name>.md (binding facts,
 kept short; prepended to every task for that repository).
@@ -122,16 +119,14 @@ LINK_NOISE_GLOBS = ("__pycache__", "*.pyc", "*.pyo", ".DS_Store", ".pytest_cache
 BACKUP_CAP_FILES = 5000
 BACKUP_CAP_BYTES = 200 * 1024 * 1024
 NOTES_CAP_CHARS = 4000
+POINTER_CAP_CHARS = 60_000      # code inlined per Notes: pointer (D4)
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
 GUARDS_NOTE = ("guards: the contract and bash deny rules are advisory; Files: scope is enforced only on OpenCode "
                "(edit/write/patch tools, not shell redirection); the backup is the real safety net")
 # Git metadata an executor must never touch (hooks run as the user on the next commit).
 GIT_INTERNAL_FILES = ("config", "info/exclude", "info/attributes")
 CHECK_TIMEOUT_S = 300          # per baseline / characterization command (executors.conf: check_timeout)
-CAUSES = ("EXECUTOR", "PLAN_GAP", "TEST_DEFECT", "FLAKY", "PROVIDER", "BLOCKED", "SPEC_GAP")
-PASS_CAUSES = ("SPEC_GAP",)
-CAUSE_CODE = {"EXECUTOR": "E", "PLAN_GAP": "P", "TEST_DEFECT": "T", "FLAKY": "F", "PROVIDER": "R",
-              "BLOCKED": "B"}
+CAUSES = ("EXECUTOR", "PLAN_GAP", "TEST_DEFECT", "FLAKY", "PROVIDER", "BLOCKED")
 STATUS_LINE = re.compile(r"^[\s*_\x60>#-]*STATUS:[\s*_\x60]*(PASS|FAIL|BLOCKED)\b(?![\s*_\x60]*\|)", re.M)
 QUESTIONS_LINE = re.compile(r"^[\s*_\x60>#-]*QUESTIONS:[\s*_\x60]*(.*)$")
 REPORT_FIELD = re.compile(r"^[\s*_\x60>#-]*[A-Z][A-Z ]+:")
@@ -179,6 +174,13 @@ def provider_refusals(text):
     """[(label, advice)] for every known provider refusal found in executor output (case-insensitive)."""
     low = (text or "").lower()
     return [(label, advice) for needle, label, advice in PROVIDER_REFUSALS if needle.lower() in low]
+
+
+def review_refusals(text):
+    """provider_refusals over the harness `Error:` lines only, so a review answer that quotes a refusal phrase (from
+    the code under review) is a parse failure, not a refusal (D1)."""
+    return provider_refusals("\n".join(l for l in (text or "").splitlines()
+                                        if l.strip().lower().startswith("error:")))
 
 
 def executor_blocked(log_text):
@@ -239,17 +241,11 @@ QUESTIONS: numbered questions you would need answered to implement this phase wi
   (missing inputs/outputs, undefined behaviour, names or paths that do not exist, conflicting steps).
   Write "none" if there are none.
 FILES: completeness of the `Files:` list. Follow the callers, callees, configs and tests of the
-  listed files: name any file that must also change but is not listed, any listed file that needs
-  no change, and any dependency the executor would need to read that `Context:` does not name.
+  listed files: name any file that must also change but is not listed, and any listed file that needs
+  no change.
   Write "complete" if the list is right.
-INPUTS: completeness of the phase's Inputs field: every input source with its classes (valid kinds, malformed,
-  missing, failures the platform documents) and the expected behaviour per class; name any class the code handles
-  or must handle that is missing, and any listed class no acceptance command exercises.
-  Write "complete", "no Inputs field" when the phase has none, or "not required (Risk: low)" for a Risk: low phase without one.
 RISKS: places where the steps conflict with the current code, or where the acceptance commands
   would not detect a wrong implementation. Write "none" if there are none.
-GAPS: the "gap checklist" items (if the task has one) that this phase touches but does not settle, one per
-  line as "[<class>] <question>: <the field that should settle it>". Write "none" when there is no checklist or nothing is open.
 VERDICT: READY | NEEDS ANSWERS
 """
 
@@ -293,7 +289,7 @@ REVIEW_TASK = """You are reviewing ONE finished code change, read-only. Its acce
 questions about it; do not hunt for things to say. Read the spec and the diff first; open repository files only to
 confirm a suspicion. Never edit anything.
 
-1. CLAUSES. For each clause of the spec you are given (Purpose, Interfaces, Example, Edge cases, Decisions, and the
+1. CLAUSES. For each clause of the spec you are given (Steps, Interfaces, Decisions, Out of scope, and the
    decisions in the review ledger), say PASS, FAIL or UNCLEAR, with the evidence in one short sentence. No spec
    given: leave "clauses" empty.
 2. DEFECTS. Is there a concrete input under which the change breaks a behaviour the spec or the existing code
@@ -323,34 +319,13 @@ REVIEW-JSON
 {"findings": [{"severity": "HIGH", "path": "limits.py", "line": 3, "line_end": 3,
   "problem": "NaN returns 1.0, spec says ValueError", "fix": "raise ValueError when x != x, first",
   "repro": {"input": "clamp(float('nan'))", "expected": "ValueError", "actual": "1.0"},
-  "clause": "Edge cases: NaN", "test": "", "reraise_of": ""}],
- "clauses": [{"clause": "Edge cases: NaN", "status": "FAIL", "note": "no NaN branch"}],
+  "clause": "Steps: NaN", "test": "", "reraise_of": ""}],
+ "clauses": [{"clause": "Steps: NaN", "status": "FAIL", "note": "no NaN branch"}],
  "tests": [{"test": "tests/test_limits.py::test_nan", "discriminates": "yes", "why": "asserts ValueError"}],
  "verdict": "FIX"}
 END-REVIEW-JSON
 
 "findings": [] when there are none. "verdict": CLEAN, FIX or BLOCK (the dispatcher recomputes it from the findings).
-"""
-
-# --card: the fresh verifier re-runs acceptance and reads only the flagged hunks (NOT the reviewer; independence stays).
-VERIFY_TASK = """You are the independent verifier of ONE finished delegated phase, read-only. You are NOT the reviewer
-(review independence is unchanged). From the verdict card and the material below: re-run the acceptance commands,
-open only the hunks the FLAGS name, and decide PASS or FAIL with a cause. Do not read the whole diff unless a FLAG or
-your own re-run points you there.
-
-Re-run every acceptance command and compare its result with the recorded one; a command that now differs is FLAKY.
-Read the flagged files (out of scope, floored, test or acceptance files changed) and judge whether the change stays in
-scope and the tests still grade the requirement. Cite each file you open with its line ranges.
-
-Answer with exactly one block and nothing after it:
-
-VERIFY-JSON
-{"verdict": "PASS", "cause": null,
- "evidence": ["acceptance 1/1 re-run pass", "no out-of-scope source change"],
- "read": ["cart.py:1-20"]}
-END-VERIFY-JSON
-
-"verdict" is PASS or FAIL; "cause" is null for PASS, else one of EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, BLOCKED.
 """
 
 
@@ -566,7 +541,7 @@ def file_hash(path):
 
 PHASE_HEAD = re.compile(r"^(#{1,6})\s*Phase\s+(\d+(?:\.\d+)*)\b.*$", re.I | re.M)
 PHASE_WORD = re.compile(r"(\d+)(?:\.([1-9]\d*))?")
-FIELD_NAMES = ("Executor|Purpose|Risk|Files|Context|Interfaces|Inputs|Steps|Examples?|Edge cases|Decisions|"
+FIELD_NAMES = ("Executor|Purpose|Risk|Files|Context|Interfaces|Notes|Inputs|Steps|Examples?|Edge cases|Decisions|"
                "Budget|Baseline|Characterize|Acceptance|Out of scope")
 FIELD = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(" + FIELD_NAMES + r")(?:(?<=inputs)\s+(?:and\s[^:*\n]{1,40}|"
                    r"\([^():*\n]{1,40}\)))?\s*\**\s*:", re.I)
@@ -664,12 +639,6 @@ def parse_backticked(phase_text, name):
     return out
 
 
-def interface_signatures(phase_text):
-    """The Interfaces: spans shaped like a signature (an identifier, optionally . or :: qualified, then `(`)."""
-    return [span for span in parse_backticked(phase_text, "Interfaces")
-            if re.search(r"[A-Za-z_][\w.:]*\(", span)]
-
-
 MARKED = re.compile(r"\(characterization\b[^)]*\)", re.I)
 
 
@@ -743,206 +712,12 @@ def acceptance_lint(repo, phase_text, files):
     return out
 
 
-def context_lint(phase_text):
-    """Context entries that name a file or directory without a function or line range: `no function or line
-    range: item` (advisory, no exit change). Prose entries are ignored."""
-    inline, body = field_block(phase_text, "Context")
-    items = []
-    for line in ([inline] if inline else []) + body:
-        line = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line)
-        items += [i.strip() for i in line.split(",")]
-    out = []
-    for item in items:
-        if not item:
-            continue
-        for m in re.finditer(r"[A-Za-z0-9_./-]+", item):
-            tok = m.group(0)
-            if "/" in tok or tok.endswith(LINT_SUFFIXES) or tok.endswith("/"):
-                break
-        else:
-            continue                                    # prose: no path token
-        rest = item[m.end():]
-        if (re.search(r":\s*\S", rest) or re.search(r"`[^`]*`", rest) or re.search(r"L\d", rest)
-                or re.search(r"\w\(\)", rest) or re.search(r"\d-\d", rest)):
-            continue                                    # scoped: a function, line range or note names what to read
-        out.append(f"no function or line range: {item}")
-    return out
-
-
 def parse_word(phase_text, name, choices, default):
     """First word of a one-word field such as `Risk: high (untrusted input)`."""
     inline, body = field_block(phase_text, name)
     value = (inline or (body[0] if body else "")).strip().lower()
     word = re.split(r"[\s(,;:.]", value, maxsplit=1)[0] if value else ""
     return word if word in choices else default
-
-
-def parse_budget(phase_text):
-    inline, body = field_block(phase_text, "Budget")
-    m = re.search(r"\d+", inline or (body[0] if body else ""))
-    return int(m.group()) if m else None
-
-
-# ---------- plan map (Intent / Structure / Work) ----------
-
-MAP_HEAD = re.compile(r"^(#{1,6})\s*Map\b.*$", re.I | re.M)
-MAP_SUB = re.compile(r"^#{1,6}\s*(Intent|Structure|Work)\b", re.I)
-MAP_BULLET = re.compile(r"^[\s>]*[-*]\s*([ISP]\d+(?:\.\d+)?)\b(.*)$")
-MAP_ID = re.compile(r"[ISP]\d+(?:\.\d+)?")
-PHASE_ID = re.compile(r"\((P\d+(?:\.\d+)?)\b[^)]*\)")
-MAP_CAPS = {"intent": 6, "structure": 8, "work": 8}
-
-
-def extract_map_block(plan_text):
-    """The text under a `## Map` heading, up to the next same-or-higher heading, or None."""
-    m = MAP_HEAD.search(plan_text)
-    if not m:
-        return None
-    level = len(m.group(1))
-    nxt = re.compile(r"^#{1,%d}\s" % level, re.M).search(plan_text, m.end())
-    return plan_text[m.end():nxt.start() if nxt else len(plan_text)]
-
-
-def parse_map(plan_text):
-    """{"has_map": bool, "intent"/"structure"/"work": [{"id","parents","text"}, ...]}.
-    A bullet is `Xn [<- P1, P2] text`; parents are the leading ID tokens after `<-`."""
-    block = extract_map_block(plan_text)
-    out = {"has_map": block is not None, "intent": [], "structure": [], "work": []}
-    if block is None:
-        return out
-    current = None
-    for line in block.splitlines():
-        sub = MAP_SUB.match(line)
-        if sub:
-            current = sub.group(1).lower()
-            continue
-        if current is None:
-            continue
-        mb = MAP_BULLET.match(line)
-        if not mb:
-            continue
-        rest = mb.group(2).strip()
-        parents, text = [], rest
-        am = re.match(r"<-\s*(.*)", rest)
-        if am:
-            toks = am.group(1).split()
-            i = 0
-            while i < len(toks) and MAP_ID.fullmatch(toks[i].rstrip(",")):
-                parents.append(toks[i].rstrip(","))
-                i += 1
-            text = " ".join(toks[i:])
-        out[current].append({"id": mb.group(1), "parents": parents, "text": text})
-    return out
-
-
-def phase_ids(plan_text):
-    """{work-id: phase-key} from phase headings that carry `(Pn <- ...)`."""
-    out = {}
-    for head in PHASE_HEAD.finditer(plan_text):
-        m = PHASE_ID.search(head.group(0))
-        key = phase_key(head.group(2))
-        if m and key is not None:
-            out[m.group(1)] = key
-    return out
-
-
-def map_questions(plan_text):
-    """Open-question bullets `Qn -> Xn ...`; target is the node the question blocks (or None)."""
-    out = []
-    for m in re.finditer(r"(?m)^[\s>]*[-*]\s*(Q\d+)\b([^\n]*)", plan_text):
-        rest = m.group(2).strip()
-        tm = re.match(r"->\s*([ISP]\d+(?:\.\d+)?)\s*(.*)", rest)
-        if tm:
-            out.append({"id": m.group(1), "target": tm.group(1), "text": tm.group(2).strip()})
-        else:
-            out.append({"id": m.group(1), "target": None, "text": rest})
-    return out
-
-
-def map_phase_status(root, repo, plan_rel, phase):
-    """PASS | FAIL [cause] | running | not started, from this checkout+plan+phase's run metas."""
-    metas, running = [], False
-    repo_s = str(repo)
-    for d in sorted(root.glob("*")):
-        if not d.is_dir() or d.name == "ledger":
-            continue
-        mp, sp = d / "meta.json", d / "state.json"
-        if mp.exists():
-            try:
-                rec = json.loads(mp.read_text())
-            except (OSError, ValueError):
-                continue
-            if not isinstance(rec, dict) or rec.get("kind") == "pr-review":
-                continue
-            rid = str(rec.get("run_id") or d.name)
-            if rid.split("-", 2)[-1].startswith(("dry-", "lint-", "review-")):
-                continue
-            if rec.get("repo") != repo_s or rec.get("plan") != plan_rel:
-                continue
-            if str(rec.get("phase")) != str(phase):
-                continue
-            started = rec.get("started")
-            metas.append((started if isinstance(started, (int, float)) and not isinstance(started, bool) else 0, rec))
-        elif sp.exists():
-            try:
-                st = json.loads(sp.read_text())
-            except (OSError, ValueError):
-                continue
-            if (st.get("repo") == repo_s and st.get("plan") == plan_rel
-                    and str(st.get("phase")) == str(phase)):
-                running = True
-    if not metas:
-        return "running" if running else "not started"
-    metas.sort(key=lambda r: r[0])
-    if any(r.get("verdict") == "PASS" for _, r in metas):
-        return "PASS"
-    last = metas[-1][1]
-    if last.get("verdict") == "FAIL":
-        return f"FAIL [{last.get('cause') or '?'}]"
-    return "running"
-
-
-def map_lint(plan_text):
-    """Zero-token MAP LINT lines for `--lint`. No Map block = one warning only (old plans keep working)."""
-    m = parse_map(plan_text)
-    if not m["has_map"]:
-        return ["no Map block (warning only)"]
-    out = []
-    intents = {n["id"] for n in m["intent"]}
-    structures = {n["id"] for n in m["structure"]}
-    struct_by_id = {n["id"]: n for n in m["structure"]}
-    for kind, cap in MAP_CAPS.items():
-        n = (sum(1 for x in m[kind] if "." not in x["id"]) if kind == "work" else len(m[kind]))
-        if n > cap:
-            out.append(f"cap exceeded: {kind.capitalize()} has {n} items (max {cap})")
-    for n in m["structure"]:
-        for p in n["parents"]:
-            if p not in intents:
-                out.append(f"unknown ID: {n['id']} <- {p} (no such intent)")
-    for n in m["work"]:
-        for p in n["parents"]:
-            if p not in structures:
-                out.append(f"unknown ID: {n['id']} <- {p} (no such structure)")
-    for n in m["work"]:
-        if not any(p in structures for p in n["parents"]):
-            out.append(f"work item without a structure parent: {n['id']}")
-    for n in m["structure"]:
-        if not any(p in intents for p in n["parents"]):
-            out.append(f"structure node serving no intent: {n['id']}")
-    served = set()
-    for n in m["work"]:
-        for p in n["parents"]:
-            if p in struct_by_id:
-                served.update(struct_by_id[p]["parents"])
-    for n in m["intent"]:
-        if n["id"] not in served:
-            out.append(f"intent with no work item: {n['id']}")
-    for head in PHASE_HEAD.finditer(plan_text):
-        if phase_key(head.group(2)) is None:
-            continue
-        if not PHASE_ID.search(head.group(0)):
-            out.append(f"phase heading without an ID: Phase {head.group(2)}")
-    return out
 
 
 def count_lines(path):
@@ -955,41 +730,6 @@ def count_lines(path):
         return data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
     except OSError:
         return None
-
-
-def sig_norm(text):
-    """Whitespace-insensitive form of a signature or source text, for Interfaces: matching."""
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\s*([(),:\[\]<>{}=*&|;])\s*", r"\1", text)
-    return text.replace(",)", ")")
-
-
-def check_interfaces(repo, files, interfaces):
-    """Heuristic: does each `Interfaces:` signature appear verbatim (modulo whitespace) in Files:?"""
-    if not interfaces:
-        return [], 0
-    existing, _ = expand_scope(repo, files)
-    blobs = []
-    for f in existing:
-        p = repo / f
-        try:
-            if p.stat().st_size <= 2_000_000:
-                blobs.append(p.read_text(errors="replace"))
-        except OSError:
-            pass
-    raw = "\n".join(blobs)
-    content = sig_norm(raw)
-    problems, exact = [], 0
-    for sig in interfaces:
-        target = sig_norm(sig).rstrip(":{;").strip()
-        if target and target in content:
-            exact += 1
-            continue
-        names = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", sig)
-        name = names[0] if names else ""
-        present = bool(name) and re.search(rf"\b{re.escape(name)}\b", raw) is not None
-        problems.append(f"`{sig}` ({'name ' + name + ' present, signature differs' if present else 'not found'})")
-    return problems, exact
 
 
 def path_matches(path, patterns):
@@ -1085,65 +825,138 @@ def repo_notes(repo):
     return text
 
 
-GAP_LINE = re.compile(r"^\s*[-*]\s*\[([A-Za-z0-9][\w-]*)\]\s*(.+?)\s*\(([^,()]+),\s*(\d{4}-\d{2}-\d{2}),\s*"
-                      r"found:\s*(review|lint|blocked|verify)\s*(?:,\s*rule:\s*([^()]*?))?\s*\)\s*$", re.I)
-RULE_MARK = re.compile(r"rule:\s*[^\s)]", re.I)
+def notes_path(repo, plan_rel):
+    """`<runs root>/notes/<plan file name>`: the FOUND: facts earlier executors of that plan recorded."""
+    return runs_root(repo) / "notes" / Path(plan_rel).name
 
 
-def read_gap_file(path):
-    """The gap log's text (one leading byte-order mark removed), or "" when it is missing or unreadable."""
+def ticket_notes(repo, plan_rel):
+    """The plan's ticket notes file, or ''. Capped like a pointer's code."""
+    if not plan_rel:
+        return ""
     try:
-        text = Path(path).read_text(errors="replace")
-    except OSError: return ""
-    return text[1:] if text.startswith("\ufeff") else text
+        path = notes_path(repo, plan_rel)
+        if not path.is_file():
+            return ""
+        text = path.read_text(errors="replace").strip()
+    except (OSError, ValueError):
+        return ""
+    if len(text) > POINTER_CAP_CHARS:
+        text = text[:POINTER_CAP_CHARS] + f"\n[notes truncated at {POINTER_CAP_CHARS} characters]"
+    return text
 
 
-def parse_gaps(text):
-    """One dict per well-formed gap line: class, question, ticket, date, found, rule (None when no rule)."""
+def parse_notes_pointers(phase_text):
+    """[(spec, line)] for the phase's `Notes:` pointers: `path:name` or `path:a-b` plus a few words each."""
+    inline, body = field_block(phase_text, "Notes")
     out = []
-    for line in (text or "").splitlines():
-        m = GAP_LINE.match(line)
-        if not m:
-            continue
-        try:
-            datetime.strptime(m.group(4), "%Y-%m-%d")
-        except ValueError: continue
-        rule = m.group(6).strip() if m.group(6) else ""
-        out.append({"class": m.group(1).lower(), "question": m.group(2), "ticket": m.group(3).strip(),
-                    "date": m.group(4), "found": m.group(5).lower(), "rule": rule or None})
+    for line in ([inline] if inline else []) + body:
+        raw = re.sub(r"^\s*[-*]\s*", "", line).strip()
+        spec = raw.split()[0].strip("`'\"") if raw else ""
+        if spec and ":" in spec and not spec.startswith(("http:", "https:")):
+            out.append((spec, raw))
     return out
 
 
-def repo_gaps(repo):
-    """(checklist, promote) from the repository's gap log: rule-less bullet lines (newest kept over the cap) and
-    one PROMOTE line per class with two or more of them."""
-    text = read_gap_file(NOTES_DIR / f"{repo_name(repo)}.gaps.md")
-    lines = [line for line in text.splitlines()
-             if re.match(r"^\s*[-*]\s", line) and not RULE_MARK.search(line)]
-    dropped = 0
+def pointer_definition(path, text, lines, name):
+    """The lines of `name` in a source file: Python via ast; otherwise from the line defining `name` to the next
+    line at its indentation or less. [] when nothing defines it."""
+    if path.suffix.lower() == ".py":
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            tree = None
+        if tree is not None:
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+                    end = getattr(node, "end_lineno", None) or node.lineno
+                    return lines[node.lineno - 1:end]
+            return []
+    escaped = re.escape(name)
+    head = re.compile(r"^\s*(?:(?:export|pub(?:\([^)]*\))?|static|async|default|unsafe|extern)\s+)*(?:(?:def|class|function|func|fn|sub|proc|method|"
+                      r"interface|struct|enum|type)\s+(?:\([^)]*\)\s*)?\*?" + escaped + r"\b|(?:const|var|let)\s+"
+                      + escaped + r"\s*[=:])")
+    other = re.compile(r"^\s*(?:[\w$.\[\]<>*&:]+\s+)*`?" + escaped + r"`?\s*[\(=:]")
+    called = re.compile(r"\b" + escaped + r"\s*[\(=:]")
+    keyword = [i for i, line in enumerate(lines) if head.match(line) and called.search(line)]
+    loose = [i for i, line in enumerate(lines) if called.search(line) and (other.match(line) or line.lstrip().startswith(name))
+             and not re.match(r"\s*(?:return|if|elif|while|for|await|yield|throw|raise|else)\b", line)]
+    for i in (keyword or loose)[:1]:
+        line = lines[i]
+        indent = len(line) - len(line.lstrip())
+        end = i + 1
+        while end < len(lines):
+            nxt = lines[end]
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            end += 1
+        return lines[i:end]
+    return []
 
-    def render():
-        return "\n".join(lines) if not dropped else f"[{dropped} older gap lines omitted]\n" + "\n".join(lines)
 
-    while len(lines) > 1 and len(render()) > NOTES_CAP_CHARS:
-        lines.pop(0)
-        dropped += 1
-    checklist = render()
-    if len(checklist) > NOTES_CAP_CHARS:
-        checklist = checklist[:NOTES_CAP_CHARS]
-    groups = {}
-    for entry in parse_gaps(text):
-        if entry["rule"] is None:
-            groups.setdefault(entry["class"], []).append(entry)
-    promote = []
-    for cls, entries in groups.items():
-        if len(entries) < 2:
-            continue
-        tickets = list(dict.fromkeys(e["ticket"] for e in entries))
-        promote.append(f"PROMOTE {cls}: {len(entries)} gaps without a rule ({', '.join(tickets)}): make it a rule "
-                       f"(a line in repo-notes/{repo_name(repo)}.md, a test or a hook), then add \"rule: <where>\" "
-                       f"to those lines")
-    return checklist, promote
+def notes_pointer_text(repo, spec):
+    """The current code a Notes pointer names, or '' when it resolves to nothing (`path:name` / `path:a-b`)."""
+    path_text, sep, target = spec.rpartition(":")
+    if not sep or not path_text or not target:
+        return ""
+    rng = re.fullmatch(r"(\d+)-(\d+)", target)
+    try:
+        path = (Path(repo) / path_text).resolve()
+        path.relative_to(Path(repo).resolve())
+    except (OSError, ValueError):
+        return ""
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(errors="replace")
+    except (OSError, ValueError):
+        return ""
+    lines = text.splitlines()
+    if rng:
+        a, b = int(rng.group(1)), int(rng.group(2))
+        if a < 1 or b < a or a > len(lines):
+            return ""
+        body = lines[a - 1:b]
+    else:
+        body = pointer_definition(path, text, lines, target)
+    code = "\n".join(body).strip("\n")
+    if not code.strip():
+        return ""
+    if len(code) > POINTER_CAP_CHARS:
+        code = code[:POINTER_CAP_CHARS] + f"\n[pointer truncated at {POINTER_CAP_CHARS} characters]"
+    return code
+
+
+def record_found_notes(repo, plan_rel, log_path):
+    """Append this run's `FOUND:` lines (ANSI stripped) to the plan's notes file, once each. Returns lines added."""
+    if not plan_rel or not Path(log_path).is_file():
+        return []
+    try:
+        text = ANSI.sub("", Path(log_path).read_bytes().decode("utf-8", "replace"))
+    except OSError:
+        return []
+    found = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("FOUND:") and line not in found:
+            found.append(line)
+    if not found:
+        return []
+    try:
+        path = notes_path(repo, plan_rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(errors="replace") if path.is_file() else ""
+        have = {line.strip() for line in existing.splitlines()}
+        new = [line for line in found if line not in have]
+        if not new:
+            return []
+        with open(path, "a") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write("".join(line + "\n" for line in new))
+    except (OSError, ValueError):
+        return []
+    return new
 
 
 def parse_risk_floors(text):
@@ -1289,8 +1102,10 @@ def git_internals(repo):
 
 
 def outside_files(repo):
-    """{display path: hash} for Concord, the Claude/OpenCode config and (from a worktree) the main checkout's
-    rule files. Files inside `repo` are skipped: the working-tree snapshot already covers them."""
+    """{display path: hash} for Concord's own files, this repository's notes, the Claude/OpenCode config and (from a
+    worktree) the main checkout's rule files: what an executor could change to loosen its rules. Files other
+    sessions edit as a matter of course (other repositories' notes, Concord's tests, settings.local.json) are not
+    watched. Files inside `repo` are skipped: the working-tree snapshot already covers them."""
     repo_r = Path(repo).resolve()
     home_r = Path.home().resolve()
     out = {}
@@ -1312,9 +1127,8 @@ def outside_files(repo):
             return
 
     home = Path.home()
-    for pat in (HERE.glob("*.py"), HERE.glob("*.md"), HERE.glob("*.conf"), HERE.glob("repo-notes/*"),
-                HERE.glob("tests/*"), [home / ".claude" / "CLAUDE.md", home / ".claude" / "settings.json",
-                home / ".claude" / "settings.local.json"],
+    for pat in (HERE.glob("*.py"), HERE.glob("*.md"), HERE.glob("*.conf"),
+                [NOTES_DIR / f"{repo_name(repo)}.md", home / ".claude" / "CLAUDE.md", home / ".claude" / "settings.json"],
                 (home / ".claude").glob("agents/*"), (home / ".claude").glob("commands/*"),
                 (home / ".claude").glob("hooks/*"), (home / ".config" / "opencode").glob("*.json"),
                 (home / ".config" / "opencode").glob("*.jsonc")):
@@ -1323,7 +1137,7 @@ def outside_files(repo):
     if not is_main_checkout(repo):
         common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
         main_claude = common.parent / ".claude"
-        for p in tuple(main_claude.glob("hookify.*.local.md")) + tuple(main_claude.glob("settings*.json")):
+        for p in tuple(main_claude.glob("hookify.*.local.md")) + (main_claude / "settings.json",):
             add(p)
     return out
 
@@ -1945,12 +1759,6 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
                 char_failed.append(b["cmd"])
     if char_failed:
         notes.append("characterization command failed before the change: " + "; ".join(char_failed))
-    # Inputs field (D3): missing on an implementing phase is a report note, not a refusal. Present only when the
-    # inline value or the body is non-empty.
-    inline_inputs, body_inputs = field_block(phase_text, "Inputs")
-    if executor != "planner" and baseline_mode in ("fail", "pass") and risk != "low" \
-            and not (inline_inputs.strip() or any(line.strip() for line in body_inputs)):
-        notes.append("no Inputs field: input and failure classes are not fixed at planning (PLAN_TEMPLATE.md)")
     if char_cmds:
         (run_dir / "characterize.before.txt").write_text(characterize(char_cmds, repo, timeout_s))
     static_on = conf_flag(conf, "static_checks", True)
@@ -1975,7 +1783,6 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
-        "budget": parse_budget(phase_text), "interfaces": interface_signatures(phase_text),
         "characterize": char_cmds, "check_timeout": timeout_s,
         "track_ignored": track_ignored, "head_before": git(repo, "rev-parse", "HEAD").strip(),
         "branch_before": branch_of(repo), "staged_before": staged(repo), "git_internals": git_internals(repo),
@@ -2121,6 +1928,8 @@ def finish_run(run_dir, rc, secs=None):
     head_after = git(repo, "rev-parse", "HEAD").strip()
     branch_after = branch_of(repo)
     plan_modified = file_hash(plan) != st["plan_hash"]
+    # D4: an executor's `FOUND: path:line fact` lines reach this plan's notes file, once each, for later tasks.
+    record_found_notes(repo, st.get("plan"), run_dir / "output.log")
 
     changed, created, deleted = compare(pre, post, repo)
     # Acceptance files (the tests that grade the phase): an implementer must not edit them. Runs whose state
@@ -2191,8 +2000,6 @@ def finish_run(run_dir, rc, secs=None):
             added += count_lines(repo / p) or 0
     diff_lines = added + removed
     dirty_before = [p for p in changed if p in pre]
-    # Interfaces: do the promised signatures exist verbatim in Files:?
-    iface_problems, iface_exact = check_interfaces(repo, files, st.get("interfaces") or [])
     # Static checks: same tools on the touched files; only findings absent before the run are new.
     static_line, static_new = "", {}
     if st.get("static_on"):
@@ -2226,7 +2033,7 @@ def finish_run(run_dir, rc, secs=None):
     # Tool calls and denied webfetch hosts, from the same store (OpenCode runs only).
     tool_calls = opencode_tool_calls(st["run_id"]) if st.get("executor") == "opencode" else None
     # fresh tokens (input + cache writes + output + reasoning); cache reads are stored separately so the figure is
-    # comparable to the verifier's own `frontier_tokens`
+    # comparable to the planner's own `frontier_tokens`
     exec_tokens = (usage["input"] + usage["cache_write"] + usage["output"] + usage["reasoning"]) if usage \
         else executor_tokens(run_dir / "output.log")
     # Characterization: same commands on the changed tree (after the snapshot, so their artifacts
@@ -2314,15 +2121,10 @@ def finish_run(run_dir, rc, secs=None):
         lines.append(f"BRANCH CHANGED: {st['branch_before']} -> {branch_after}")
     if dep_changes:
         lines.append("DEPENDENCIES CHANGED: " + ", ".join(dep_changes) + " (check the plan allowed this)")
-    budget = st.get("budget")
-    size = f"diff size: {diff_lines} lines (+{added} -{removed})" + (f", budget {budget}" if budget else "")
+    size = f"diff size: {diff_lines} lines (+{added} -{removed})"
     if dirty_before:
         size += f"; includes earlier uncommitted changes in {len(dirty_before)} file(s)"
-    lines.append((f"OVER BUDGET: {diff_lines} changed lines vs Budget {budget}; " if budget and diff_lines > budget
-                  else "") + size)
-    if st.get("interfaces"):
-        lines.append(f"interfaces: {iface_exact}/{len(st['interfaces'])} found verbatim in Files"
-                     if not iface_problems else "INTERFACE MISMATCH: " + "; ".join(iface_problems))
+    lines.append(size)
     if char_line:
         lines.append(char_line)
     if static_line:
@@ -2355,7 +2157,7 @@ def finish_run(run_dir, rc, secs=None):
                          f"(check they failed for the intended reason: {run_dir / 'baseline.txt'})")
     backup = run_dir / "backup"
     lines += [
-        "acceptance (captured before the run; verifier must re-run these, not the plan on disk): "
+        "acceptance (captured before the run; re-run these, not the plan on disk): "
         + ("; ".join(st["acceptance"]) or "none listed"),
     ]
     if acceptance_after_line:
@@ -2373,12 +2175,14 @@ def finish_run(run_dir, rc, secs=None):
         question = executor_blocked(ANSI.sub("", log_path.read_bytes().decode("utf-8", "replace")))
         if question is not None:
             lines.insert(1, f"EXECUTOR BLOCKED: {question} (answer it in the phase's Decisions, record FAIL --cause BLOCKED: not an attempt; a second BLOCKED on this phase is a PLAN_GAP)")
-    refusals = (provider_refusals((run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
-                if (run_dir / "output.log").exists() else [])
+    # Only a failed run can be a provider refusal, and the refusal ends the log: read its tail, not the source
+    # text the executor printed earlier.
+    failed = rc != 0 or any(r != 0 for r in acceptance_after_rc)
+    refusals = provider_refusals(tail(log_path, 60)) if failed and log_path.exists() else []
     for label, advice in refusals:
         lines.insert(1, f"{label}: {advice} (record a FAIL with --cause PROVIDER; not an executor attempt)")
     if (run_dir / "output.log").exists():
-        # Short tail on success (the verifier only needs the report block); longer on failure.
+        # Short tail on success (the planner only needs the report block); longer on failure.
         lines += ["--- executor output (tail) ---", tail(run_dir / "output.log", 20 if rc == 0 else 60)]
     report = "\n".join(lines)
     (run_dir / "report.md").write_text(report + "\n")
@@ -2396,8 +2200,8 @@ def finish_run(run_dir, rc, secs=None):
         "branch_after": branch_after, "started": st["started"], "verdict": None, "cause": None,
         "provider_refusals": [label for label, _ in refusals],
         "risk": st.get("risk"), "baseline_mode": st.get("baseline_mode"),
-        "baseline_rc": [b["rc"] for b in st.get("baseline") or []], "budget": st.get("budget"),
-        "diff_lines": diff_lines, "dependency_changes": dep_changes, "interface_problems": iface_problems,
+        "baseline_rc": [b["rc"] for b in st.get("baseline") or []],
+        "diff_lines": diff_lines, "dependency_changes": dep_changes,
         "characterization": char_line or None, "staged": staged_new, "git_internals_changed": internals_changed,
         "plan_hash_after": file_hash(plan), "executor_tokens": exec_tokens,
         "executor_cache_read": usage["cache_read"] if usage else None, "static_new": static_new,
@@ -2442,9 +2246,19 @@ def build_task(repo, plan_rel, phase, phase_text, extra):
     task = f"Plan file: {plan_rel} (repository root: {repo}).\n"
     if notes:
         task += f"\nRepository notes (binding; written by the maintainers):\n{notes}\n"
+    found = ticket_notes(repo, plan_rel)
+    if found:
+        task += f"\nTicket notes (found by earlier executors of this plan):\n{found}\n"
     task += f"\nExecute Phase {phase} of the plan, and only Phase {phase}.\n\n{phase_text}\n"
+    pointers = parse_notes_pointers(phase_text)
+    if pointers:
+        task += "\nPlanner notes (the current code at each pointer):\n"
+        for spec, line in pointers:
+            code = notes_pointer_text(repo, spec)
+            task += f"\n--- {line}\n"
+            task += (code + "\n") if code else f"(not found: {spec})\n"
     if extra:
-        task += f"\nVerifier feedback from the previous attempt:\n{extra}\n"
+        task += f"\nFeedback from the previous attempt:\n{extra}\n"
     task += "\nFinish with the report block defined in your contract."
     return task
 
@@ -2569,10 +2383,8 @@ def cmd_run(args, target, phase, conf):
         print(f"files in scope: {files or '-'}\nacceptance: {parse_acceptance(phase_text) or '-'}")
         print(f"risk: {parse_word(phase_text, 'Risk', ('low', 'medium', 'high'), 'medium')}   "
               f"baseline: {parse_word(phase_text, 'Baseline', ('fail', 'pass', 'skip'), 'fail')}   "
-              f"budget: {parse_budget(phase_text) or '-'}   "
-              f"interfaces: {len(interface_signatures(phase_text))}   "
               f"characterize: {parse_backticked(phase_text, 'Characterize') or '-'}")
-        print(f"repo notes: {'yes (' + str(NOTES_DIR / (repo.name + '.md')) + ')' if repo_notes(repo) else 'none'}")
+        print(f"repo notes: {'yes (' + str(NOTES_DIR / (repo_name(repo) + '.md')) + ')' if repo_notes(repo) else 'none'}")
         if not files:
             print("note: phase has no parsable `Files:` list; every change will count as out of scope")
         for note in notes:
@@ -3566,12 +3378,25 @@ def review_files(repo, meta):
 
 
 def reviewer_rank(reviewer):
-    """Tier rank of a recorded reviewer, exactly as review_tier_refusal ranks it: reviewer-opus48 -> 2,
-    reviewer-opus55 -> 3, any other (a flash model) -> 1."""
+    """Tier rank of a recorded reviewer: reviewer-opus48 -> 2, reviewer-opus55 -> 3 (with or without the
+    `concord:` prefix), any other (a flash model) -> 1."""
+    name = norm(reviewer or "")
     rank = 1
-    for name, value in REVIEWER_RANK.items():
-        if norm(reviewer or "") == norm(name):
+    for key, value in REVIEWER_RANK.items():
+        if name in (norm(key), norm("concord:" + key)):
             rank = value
+    return rank
+
+
+def review_credit(meta, rev):
+    """Rank a recorded PR review counts at: min(its declared tier, its reviewer's rank, a reused entry's
+    cover_tier), or its declared tier when its meta records the user's go-ahead (--user-approved)."""
+    declared = TIER_RANK.get(meta.get("tier"), TIER_RANK["medium"])
+    if meta.get("user_approved"):
+        return declared
+    rank = min(declared, reviewer_rank(rev.get("reviewer")))
+    if rev.get("reused") and isinstance(rev.get("cover_tier"), int):
+        rank = min(rank, rev["cover_tier"])
     return rank
 
 
@@ -3621,9 +3446,12 @@ def covered_hits(reviews, repo, files, want, cur=None):
         if not isinstance(entry, dict):
             continue
         cov, rank = entry.get("covered"), entry.get("cover_tier")
-        if not isinstance(cov, dict) or not isinstance(rank, int) or rank < threshold:
+        if not isinstance(cov, dict) or not isinstance(rank, int):
             continue
         name = entry.get("reviewer") or "?"
+        rank = min(rank, reviewer_rank(name))          # a flash review covers low only, whatever tier it declared
+        if rank < threshold:
+            continue
         for f, sha in cur.items():
             if cov.get(f) == sha and (f not in hits or rank > hits[f][1]):
                 hits[f] = (name, rank)
@@ -3710,9 +3538,11 @@ def review_context(args, repo, root, with_diff=True, base=None, only=None):
     # shown whenever non-empty; both may appear (decisions alone do not hide the legacy block).
     prior = earlier_findings(root, meta) if not (ledger.get("findings") or []) else []
     notes = repo_notes(repo)
+    found = ticket_notes(repo, meta.get("plan"))
     task = (f"Repository root: {repo}. Run {run_dir.name}, phase {meta.get('phase')}, risk {meta.get('risk') or '?'}.\n"
             f"Files changed: {', '.join(files)}\n"
             + (f"\nRepository notes (binding; written by the maintainers):\n{notes}\n" if notes else "")
+            + (f"\nTicket notes (found by earlier executors of this plan):\n{found}\n" if found else "")
             + (f"\nThe phase that was implemented:\n{phase_text}\n" if phase_text else "")
             + ledger_block(led_text)
             + ("\nFindings from earlier review rounds, already sent back to the implementer: check that each fix is "
@@ -3800,7 +3630,7 @@ def cmd_review_record(args):
                 entry["flagged"] = {k: v for k, v in seen.items() if k not in blobs}
             if blobs:
                 entry["covered"] = blobs
-                entry["cover_tier"] = TIER_RANK.get(meta.get("tier"), 2)
+                entry["cover_tier"] = min(TIER_RANK.get(meta.get("tier"), 2), reviewer_rank(args.reviewer))
     elif result["verdict"] == "CLEAN":                    # a clean phase review covers its content for later reuse
         rfiles = review_files(repo, meta)
         if rfiles:
@@ -3810,241 +3640,6 @@ def cmd_review_record(args):
     print(f"{run_dir.name}: review by {args.reviewer} recorded: verdict {result['verdict']}, "
           f"blockers {counts['blockers']}, high {counts['highs']}"
           + (f", downgraded {dg}" if dg else "") + f" ({report})")
-    return 0
-
-
-def _parse_id_reasons(spec):
-    """`F2=reason; F5=reason` -> [(id, reason)]; a bare `F2` yields an empty reason; a `;` or `,` inside a reason
-    only splits when the text after it starts another `F<n>[.<m>]` entry."""
-    out = []
-    for part in re.split(r"[;,](?=\s*F\d+(?:\.\d+)?\s*(?:=|[;,]|$))", spec or ""):
-        part = part.strip()
-        if not part:
-            continue
-        if "=" in part:
-            key, value = part.split("=", 1)
-            out.append((key.strip(), value.strip()))
-        else:
-            out.append((part, ""))
-    return out
-
-
-def _parse_ids(specs):
-    """Repeated comma-separated flags -> [id]: `--adopt F1 --adopt F2,F3` gives [F1, F2, F3]."""
-    out = []
-    for spec in specs or []:
-        out.extend(x.strip() for x in (spec or "").split(",") if x.strip())
-    return out
-
-
-def _parse_id_reasons_all(specs):
-    """Repeated `F2=why; F5=why` flags, accumulated in order."""
-    out = []
-    for spec in specs or []:
-        out.extend(_parse_id_reasons(spec))
-    return out
-
-
-def _latest_review(meta, reviewer):
-    """The latest review entry of `reviewer` on the run's meta (names compared with norm())."""
-    target = norm(reviewer or "")
-    entry = None
-    for rev in meta.get("reviews") or []:
-        if norm(rev.get("reviewer") or "") == target:
-            entry = rev
-    return entry
-
-
-def _adjudicate_ids(meta, ledger, adopt, wrong, decline, tests, reviewer=None):
-    """Validate ids and apply the adjudication to the ledger findings and the latest review entry of every reviewer
-    touched. `reviewer` (--review-adjudicate) restricts every id to that reviewer's latest review; None
-    (--close-round) resolves each id's reviewer through the ledger. Nothing is written here: every validation runs
-    before the first status change. Returns [(reviewer, entry)] touched."""
-    entries = {f["id"]: f for f in ledger.get("findings") or []}
-    named = _latest_review(meta, reviewer) if reviewer is not None else None
-    if reviewer is not None:
-        if named is None:
-            die(f"no review by {reviewer} on this run")
-        # R9: an id of this review's finding_ids that the ledger no longer holds is fatal before any status changes.
-        for fid in named.get("finding_ids") or []:
-            if fid not in entries:
-                die(f"finding {fid} is not in ledger {ledger['key']}")
-        allowed = set(named.get("finding_ids") or [])
-    else:
-        allowed = None
-
-    def target_entry(fid):
-        if named is not None:
-            return named
-        reviewer_name = entries[fid].get("reviewer") or ""
-        target = norm(reviewer_name)
-        entry = None
-        for rev in meta.get("reviews") or []:
-            if norm(rev.get("reviewer") or "") == target and fid in (rev.get("finding_ids") or []):
-                entry = rev
-        return entry or _latest_review(meta, reviewer_name)
-
-    ids = adopt + [i for i, _ in wrong] + [i for i, _ in decline] + [i for i, _ in tests]
-    for fid in ids:
-        if fid not in entries:
-            die(f"finding {fid} is not in ledger {ledger['key']}")
-        if allowed is not None and fid not in allowed:
-            die(f"finding {fid} is not in the reviewer's latest review on the run")
-        if named is None and target_entry(fid) is None:
-            die(f"finding {fid} has no review by {entries[fid].get('reviewer')} on the run")
-    for fid, reason in wrong + decline:
-        if not reason:
-            die(f"--wrong/--decline for {fid} needs a non-empty reason (ID=reason)")
-    for fid, _ in tests:
-        if fid not in adopt:
-            die(f"--test {fid} must also be adopted (--adopt {fid})")
-    seen = set()
-    for fid in adopt + [i for i, _ in wrong] + [i for i, _ in decline]:
-        if fid in seen:
-            die(f"finding {fid} appears in more than one of --adopt/--wrong/--decline")
-        seen.add(fid)
-    now = time.time()
-    for fid in adopt:
-        entries[fid]["status"] = "adopted"
-        entries[fid]["adjudicated_at"] = now
-    for fid, reason in wrong:
-        entries[fid].update({"status": "incorrect", "reason": reason, "adjudicated_at": now})
-    for fid, reason in decline:
-        entries[fid].update({"status": "declined", "reason": reason, "adjudicated_at": now})
-    for fid, test in tests:
-        entries[fid]["test"] = test
-    touched, seen_entries = [], set()
-    for fid in ids:
-        entry = target_entry(fid)
-        if id(entry) in seen_entries:
-            continue
-        seen_entries.add(id(entry))
-        ids_ = entry.get("finding_ids") or []
-        status = {f["id"]: f.get("status") for f in ledger["findings"]}
-        entry["adopted"] = sum(1 for i in ids_ if status.get(i) == "adopted")
-        entry["incorrect"] = sum(1 for i in ids_ if status.get(i) == "incorrect")
-        entry["not_adopted"] = sum(1 for i in ids_ if status.get(i) == "declined")
-        entry["adjudicated_at"] = now
-        touched.append((entry.get("reviewer"), entry))
-    return touched
-
-
-def _print_adjudication(run_name, ledger, touched):
-    for reviewer, entry in touched:
-        print(f"{run_name}: review by {reviewer} adjudicated: adopted {entry['adopted']}, incorrect "
-              f"{entry['incorrect']}, not adopted {entry['not_adopted']} (ledger {ledger['key']})")
-
-
-def cmd_review_adjudicate(args):
-    """Record the verifier's adjudication of a reviewer's findings on a run (meta.reviews), by id against the ledger
-    (--adopt/--wrong/--decline/--test) or, as before, as plain counts."""
-    if not args.reviewer:
-        die("--review-adjudicate needs --reviewer NAME")
-    by_id = any(x is not None for x in (args.adopt, args.wrong, args.decline, args.test))
-    numeric = any(x is not None for x in (args.adopted, args.incorrect, args.not_adopted))
-    if by_id and numeric:
-        die("--adopt/--wrong/--decline/--test cannot be mixed with --adopted/--incorrect/--not-adopted")
-    if not by_id:
-        if args.adopted is None or args.incorrect is None or args.not_adopted is None:
-            die("--review-adjudicate needs --adopted N --incorrect N --not-adopted N, "
-                "or --adopt/--wrong/--decline/--test")
-        for name in ("adopted", "incorrect", "not_adopted"):
-            if getattr(args, name) < 0:
-                die(f"--{name.replace('_', '-')} must be an integer >= 0")
-    repo = repo_root(args.repo or os.getcwd())
-    root = runs_root(repo)
-    run_dir = find_run(root, args.review_adjudicate, want="reported")
-    meta_path = run_dir / "meta.json"
-    meta = json.loads(meta_path.read_text())
-    if not by_id:
-        entry = _latest_review(meta, args.reviewer)
-        if entry is None:
-            die(f"no review by {args.reviewer} on {run_dir.name}")
-        entry["adopted"] = args.adopted
-        entry["incorrect"] = args.incorrect
-        entry["not_adopted"] = args.not_adopted
-        entry["adjudicated_at"] = time.time()
-        meta_path.write_text(json.dumps(meta, indent=1))
-        total = args.adopted + args.incorrect + args.not_adopted
-        pct = f" ({100 * args.adopted / total:.0f}%)" if total else ""
-        print(f"{run_dir.name}: review by {args.reviewer} adjudicated: adopted {args.adopted}, incorrect "
-              f"{args.incorrect}, not adopted {args.not_adopted}{pct}")
-        return 0
-    ledger = load_ledger(root, ledger_key(meta))
-    touched = _adjudicate_ids(meta, ledger, _parse_ids(args.adopt), _parse_id_reasons_all(args.wrong),
-                              _parse_id_reasons_all(args.decline), _parse_id_reasons_all(args.test),
-                              reviewer=args.reviewer)
-    save_ledger(root, ledger)
-    meta_path.write_text(json.dumps(meta, indent=1))
-    _print_adjudication(run_dir.name, ledger, touched)
-    return 0
-
-
-def cmd_close_round(args):
-    """Close one review round in one call: adjudicate the given ids (each resolved to its reviewer through the
-    ledger), then record the verdict with --tokens auto semantics. Unknown id or FAIL without --cause writes
-    nothing."""
-    if not args.verdict_result:
-        die("--close-round needs --verdict-result PASS|FAIL")
-    verdict = args.verdict_result.upper()
-    if verdict not in ("PASS", "FAIL"):
-        die("verdict must be PASS or FAIL")
-    if verdict == "FAIL" and not args.cause:
-        die(f"--close-round FAIL needs --cause {'|'.join(c for c in CAUSES if c not in PASS_CAUSES)}")
-    if verdict == "PASS" and args.cause and args.cause not in PASS_CAUSES:
-        die("--cause applies to FAIL verdicts only (a PASS takes only SPEC_GAP)")
-    if verdict == "FAIL" and args.cause in PASS_CAUSES:
-        die("SPEC_GAP applies to PASS verdicts only")
-    if args.behaviour:
-        if verdict != "FAIL" or args.cause != "EXECUTOR":
-            die("--behaviour applies to FAIL verdicts with --cause EXECUTOR only")
-        if args.behaviour not in BEHAVIOURS:
-            die(f"unknown behaviour {args.behaviour!r}: use one of {', '.join(BEHAVIOURS)}")
-    repo = repo_root(args.repo or os.getcwd())
-    root = runs_root(repo)
-    run_dir = find_run(root, args.close_round, want="reported")
-    meta_path = run_dir / "meta.json"
-    meta = json.loads(meta_path.read_text())
-    blocked = second_blocked(repo, meta) if verdict == "FAIL" and args.cause == "BLOCKED" else None
-    if blocked:
-        die(blocked)
-    adopt = _parse_ids(args.adopt)
-    wrong = _parse_id_reasons_all(args.wrong)
-    decline = _parse_id_reasons_all(args.decline)
-    tests = _parse_id_reasons_all(args.test)
-    if adopt or wrong or decline or tests:
-        ledger = load_ledger(root, ledger_key(meta))
-        touched = _adjudicate_ids(meta, ledger, adopt, wrong, decline, tests)
-        save_ledger(root, ledger)
-        _print_adjudication(run_dir.name, ledger, touched)
-    return record_verdict(repo, run_dir, meta_path, meta, verdict, cause=args.cause, note=args.note,
-                          tokens="auto", behaviour=args.behaviour, force=args.force,
-                          user_approved=args.user_approved)
-
-
-
-def cmd_review_decide(args):
-    """Record a binding decision or assumption in the run's ledger (--review-decide)."""
-    repo = repo_root(args.repo or os.getcwd())
-    root = runs_root(repo)
-    run_dir = find_run(root, args.review_decide, want="reported")
-    if not (run_dir / "meta.json").is_file():
-        die(f"{run_dir.name} has no meta.json (a review or lint run, not a reported run)")
-    meta = json.loads((run_dir / "meta.json").read_text())
-    kind = args.kind or "decision"
-    if kind not in ("decision", "assumption"):
-        die("--kind must be decision or assumption")
-    text = (args.decision or "").strip()
-    if not text:
-        die("--review-decide needs a non-empty --decision TEXT")
-    ledger = load_ledger(root, ledger_key(meta))
-    decision_id = f"D{ledger.get('next_decision', 1)}"
-    ledger["next_decision"] = ledger.get("next_decision", 1) + 1
-    ledger.setdefault("decisions", []).append({"id": decision_id, "kind": kind, "text": text,
-                                               "at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                                               "run": run_dir.name})
-    save_ledger(root, ledger)
-    print(f"{run_dir.name}: {kind} {decision_id} recorded in ledger {ledger['key']}")
     return 0
 
 
@@ -4059,7 +3654,7 @@ def resolve_review_model(args, conf, target):
     if args.via and args.via != executor:
         executor, model = args.via, (model if res["how"] == "model id" else conf.get(f"{args.via}.model", ""))
     if executor in SESSION_EXECUTORS:
-        die("review needs a non-Claude model (the verifier session judges the findings itself)", code=3)
+        die("review needs a non-Claude model (the planner session judges the findings itself)", code=3)
     if args.model:
         model = args.model
     guard(executor, model)
@@ -4071,13 +3666,26 @@ def resolve_review_model(args, conf, target):
     return res, executor, model, binary
 
 
+def refusal_report(run_dir, result, refusals):
+    """D1: write the refusal report and print PROVIDER LIMIT/BLOCKED (no review recorded); the caller exits 9."""
+    lines = [f"{label}: {advice} (no review recorded)" for label, advice in refusals]
+    (run_dir / "report.md").write_text("\n".join(lines + [result["report"]]) + "\n")
+    for line in lines:
+        print(line)
+
+
 def run_model_review(args, repo, conf, res, executor, model, binary, task, run_dir, meta, meta_path, names,
                      dry_line, result_line, entry_extra=None, set_meta_review=False, diff_text=None, cover=None):
     """Run a cheap review model read-only on `task`, parse its REVIEW-JSON answer, store the dispatcher verdict on `meta`
     and print the review. One retry when the answer does not parse (never after a timeout, rc 124): the command is
-    rebuilt from build_command with the task extended, and the retry output goes to output-retry.log (C3/C21)."""
+    rebuilt from build_command with the task extended, and the retry output goes to output-retry.log (C3/C21).
+    D1: a provider refusal in a failed attempt's log tail is no review: print it, write report.md, record nothing and
+    return 9 (the command's exit-code docstring), with no retry."""
     wall = args.wall or "10m"
     timeout_s = parse_wall(wall) + 60
+    # D2: a model review is recorded under the model that ran (its models.conf name when neither --model nor --via
+    # changed the model, else the model id).
+    reviewer = res["name"] if (executor == res["executor"] and model == res["model"]) else model
     cmd, env, combined = build_command(executor, binary, task, REVIEW_TASK, model, "readonly", wall, run_dir, conf)
     (run_dir / "prompt.txt").write_text(combined)
     if args.dry_run:
@@ -4086,7 +3694,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     pre = snapshot(repo)
     rc, secs = run_process(cmd, env, repo, run_dir / "output.log", timeout_s)
     out = ANSI.sub("", (run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
-    result = process_review(out, meta, run_dir.parent, repo, res["name"], run_dir.name, diff_text)
+    result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text)
+    if not result["ok"]:
+        refusals = review_refusals(tail(run_dir / "output.log", 60))
+        if refusals:
+            refusal_report(run_dir, result, refusals)
+            return 9
     transport_retries = 0
     while not result["ok"] and rc != 124 and transport_error(out) and transport_retries < TRANSPORT_RETRIES:
         transport_retries += 1
@@ -4096,7 +3709,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         log = run_dir / f"output-transport{transport_retries}.log"
         rc, secs = run_process(cmd, env, repo, log, timeout_s)
         out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
-        result = process_review(out, meta, run_dir.parent, repo, res["name"], run_dir.name, diff_text)
+        result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text)
+        if not result["ok"]:
+            refusals = review_refusals(tail(log, 60))
+            if refusals:
+                refusal_report(run_dir, result, refusals)
+                return 9
     retried = False
     if not result["ok"] and rc != 124 and not transport_error(out):
         retried = True
@@ -4107,7 +3725,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         (run_dir / "prompt-retry.txt").write_text(combined)            # the prompt artifact of the retry
         rc, secs = run_process(cmd, env, repo, run_dir / "output-retry.log", timeout_s)
         out = ANSI.sub("", (run_dir / "output-retry.log").read_bytes().decode("utf-8", "replace"))
-        result = process_review(out, meta, run_dir.parent, repo, res["name"], run_dir.name, diff_text)
+        result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text)
+        if not result["ok"]:
+            refusals = review_refusals(tail(run_dir / "output-retry.log", 60))
+            if refusals:
+                refusal_report(run_dir, result, refusals)
+                return 9
     changed, created, deleted = compare(pre, snapshot(repo), repo)
     verdict = result["verdict"]
     (run_dir / "report.md").write_text(result["report"])
@@ -4119,7 +3742,10 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     if set_meta_review:
         meta["review"] = {"run": run_dir.name, "model": model, "checklists": names,
                           "verdict": verdict, "blockers": counts["blockers"]}
-    entry = {"reviewer": res["name"], "model": model, "billing": billing(executor, model), "verdict": verdict,
+    # D2: a model review is recorded under the model that ran (its models.conf name when neither --model nor --via
+    # changed the model, else the model id).
+    entry = {"reviewer": reviewer, "name": res["name"], "model": model, "billing": billing(executor, model),
+             "verdict": verdict,
              "blockers": counts["blockers"], "highs": counts["highs"], "mediums": counts["mediums"],
              "report": str(run_dir / "report.md"), "downgraded": result["downgraded"],
              "finding_ids": [f.get("id") for f in result["findings"]], "retried": retried,
@@ -4149,7 +3775,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
 
 def cmd_review(args, target, conf):
     """Read-only review of a reported run's diff by a cheap model against the REVIEW.md checklists.
-    The verifier confirms every finding against the diff before acting on it."""
+    The planner confirms every finding against the diff before acting on it."""
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
     res, executor, model, binary = resolve_review_model(args, conf, target)
@@ -4321,9 +3947,13 @@ def diff_names(repo, revs, no_renames=False, fail_msg=None):
     return [f for f in res.stdout.split("\0") if f]
 
 
-def pr_meta(n, slug, base, head, files, excluded, names, tier):
+def pr_meta(n, slug, base, head, files, excluded, names, tier, pr_files=None):
+    """A PR-review meta. D3: `pr_files` is the PR's full file set (a caller that does not pass it gets this review's
+    files plus its excluded ones, the legacy reading)."""
+    full = pr_files if pr_files is not None else list(files) + list(excluded)
     return {"kind": "pr-review", "pr": n, "slug": slug or "", "base": base, "head": head,
-            "files": files, "excluded": excluded, "checklists": names, "tier": tier, "reviews": []}
+            "files": files, "excluded": excluded, "pr_files": sorted(set(full)),
+            "checklists": names, "tier": tier, "reviews": []}
 
 
 def sanitize_pr_text(text):
@@ -4408,12 +4038,13 @@ def pr_covering_reviews(root):
     return out
 
 
-def pr_review_reuse(args, repo, root, n, slug, base, head, tier, files):
+def pr_review_reuse(args, repo, root, n, slug, base, head, tier, files, pr_files=None):
     """PR content reuse (Phase 13b): suppress or narrow a full PR review when the files' head blobs are already
     cleared at tier >= this review's tier by a recorded review anywhere in the run root (a phase run, a clean PR
     review, or a FIX/BLOCK PR review for its finding-free files). A file any review flagged at its current blob is
     always reviewed. Returns ("done", 0) (COVERED printed, a suppression review recorded at `head` so --pr-status
-    reports the gate met), ("narrow", uncovered) or ("full", files). --force-review returns ("full", files)."""
+    reports the gate met), ("narrow", uncovered) or ("full", files). --force-review returns ("full", files).
+    D3: a narrow run records its reused files at the head, as the COVERED path does, so their credit survives."""
     if getattr(args, "force_review", False):
         return "full", files
     want = TIER_RANK[tier]
@@ -4431,11 +4062,20 @@ def pr_review_reuse(args, repo, root, n, slug, base, head, tier, files):
     if uncovered:
         print(f"reused {len(reused)} file(s) already reviewed by {name} ({TIER_NAME[rank]}): "
               f"{', '.join(reused)}; reviewing {', '.join(uncovered)}")
+        run_dir = pr_run_dir(root, n, head, "reused")
+        meta = pr_meta(n, slug, base, head, reused, [], pick_checklists(reused, args.checklist), tier,
+                       pr_files=pr_files)
+        meta["run_id"] = run_dir.name
+        meta["reviews"] = [{"reviewer": name, "verdict": "CLEAN", "reused": True, "cover_tier": rank,
+                            "covered": {f: cur[f] for f in reused if f in cur}, "blockers": 0, "highs": 0,
+                            "mediums": 0, "at": datetime.now(timezone.utc).isoformat(timespec="microseconds")}]
+        (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
         return "narrow", uncovered
     print(f"COVERED: {len(files)} files already reviewed by {name} ({TIER_NAME[rank]}) at the same content; "
           f"no review run")
     run_dir = pr_run_dir(root, n, head, "reused")
-    meta = pr_meta(n, slug, base, head, files, [], pick_checklists(files, args.checklist), tier)
+    meta = pr_meta(n, slug, base, head, files, [], pick_checklists(files, args.checklist), tier,
+                   pr_files=pr_files)
     meta["run_id"] = run_dir.name
     meta["reviews"] = [{"reviewer": name, "verdict": "CLEAN", "reused": True, "cover_tier": rank,
                         "covered": cur, "blockers": 0, "highs": 0, "mediums": 0,
@@ -4542,7 +4182,8 @@ def cmd_review_pr(args, target, conf):
             diff = fix_block + (f"Full PR change of a file, when the function context is not enough: "
                                 f"git diff {base_sha}...{head} -- <file>\n")
         if not since:                                  # Phase 13b: content reuse for a full PR review
-            status, data = pr_review_reuse(args, repo, root, n, slug, base_branch, head, tier, files)
+            status, data = pr_review_reuse(args, repo, root, n, slug, base_branch, head, tier, files,
+                                           pr_files=all_files)
             if status == "done":
                 return data
             if status == "narrow":
@@ -4559,16 +4200,19 @@ def cmd_review_pr(args, target, conf):
         rubric = "\n\n".join(f"### {x}\n{lists[x]}" for x in names)
         ledger = ledger_text(load_ledger(root, f"pr{n}"))
         delta_line = f"Delta review since {str(since)[:8]}: files {', '.join(delta_files)}" if since else ""
+        approval = " ".join((args.user_approved or "").split())    # the user's go-ahead: counts at its tier
         if args.packet:
             task = pr_task(n, slug, head, base_branch, tier, info, files, excluded, names, rubric, diff,
                            ledger=ledger, delta=delta_line, notes=notes)
             rc = write_pr_packet(root, n, slug, base_branch, head, tier, files, excluded, names, task,
                                  tag=("delta-packet" if since else "packet"), since=since,
-                                 delta_files=delta_files, light=is_light)
+                                 delta_files=delta_files, light=is_light, approval=approval, pr_files=all_files)
         else:
             res, executor, model, binary = resolve_review_model(args, conf, target)
             run_dir = pr_run_dir(root, n, head, f"delta-{model}" if since else (model or "review"))
-            meta = pr_meta(n, slug, base_branch, head, files, excluded, names, tier)
+            meta = pr_meta(n, slug, base_branch, head, files, excluded, names, tier, pr_files=all_files)
+            if approval:
+                meta["user_approved"] = approval
             if since:
                 meta["since"], meta["delta_files"] = since, delta_files
             if is_light:
@@ -4591,7 +4235,8 @@ def cmd_review_pr(args, target, conf):
                                        f"(exit {d['rc']}, {d['secs']}s, tier {tier}, checklists {', '.join(names)}, "
                                        f"verdict {d['verdict']}, blockers {d['blockers']}"
                                        f"{', retried' if d.get('retried') else ''})"),
-                entry_extra=entry_extra, cover=(blob_shas_at(repo, head, files), TIER_RANK[tier]))
+                entry_extra=entry_extra,
+                cover=(blob_shas_at(repo, head, files), min(TIER_RANK[tier], reviewer_rank(res["name"]))))
         if gh_head != head:
             print(f"PR head moved during review: gh reported {gh_head[:8]}, fetched {head[:8]}")
         return rc
@@ -4601,10 +4246,12 @@ def cmd_review_pr(args, target, conf):
 
 
 def write_pr_packet(root, n, slug, base, head, tier, files, excluded, names, task, tag="packet",
-                    since=None, delta_files=None, light=False):
+                    since=None, delta_files=None, light=False, approval=None, pr_files=None):
     """Write the PR review prompt for a Claude reviewer subagent; no model is called here."""
     run_dir = pr_run_dir(root, n, head, tag)
-    meta = pr_meta(n, slug, base, head, files, excluded, names, tier)
+    meta = pr_meta(n, slug, base, head, files, excluded, names, tier, pr_files=pr_files)
+    if approval:
+        meta["user_approved"] = approval
     if since:
         meta["since"], meta["delta_files"] = since, delta_files or []
     if light:
@@ -4652,9 +4299,34 @@ def review_open_findings(rev: dict) -> dict:
 
 # ---------- delta reviews: carry a reviewed head's evidence forward across fix commits (D1-D4) ----------
 
+def refused_review(rev):
+    """D1: a review entry recorded before the fix whose run log tail holds a provider refusal is no review. The
+    logs sit beside `rev["report"]` (output.log, the transport reruns and the parse retry). Only an UNPARSED entry
+    can be one: a parsed review is evidence whatever its log says."""
+    if str(rev.get("verdict") or "").upper() != "UNPARSED":
+        return False
+    if not rev.get("report"):
+        return False
+    try:
+        report = Path(rev["report"])
+    except (KeyError, TypeError):
+        return False
+    for name in ("output.log", "output-retry.log", "output-transport1.log", "output-transport2.log"):
+        log = report.parent / name
+        if not log.exists():
+            continue
+        try:
+            if review_refusals(tail(log, 60)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def pr_reviews_by_head(root, n):
     """{head: {"full": [(meta, rev)...], "delta": [(meta, rev)...]}} for every pr-review meta of PR n.
-    A review of a meta carrying `since` is a delta review; every other one is a full review."""
+    A review of a meta carrying `since` is a delta review; every other one is a full review. D1: a provider
+    refusal is no review, so its entry is left out."""
     out = {}
     for meta_path in sorted(Path(root).glob(f"pr{n}-*/meta.json")):
         try:
@@ -4669,24 +4341,36 @@ def pr_reviews_by_head(root, n):
         groups = out.setdefault(head, {"full": [], "delta": []})
         key = "delta" if meta.get("since") else "full"
         for rev in meta.get("reviews") or []:
+            if refused_review(rev):
+                continue
             groups[key].append((meta, rev))
     return out
 
 
+def _entry_files(meta):
+    """The files a review entry answers for: its reviewed files plus the ones it records as excluded."""
+    return frozenset(meta.get("files") or []) | frozenset(meta.get("excluded") or [])
+
+
+def _pr_files(meta):
+    """D3: the PR's full file set. A legacy meta (no `pr_files`) counts its files plus its excluded ones."""
+    full = meta.get("pr_files")
+    if isinstance(full, list):
+        return frozenset(full)
+    return _entry_files(meta)
+
+
 def _latest_by_reviewer(entries):
-    """Latest entry per reviewer (`at` order, names .strip().casefold())."""
+    """Latest entries keyed by reviewer plus file set (D3). A later entry of the same reviewer whose files include
+    an earlier entry's files replaces it: re-reviewing those files supersedes the earlier verdict."""
     kept = {}
     for meta, rev in sorted(entries, key=lambda mr: str(mr[1].get("at") or "")):
-        kept[(rev.get("reviewer") or "").strip().casefold()] = (meta, rev)
+        name = (rev.get("reviewer") or "").strip().casefold()
+        files = _entry_files(meta)
+        for key in [k for k in kept if k[0] == name and k[1] <= files]:
+            del kept[key]
+        kept[(name, files)] = (meta, rev)
     return kept
-
-
-def _deciding_tier(kept):
-    """Tier of the meta holding the newest entry of a {reviewer: (meta, rev)} map."""
-    if not kept:
-        return None
-    meta, _rev = max(kept.values(), key=lambda mr: str(mr[1].get("at") or ""))
-    return meta.get("tier")
 
 
 def _at(entries):
@@ -4703,12 +4387,14 @@ def _open_paths(root, n, open_revs):
     files, unknown = set(), False
     for meta, reviewer, rev, _info in open_revs:
         run_id = meta.get("run_id") or ""
-        want = (reviewer or "").strip().casefold()
+        want = {(reviewer or "").strip().casefold()}
+        if isinstance(rev.get("name"), str):           # D2: the entry may be named by model, the ledger by config name
+            want.add(rev["name"].strip().casefold())
         paths = set()
         for f in findings:
             if (f.get("run") or "") != run_id:
                 continue
-            if (f.get("reviewer") or "").strip().casefold() != want:
+            if (f.get("reviewer") or "").strip().casefold() not in want:
                 continue
             if f.get("severity") not in REVIEW_OPEN_STATUSES:
                 continue
@@ -4829,19 +4515,23 @@ def _head_state(root, n, head, depth, seen, repo, heads, trees, intermediate, ca
             reviewer = (rev.get("reviewer") or "").strip()
             open_revs.append((meta, reviewer, rev, info))
             open_list.append((reviewer, rev, info))
-    basis, via, tier, light = bool(full), None, None, False
+    shown = {}                                         # one status piece per reviewer: its latest open entry
+    for reviewer, rev, info in open_list:
+        shown[(reviewer or "").strip().casefold()] = (reviewer, rev, info)
+    open_list = list(shown.values())
+    basis, via, light, carried = bool(full), None, False, None
     if full:                                           # D2(a): full entries at this head, judged on their own set
-        tier = _deciding_tier(kept_full)
+        judged = list(kept_full.values())
     else:                                              # D2(b): deltas only; the newest delta decides
         meta, _rev = max(kept_delta.values(), key=lambda mr: str(mr[1].get("at") or ""))
-        tier, h0 = meta.get("tier"), meta.get("since")
+        judged, h0 = [(meta, _rev)], meta.get("since")
         if h0 and depth < 20 and head not in seen:     # chain depth <= 20; a head visited twice ends the chain
             ancestor = head_state(root, n, h0, depth + 1, seen | {head}, repo, heads=heads, trees=trees,
                                   cache=cache, active=active)
             if ancestor["status"] == "REVIEWED":
                 basis, via = True, h0
                 if meta.get("light"):                  # a light fix ran at low; the reviewed tier carries forward
-                    tier, light = ancestor["tier"], True
+                    carried, light = ancestor["tier"], True
             elif ancestor["status"] == "OPEN" and ancestor["basis"] and ancestor["open_files"] \
                     and not ancestor["open_unknown"] \
                     and all(_touched(repo, h0, f, set(meta.get("delta_files") or []),
@@ -4850,14 +4540,47 @@ def _head_state(root, n, head, depth, seen, repo, heads, trees, intermediate, ca
                 basis, via = True, h0
         if basis and intermediate:                     # D10: an open head skipped in between reopens the gate
             if _intermediate_open(root, repo, n, h0, head, heads, trees, cache, active):
-                basis, via, light = False, None, False
+                basis, via, light, carried = False, None, False, None
+    # A review counts only up to its reviewer's rank (review_credit): the head needs the highest declared tier.
+    need = max(TIER_RANK.get(m.get("tier"), TIER_RANK["medium"]) for m, _r in judged)
+    best_meta, best_rev = max(judged, key=lambda mr: review_credit(*mr))
+    got = review_credit(best_meta, best_rev)
+    if carried:
+        need = got = TIER_RANK[carried]
+    if full:                                           # D3: the files its entries credit must cover the PR's files
+        pr_files, coverage = set(), {}
+        for meta, rev in judged:
+            pr_files |= _pr_files(meta)
+            credit = review_credit(meta, rev)
+            for f in _entry_files(meta):
+                coverage[f] = max(coverage.get(f, 0), credit)
+        got = 0
+        for rank in (3, 2, 1):
+            if pr_files and all(coverage.get(f, 0) >= rank for f in pr_files):
+                got = rank
+                break
+        if not pr_files:
+            got = review_credit(best_meta, best_rev)
+    tier = TIER_NAME[got] if got else None
     if open_revs:                                      # any open review among either set keeps the gate shut
         open_files, open_unknown = _open_paths(root, n, open_revs)
         return {"status": "OPEN", "tier": tier, "via": via, "open": open_list,
                 "basis": basis, "open_files": open_files, "open_unknown": open_unknown}
+    if full and got == 0:                              # D3: no tier covers every PR file
+        return {"status": "UNREVIEWED", "tier": None, "via": None, "open": [], "basis": False,
+                "open_files": [], "open_unknown": False,
+                "unreviewed": sorted(f for f in pr_files if coverage.get(f, 0) == 0)}
+    if basis and got < need:                           # reviewed, but by no reviewer qualified for its tier
+        return {"status": "UNREVIEWED", "tier": tier, "via": None, "open": [], "basis": False,
+                "open_files": [], "open_unknown": False, "short": TIER_NAME[need],
+                "best": (best_rev.get("reviewer") or "?").strip(),
+                "uncovered": sorted(f for f in pr_files if coverage.get(f, 0) < need) if full else []}
     if basis:
+        excluded = sorted({f for meta, rev in judged if review_credit(meta, rev) >= got
+                           for f in meta.get("excluded") or []}) if full else []
         return {"status": "REVIEWED", "tier": tier, "via": via, "open": [],
-                "basis": True, "open_files": [], "open_unknown": False, "light": light}
+                "basis": True, "open_files": [], "open_unknown": False, "light": light,
+                "override": None if carried else best_meta.get("user_approved"), "excluded": excluded}
     return {"status": "UNREVIEWED", "tier": tier, "via": None, "open": [],
             "basis": False, "open_files": [], "open_unknown": False}
 
@@ -5143,8 +4866,9 @@ def cmd_pr_status(args):
     print(f"PR {n} ({slug or 'unknown'}): {len(rows)} review(s) recorded")
     for meta_path, meta, index, rev in rows:
         since = f" since {str(meta.get('since'))[:8]}" if meta.get("since") else ""
+        refused = " (provider refusal: not counted)" if refused_review(rev) else ""
         print(f"  {rev.get('reviewer')} [{meta.get('tier')}] head {str(meta.get('head'))[:8]} "
-              f"verdict {rev.get('verdict')} blockers {rev.get('blockers')} ({rev.get('report', '')}){since}")
+              f"verdict {rev.get('verdict')} blockers {rev.get('blockers')} ({rev.get('report', '')}){since}{refused}")
     if not rows:
         print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (no review)")
         return 0
@@ -5177,12 +4901,24 @@ def cmd_pr_status(args):
             print(f"CURRENT HEAD {current[:8]}: FINDINGS OPEN ({'; '.join(parts)})")
             return 0
         if state["status"] == "REVIEWED":
+            over = f' (owner override: "{state["override"]}")' if state.get("override") else ""
+            exc = f" (excluded: {', '.join(state.get('excluded') or [])})" if state.get("excluded") else ""
             if state["via"]:
                 light = "; light fix at low" if state.get("light") else ""
                 print(f"CURRENT HEAD {current[:8]}: REVIEWED at {state['tier']} "
-                      f"(via delta from {str(state['via'])[:8]}{light})")
+                      f"(via delta from {str(state['via'])[:8]}{light}){over}{exc}")
             else:
-                print(f"CURRENT HEAD {current[:8]}: REVIEWED at {state['tier']}")
+                print(f"CURRENT HEAD {current[:8]}: REVIEWED at {state['tier']}{over}{exc}")
+            return 0
+        if state.get("short"):                         # reviewed, but by no reviewer qualified for its tier
+            nr = (f"; not reviewed at {state['short']}: {', '.join(state['uncovered'])}"
+                  if state.get("uncovered") else "")
+            print(f"CURRENT HEAD {current[:8]}: UNREVIEWED at {state['short']}: the best review counts at "
+                  f"{state['tier']} ({state['best']}){nr}; needs {TIER_REVIEWER[state['short']]}, or the user's "
+                  f"go-ahead on a review: --review-pr {n} --tier {state['short']} --user-approved \"<their words>\"")
+            return 0
+        if state.get("unreviewed"):                    # D3: a full review left some PR files unreviewed
+            print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (not reviewed: {', '.join(state['unreviewed'])})")
             return 0
         if not fetched:
             print(f"CURRENT HEAD {current[:8]}: UNREVIEWED (head moved)")
@@ -5242,13 +4978,6 @@ def cmd_lint(args, phase, target, conf):
     repo, plan, plan_rel, phase_text = load_plan_phase(args, phase)
     for f in acceptance_lint(repo, phase_text, parse_files(phase_text)):
         print(f"ACCEPTANCE LINT: {f}")
-    for f in context_lint(phase_text):
-        print(f"CONTEXT LINT: {f}")
-    for f in map_lint(read_plan(repo, plan)[2]):
-        print(f"MAP LINT: {f}")
-    gap_checklist, promote_lines = repo_gaps(repo)
-    for line in promote_lines:
-        print(line)
     target = target or settings.get("lint") or settings.get("default") or ""
     if not target:
         die("no lint model: name one, or set `lint =` / `default =` in models.conf")
@@ -5268,10 +4997,8 @@ def cmd_lint(args, phase, target, conf):
     if not binary:
         die(f"{executor}: binary not found")
     notes = repo_notes(repo)
-    gap_block = (f"\nGap checklist (past plan gaps in this repository; check each against this phase):\n{gap_checklist}\n" if gap_checklist else "")
     task = (f"Plan file: {plan_rel} (repository root: {repo}).\n"
             + (f"\nRepository notes (binding):\n{notes}\n" if notes else "")
-            + gap_block
             + f"\nPhase {phase} under review:\n\n{phase_text}\n")
     root = runs_root(repo)
     run_dir = new_run_dir(root, res["name"], phase, prefix="lint-")
@@ -5297,85 +5024,6 @@ def cmd_lint(args, phase, target, conf):
     if usage:
         print(usage_line(usage, model))
     return rc
-
-
-def plan_title(plan_text):
-    for line in plan_text.splitlines():
-        if line.startswith("# "):
-            return line[2:].strip()
-    return "Plan"
-
-
-def _mermaid_label(node, status=None):
-    text = re.sub(r"[\[\]()<>{}#\"`]", " ", node["text"]).strip()
-    text = re.sub(r"\s+", " ", text)[:40].strip()
-    label = node["id"] + ((" " + text) if text else "")
-    if status:
-        label += f" [{status}]"
-    return label
-
-
-def cmd_map(args, conf):
-    """Zero-token: the plan's Intent/Structure/Work map with per-work-item status (or a Mermaid mindmap)."""
-    repo = repo_root(args.repo or os.getcwd())
-    plan, plan_rel, text = read_plan(repo, args.map)
-    m = parse_map(text)
-    pids = phase_ids(text)
-    root = runs_root(repo)
-    def status_of(node):
-        if node["id"] not in pids:
-            return "no phase"
-        status = map_phase_status(root, repo, plan_rel, pids[node["id"]])
-        if status == "not started" and parse_executor(extract_phase(text, pids[node["id"]])) == "planner":
-            return "planner (no run)"
-        return status
-    if args.mermaid:
-        placed_s, placed_w = set(), set()
-
-        def work_under(sid, indent):
-            for w in m["work"]:
-                if sid in w["parents"]:
-                    print(f"{indent}{_mermaid_label(w, status_of(w))}")
-                    placed_w.add(w["id"])
-
-        print("mindmap")
-        print(f"  root(({plan_title(text)}))")
-        for i in m["intent"]:
-            print(f"    {_mermaid_label(i)}")
-            for s in m["structure"]:
-                if i["id"] in s["parents"]:
-                    print(f"      {_mermaid_label(s)}")
-                    placed_s.add(s["id"])
-                    work_under(s["id"], "        ")
-        for s in m["structure"]:
-            if s["id"] not in placed_s:
-                print(f"    {_mermaid_label(s)}")
-                work_under(s["id"], "      ")
-        for w in m["work"]:
-            if w["id"] not in placed_w:
-                print(f"    {_mermaid_label(w, status_of(w))}")
-        return 0
-    if not m["has_map"]:
-        print(f"MAP: no Map block in {plan_rel}")
-        return 0
-    print(f"Map: {plan_rel}")
-    print("Intent")
-    for n in m["intent"]:
-        print(f"  {n['id']}  {n['text']}")
-    print("Structure")
-    for n in m["structure"]:
-        par = (" <- " + ", ".join(n["parents"])) if n["parents"] else ""
-        print(f"  {n['id']}{par}  {n['text']}")
-    print("Work")
-    for n in m["work"]:
-        par = (" <- " + ", ".join(n["parents"])) if n["parents"] else ""
-        print(f"  {n['id']}{par}  [{status_of(n)}]  {n['text']}")
-    blocked = [q for q in map_questions(text) if q["target"]]
-    if blocked:
-        print("Open questions (blocked):")
-        for q in blocked:
-            print(f"  {q['id']} -> {q['target']}  {q['text']}")
-    return 0
 
 
 def session_executor_for(label, phase):
@@ -5463,52 +5111,15 @@ def cmd_abort(args):
     return 0
 
 
-def review_tier_refusal(meta, repo=None):
-    """None, or the refusal text when the best parsed review ranks below the phase tier raised to any risk floor."""
-    required, floor = phase_tier(meta), ""
-    if repo is not None:
-        tier, path, pat = run_floor(repo, meta)
-        if tier and TIER_RANK[tier] > TIER_RANK[required]:
-            required, floor = tier, f" (risk floor: {path} matches {pat})"
-    reviews = meta.get("reviews")
-    if not isinstance(reviews, list):
-        reviews = []
-    shown, best = [], 0
-    for entry in reviews:
-        if not isinstance(entry, dict):
-            continue
-        reviewer = entry.get("reviewer")
-        if not isinstance(reviewer, str) or not reviewer.strip():
-            continue
-        verdict = entry.get("verdict")
-        shown.append(f"{reviewer} ({verdict if verdict is not None else 'no verdict'})")
-        if verdict == "UNPARSED":                 # a review that could not be parsed is no review
-            continue
-        rank = 1                                  # any other recorded reviewer ranks as a flash review
-        for name, value in REVIEWER_RANK.items():
-            if norm(reviewer) == norm(name):
-                rank = value
-        best = max(best, rank)
-    if best >= TIER_RANK[required]:
-        return None
-    need = TIER_REVIEWER[required]
-    return (f"REFUSED: phase {meta.get('phase')} is a {required}-risk phase{floor} and needs {need}; recorded: "
-            f"{', '.join(shown) or 'none'}. A PASS below tier needs the user's go-ahead: "
-            f"--user-approved \"<their words>\"")
-
-
 def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=None, tokens=None,
-                   behaviour=None, force=False, user_approved=None):
-    """Store a run's verdict (the shared body of --verdict and --close-round): validate, apply, append to the
-    cross-repo index and print. Returns 0, 7 when a PASS over changed acceptance files is refused, or 9 when a
-    PASS below the phase's review tier is refused."""
+                   behaviour=None, force=False):
+    """Store a run's verdict: validate, apply, append to the cross-repo index and print. Returns 0, or 7 when a
+    PASS over changed acceptance files is refused."""
     verdict = (verdict or "").upper()
     if verdict not in ("PASS", "FAIL"):
         die("verdict must be PASS or FAIL")
-    if verdict == "PASS" and cause and cause not in PASS_CAUSES:
-        die("--cause applies to FAIL verdicts only (a PASS takes only SPEC_GAP)")
-    if verdict == "FAIL" and cause in PASS_CAUSES:
-        die("SPEC_GAP applies to PASS verdicts only")
+    if verdict == "PASS" and cause:
+        die("--cause applies to FAIL verdicts only")
     blocked = second_blocked(repo, meta) if verdict == "FAIL" and cause == "BLOCKED" else None
     if blocked:
         die(blocked)
@@ -5526,19 +5137,10 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
         print(f"REFUSED: acceptance files changed during the run ({', '.join(acceptance_changed)}); an implementer "
               "may not edit the tests that grade it. --force records the verdict anyway with a note.")
         return 7
-    # A PASS below the phase's review tier needs a reviewer of that tier or the user's go-ahead, recorded in the
-    # verdict note (no new meta field). FAIL is never checked.
-    tier_refusal = review_tier_refusal(meta, repo) if verdict == "PASS" else None
-    user_quote = " ".join((user_approved or "").split())
-    if tier_refusal and not user_quote:
-        print(tier_refusal)
-        return 9
     meta["verdict"] = verdict
     meta["cause"] = cause
     meta["behaviour"] = (behaviour or meta.get("behaviour")) if verdict == "FAIL" else None
     note = note or ""
-    if tier_refusal:
-        note = f"tier waived (user: {user_quote}); " + note
     if forced and force:
         note = "forced: acceptance files changed; " + note
     meta["verdict_note"] = note
@@ -5573,8 +5175,8 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
           + (f"  frontier tokens: {meta['frontier_tokens']} ({meta['frontier_tokens_mode']})"
              if meta.get("frontier_tokens") is not None else ""))
     if verdict == "FAIL" and not cause:
-        print("note: add --cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED so --stats can separate executor failures "
-              "from plan and test problems")
+        print("note: add --cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED: only EXECUTOR counts as an "
+              "attempt")
         after = meta.get("acceptance_after_rc") or []
         if after and all(rc == 0 for rc in after):
             print("note: all acceptance commands passed after the run but you failed it: the tests did not enforce "
@@ -5589,9 +5191,7 @@ def cmd_verdict(args):
     meta_path = run_dir / "meta.json"
     meta = json.loads(meta_path.read_text())
     return record_verdict(repo, run_dir, meta_path, meta, verdict, cause=args.cause, note=args.note,
-                          tokens=args.tokens, behaviour=args.behaviour, force=args.force,
-                          user_approved=args.user_approved)
-
+                          tokens=args.tokens, behaviour=args.behaviour, force=args.force)
 
 
 def last_verdict_time(root, meta):
@@ -5652,203 +5252,6 @@ def frontier_tokens_since(repo, since):
         accumulate(sp, sub)
     sums["subagent_fresh"] = sub["input"] + sub["cache_write"] + sub["output"]
     return sums
-
-
-def load_runs(repo, all_repos):
-    runs = {}
-    if all_repos:
-        if INDEX.exists():
-            for line in INDEX.read_text().splitlines():
-                try:
-                    rec = json.loads(line)
-                    runs[rec["run_id"]] = rec          # later lines (verdicts) override earlier ones
-                except (ValueError, KeyError):
-                    continue
-    else:
-        for meta_path in runs_root(repo).glob("*/meta.json"):
-            if meta_path.parent.name == "ledger":       # the review ledger directory is not a run
-                continue
-            try:
-                rec = json.loads(meta_path.read_text())
-            except ValueError:
-                continue
-            if rec.get("kind") == "pr-review":     # PR reviews are not phase runs; they have no verdict or scope
-                continue
-            rec["out_of_scope_n"] = len(rec.get("out_of_scope", []))
-            runs[rec["run_id"]] = rec
-    return [r for r in runs.values() if not r["run_id"].split("-", 2)[-1].startswith(("dry-", "lint-", "review-"))]
-
-
-def parse_day(text, flag):
-    """A YYYY-MM-DD date for --since/--until, else a usage error naming the flag."""
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text or ""):
-        die(f"{flag} takes a date YYYY-MM-DD")
-    try:
-        return date.fromisoformat(text)
-    except ValueError:
-        die(f"{flag} takes a date YYYY-MM-DD")
-
-
-def plan_gap_counts(repo, runs, since, until, all_repos):
-    """The five figures of the --stats plan-gap block over the (already windowed) run records."""
-    numeric = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
-    key = lambda r: (r.get("repo"), r.get("plan"), str(r.get("phase")))
-    implementing = {key(r) for r in runs
-                    if r.get("verdict") in ("PASS", "FAIL") and r.get("executor") != "planner"}
-    accepted = {key(r) for r in runs if r.get("verdict") == "PASS" and r.get("executor") != "planner"}
-    p, s, b = (sum(1 for r in runs if r.get("verdict") == v and r.get("cause") == c)
-               for v, c in (("FAIL", "PLAN_GAP"), ("PASS", "SPEC_GAP"), ("FAIL", "BLOCKED")))
-    by_key = {}
-    for r in runs:
-        by_key.setdefault(key(r), []).append(r)
-    f = sum(1 for r in runs if r.get("verdict") == "FAIL" and r.get("cause") == "PLAN_GAP"
-            and numeric(r.get("started"))
-            and any(o is not r and numeric(o.get("started")) and o["started"] > r["started"]
-                    for o in by_key[key(r)]))
-    k = sum(1 for r in runs if "." in str(r.get("phase")))
-    tokens = sum(r["frontier_tokens"] for r in runs if r.get("verdict") in ("PASS", "FAIL")
-                 and numeric(r.get("frontier_tokens")))
-    paths = sorted(NOTES_DIR.glob("*.gaps.md")) if all_repos else [NOTES_DIR / f"{repo_name(repo)}.gaps.md"]
-    lo, hi = (since.isoformat() if since else None), (until.isoformat() if until else None)
-    found = {"review": 0, "verify": 0, "lint": 0, "blocked": 0}
-    for path in paths:
-        for entry in parse_gaps(read_gap_file(path)):
-            if (not lo or entry["date"] >= lo) and (not hi or entry["date"] <= hi) \
-                    and entry["found"] in found:
-                found[entry["found"]] += 1
-    return {"N": len(implementing), "A": len(accepted), "p": p, "s": s, "b": b, "f": f, "k": k,
-            "tokens": tokens, **found}
-
-
-def cmd_stats(args):
-    repo = repo_root(args.repo or os.getcwd())
-    runs = load_runs(repo, args.all)
-    if not runs:
-        print("no recorded runs" + (" in the cross-repo index" if args.all else " in this repo"))
-        return 0
-    if args.plan_given:
-        want = os.path.relpath(args.plan, repo) if os.path.isabs(args.plan) else args.plan
-        want = os.path.normpath(want)
-        runs = [r for r in runs if r.get("plan") and os.path.normpath(str(r["plan"])) == want]
-        if not runs:
-            print(f"no recorded runs for plan {args.plan}")
-            return 0
-    since = parse_day(args.since, "--since") if args.since is not None else None
-    until = parse_day(args.until, "--until") if args.until is not None else None
-    if since or until:
-        lo = datetime(since.year, since.month, since.day).timestamp() if since else None
-        hi = (datetime(until.year, until.month, until.day) + timedelta(days=1)).timestamp() if until else None
-        runs = [r for r in runs
-                if isinstance(r.get("started"), (int, float)) and not isinstance(r.get("started"), bool)
-                and (lo is None or r["started"] >= lo) and (hi is None or r["started"] < hi)]
-        if not runs:
-            print("no recorded runs in the window")
-            return 0
-    # first attempt per (repo, plan, phase) = earliest start
-    first = {}
-    for r in sorted(runs, key=lambda r: r.get("started") or 0):
-        first.setdefault((r.get("repo"), r.get("plan"), r.get("phase")), r["run_id"])
-    first_ids = set(first.values())
-    groups = {}
-    for r in runs:
-        key = f"{r.get('executor') or '?'} {r.get('model') or ''}".strip()
-        g = groups.setdefault(key, {"runs": 0, "pass": 0, "fail": 0, "first": 0, "first_pass": 0,
-                                    "secs": [], "causes": {c: 0 for c in CAUSE_CODE},
-                                    "front_tok": [], "cost": []})
-        g["runs"] += 1
-        v = r.get("verdict")
-        if v == "PASS":
-            g["pass"] += 1
-        elif v == "FAIL":
-            g["fail"] += 1
-        if v == "FAIL" and r.get("cause") in g["causes"]:
-            g["causes"][r["cause"]] += 1
-        if r["run_id"] in first_ids and v:
-            g["first"] += 1
-            g["first_pass"] += v == "PASS"
-        if r.get("seconds") is not None:
-            g["secs"].append(r["seconds"])
-        for field, bucket in (("frontier_tokens", "front_tok"), ("executor_cost", "cost")):
-            if isinstance(r.get(field), (int, float)):
-                g[bucket].append(r[field])
-    scope_label = "across the cross-repo index" if args.all else f"in {repo_name(repo)}"
-    if args.plan_given:
-        scope_label += f" (plan {args.plan})"
-    print(f"delegated runs {scope_label}: {len(runs)} (phases attempted: {len(first)})")
-    print(f"{'executor / model':44s} {'runs':>4s} {'PASS':>4s} {'FAIL':>4s} {'1st-pass':>8s} "
-          f"{'mean min':>8s} {'front tok':>9s} {'cost $':>8s}  fail causes")
-    mean_k = lambda xs: f"{sum(xs) / len(xs) / 1000:.0f}k" if xs else "-"
-    for key, g in sorted(groups.items(), key=lambda kv: -kv[1]["runs"]):
-        fp = f"{g['first_pass']}/{g['first']}" if g["first"] else "-"
-        mean = f"{sum(g['secs']) / len(g['secs']) / 60:.1f}" if g["secs"] else "-"
-        causes = " ".join(f"{CAUSE_CODE[c]}{n}" for c, n in g["causes"].items()) if g["fail"] else "-"
-        cost = f"{sum(g['cost']):.3f}" if g["cost"] else "-"
-        print(f"{key[:44]:44s} {g['runs']:>4d} {g['pass']:>4d} {g['fail']:>4d} {fp:>8s} "
-              f"{mean:>8s} {mean_k(g['front_tok']):>9s} {cost:>8s}  {causes}")
-    # Reviewer table: adoption of each reviewer's findings, from the review entries on each run's meta.json.
-    # The cross-repo index holds no review entries, so --all only says so.
-    reviewers = {}
-    if not args.all:
-        for r in runs:
-            for rev in r.get("reviews") or []:
-                if rev.get("reused"):             # a reuse entry ran no model; not a review for the adoption table
-                    continue
-                key = rev.get("reviewer") or "?"
-                g = reviewers.setdefault(key, {"reviews": 0, "findings": 0, "adopted": 0, "incorrect": 0,
-                                               "not_adopted": 0, "adjudicated": False})
-                g["reviews"] += 1
-                report = rev.get("report")
-                try:
-                    text = Path(report).read_text() if report else ""
-                except OSError:
-                    text = ""
-                g["findings"] += len(re.findall(r"\[(?:BLOCKER|HIGH|MEDIUM|NOTE)\]", text))
-                if any(rev.get(k) is not None for k in ("adopted", "incorrect", "not_adopted")):
-                    g["adjudicated"] = True
-                    g["adopted"] += rev.get("adopted") or 0
-                    g["incorrect"] += rev.get("incorrect") or 0
-                    g["not_adopted"] += rev.get("not_adopted") or 0
-    print(f"{'reviewer':32s} {'reviews':>7s} {'findings':>8s} {'adopted %':>9s} {'wrong %':>7s}")
-    for key, g in sorted(reviewers.items(), key=lambda kv: -kv[1]["reviews"]):
-        if not g["adjudicated"]:
-            adopted_pct = wrong_pct = "-"
-        else:
-            denom = g["adopted"] + g["incorrect"] + g["not_adopted"]
-            adopted_pct = f"{100 * g['adopted'] / denom:.0f}%" if denom else "-"
-            wrong_pct = f"{100 * g['incorrect'] / denom:.0f}%" if denom else "-"
-        print(f"{key[:32]:32s} {g['reviews']:>7d} {g['findings']:>8d} {adopted_pct:>9s} {wrong_pct:>7s}")
-    # Rounds per phase: verdicts recorded per (plan, phase); each verdict is one attempt.
-    rounds = {}
-    for r in runs:
-        if r.get("verdict") in ("PASS", "FAIL"):
-            rounds[(r.get("plan") or "?", r.get("phase"))] = rounds.get((r.get("plan") or "?", r.get("phase")), 0) + 1
-    if rounds:
-        counts = list(rounds.values())
-        worst = max(rounds.items(), key=lambda kv: (kv[1], str(kv[0])))
-        print(f"rounds per phase: mean {sum(counts) / len(counts):.1f}, max {worst[1]} "
-              f"({Path(str(worst[0][0])).stem}:{worst[0][1]})")
-    else:
-        print("rounds per phase: mean 0.0, max 0 (-)")
-    behaviours = {}
-    for r in runs:
-        if r.get("verdict") == "FAIL" and r.get("behaviour"):
-            behaviours[r["behaviour"]] = behaviours.get(r["behaviour"], 0) + 1
-    if behaviours:
-        print("behaviours: " + ", ".join(f"{k} {v}" for k, v in sorted(behaviours.items())))
-    gaps = plan_gap_counts(repo, runs, since, until, args.all)
-    label = f"{since.isoformat() if since else 'start'}..{until.isoformat() if until else 'now'}" if since or until else "(all dates)"
-    rate = f"{(gaps['p'] + gaps['s'] + gaps['b']) / gaps['N']:.2f}" if gaps["N"] else "-"
-    frontier = f"{gaps['tokens'] / gaps['A'] / 1e6:.2f}M" if gaps["A"] else "-"
-    print(f"plan gaps {label}: implementing phases {gaps['N']} (accepted {gaps['A']})\n"
-          f"  gap verdicts: PLAN_GAP {gaps['p']}, SPEC_GAP {gaps['s']}, BLOCKED {gaps['b']} "
-          f"({rate} per implementing phase)\n"
-          f"  after a gap: full re-runs {gaps['f']}, sub-phase runs {gaps['k']}\n"
-          f"  found (gaps.md): review {gaps['review']}, verify {gaps['verify']}, lint {gaps['lint']}, "
-          f"blocked {gaps['blocked']}\n"
-          f"  frontier tokens per accepted implementing phase: {frontier}")
-    print("1st-pass = PASS on the first attempt; front tok = Claude-session tokens per verdict; causes "
-          "E/P/T/F/R/B = executor / plan gap / test defect / flaky / provider / blocked")
-    return 0
 
 
 def cmd_resolve(text):
@@ -5974,103 +5377,6 @@ def cmd_show(args):
     if not report.exists():
         die(f"{run_dir.name} has no report yet (open session run? finish it with --end {run_dir.name})")
     print(report.read_text())
-    return 0
-
-
-def card_diff_stat(repo, files, base):
-    """Per-file (path, added, removed) like `git diff --stat`: tracked files against `base`, untracked against
-    /dev/null. A binary file's git numstat columns are `-`; they are kept verbatim."""
-    if not files:
-        return []
-    tracked = set(git(repo, "ls-files", "--", *files).split("\n")) - {""}
-    rows = []
-
-    def numstat(extra):
-        out = subprocess.run(["git", "-C", str(repo), "diff", "--numstat", *extra],
-                             capture_output=True, text=True).stdout
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 3:
-                rows.append((parts[2], parts[0], parts[1]))
-
-    tf = [f for f in files if f in tracked]
-    if tf:
-        numstat([str(base), "--", *tf])
-    for f in files:
-        if f not in tracked:
-            numstat(["--no-index", "--", "/dev/null", f])
-    return rows
-
-
-def cmd_card(args):
-    """Verdict card (<=25 lines, zero model tokens) and a verify packet for the concord:verifier subagent:
-    run, phase, risk tier and any risk floor; acceptance as recorded; scope; git diff --stat per file; reviews;
-    FLAGS (files the checker must open). Also writes verify-packet-<n>.md (card, phase text, acceptance commands with
-    their recorded output, capped diff) and prints its path."""
-    repo = repo_root(args.repo or os.getcwd())
-    root = runs_root(repo)
-    run_dir = find_run(root, args.card, want="reported")
-    meta_path = run_dir / "meta.json"
-    if not meta_path.exists():
-        die(f"{run_dir.name} has no meta.json (not a reported run)")
-    meta = json.loads(meta_path.read_text())
-    tier = phase_tier(meta)
-    ftier, fpath, fpat = run_floor(repo, meta)
-    floor = ""
-    if ftier and TIER_RANK[ftier] > TIER_RANK[tier]:
-        floor = f"  floor {ftier} ({fpath} matches {fpat}; needs {TIER_REVIEWER[ftier]})"
-    after = meta.get("acceptance_after_rc") or []
-    accept = (f"acceptance after run: {sum(1 for r in after if r == 0)}/{len(after)} pass" if after
-              else "acceptance: not recorded by the run")
-    oos = [p for p in (meta.get("out_of_scope") or []) if isinstance(p, str)]
-    outside = meta.get("outside_changed") or []
-    scope = (f"scope: out of scope {len(oos)} | outside checkout {len(outside)} | "
-             f"plan modified {'yes' if meta.get('plan_modified') else 'no'} | "
-             f"generated {len(meta.get('generated') or [])}")
-    rev_lines = []
-    for rev in meta.get("reviews") or []:
-        name = rev.get("reviewer") or "?"
-        rtier = {1: "low", 2: "medium", 3: "high"}[REVIEWER_RANK.get(norm(name), 1)]
-        n = len(rev.get("finding_ids") or [])
-        rev_lines.append(f"  {name} ({rtier}, {rev.get('verdict')}, {n} findings)")
-    rev_block = ["reviews:"] + rev_lines if rev_lines else ["reviews: none"]
-    changed = (meta.get("changed") or []) + (meta.get("created") or [])
-    generated = set(meta.get("generated") or [])
-    flags, seen = [], set()
-    for item in ([f"{fpath} (floored)"] if floor else []) \
-            + [f"{p} (out of scope)" for p in oos] \
-            + [f"{p} (test file changed)" for p in changed
-               if isinstance(p, str) and TEST_PATH.search(p) and p not in generated] \
-            + [f"{p} (acceptance file changed)" for p in meta.get("acceptance_files_changed") or []]:
-        if item not in seen:
-            seen.add(item); flags.append(item)
-    flag_line = "FLAGS: " + (", ".join(flags) if flags else "none")
-    base = run_diff_base(repo, meta)
-    files = review_files(repo, meta)
-    stat_lines = [f"  {p}  +{a} -{d}" for p, a, d in card_diff_stat(repo, files, base)]
-    budget = 25 - (3 + 1 + len(rev_block) + 1)    # head(3) + "diff --stat:" + reviews + FLAGS
-    if len(stat_lines) > budget:
-        keep = max(budget - 1, 0)
-        stat_lines = stat_lines[:keep] + [f"  ... {len(stat_lines) - keep} more files"]
-    head = [f"CARD {run_dir.name}  phase {meta.get('phase')}  risk {tier}{floor}", accept, scope]
-    lines = head + ["diff --stat:"] + stat_lines + rev_block + [flag_line]
-    card_text = "\n".join(lines)
-    phase_text = current_phase_text(meta, run_dir)
-    after_txt = run_dir / "acceptance.after.txt"
-    accept_block = after_txt.read_text() if after_txt.exists() else \
-        ("\n".join(f"$ {c}" for c in (meta.get("acceptance") or [])) or "none listed")
-    diff_text = change_diff(repo, files, base=base)    # capped at REVIEW_DIFF_CAP, as review packets are
-    n = len(list(run_dir.glob("verify-packet-*.md"))) + 1
-    packet = run_dir / f"verify-packet-{n}.md"
-    packet.write_text(
-        f"{VERIFY_TASK}\n---\n\nVerdict card:\n{card_text}\n\n"
-        + (f"The phase that was implemented:\n{phase_text}\n\n" if phase_text else "")
-        + f"Acceptance commands and their recorded output:\n{accept_block}\n\n"
-        + f"Diff:\n```\n{diff_text}```\n")
-    print(card_text)
-    print(f"VERIFY-PACKET {packet}")
-    print(f"next: Agent subagent_type concord:verifier with prompt \"Verify packet: {packet}\" (Claude subscription), "
-          f"then confirm the verdict from this card and its VERIFY-JSON")
     return 0
 
 
@@ -6218,10 +5524,27 @@ def _write_meta_mutation(meta_path, run_dir, mutation, fallback_meta):
         raise
 
 
+def own_ranges(repo, run_dir, f, base):
+    """New-side line ranges of the run's own change to f: the copy taken when the run started against the current
+    text, so uncommitted edits made before the run are not mutated. A file without that copy (new, or outside
+    Files:) falls back to its diff against `base`."""
+    before = Path(run_dir) / "backup" / f
+    if not before.is_file():
+        return diff_hunks(change_diff(repo, [f], cap=None, base=base)).get(f, [])
+    try:
+        old, new = before.read_text(errors="replace"), (Path(repo) / f).read_text(errors="replace")
+    except OSError:
+        return []
+    diff = "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), fromfile=f"a/{f}", tofile=f"b/{f}",
+                                          lineterm="", n=0))
+    return diff_hunks(diff).get(f, [])
+
+
 def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout):
-    """Grade C/C++ (and listed) mutants in a throwaway copy of the checkout: the live files and the run lock are
-    untouched, so the verifier and reviewer can work meanwhile. --mutants grades planner-listed mutants; otherwise
-    C/C++ text operators on the run's changed lines plus Python AST mutants, sampled with the seed."""
+    """Grade mutants in a throwaway copy of the checkout: the live files and the run lock are untouched, so other
+    work goes on meanwhile. --mutants grades planner-listed mutants; otherwise C/C++ text operators and Python AST
+    mutants on the run's own changed lines, sampled with the seed. Each mutant runs `acceptance` in order and stops
+    at the first command that fails."""
     if (repo / "CMakeCache.txt").exists():
         die("--mutate cannot isolate an in-source CMake build (CMakeCache.txt at the repository root); configure "
             "it out of source (cmake -B build)", code=2)
@@ -6247,7 +5570,7 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
                 text = (repo / f).read_bytes().decode("utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            ranges = diff_hunks(change_diff(repo, [f], cap=None, base=mutate_base)).get(f, [])
+            ranges = own_ranges(repo, run_dir, f, mutate_base)
             gen = c_mutation_candidates(text, ranges) if is_cpp else mutation_candidates(text, ranges)
             for c in gen:
                 c["path"] = f
@@ -6303,13 +5626,14 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
             time.sleep(0.05)
 
     def grade(check_cmds):
-        """stillborn (build fails), else killed / timeout / survived from the check commands."""
+        """stillborn (build fails), else killed / timeout at the first failing check command, else survived."""
         if build_cmd and checked(build_cmd) != 0:
             return "stillborn"
-        nonzero = [rc for rc in (checked(c) for c in check_cmds) if rc != 0]
-        if not nonzero:
-            return "survived"
-        return "timeout" if all(rc == 124 for rc in nonzero) else "killed"
+        for c in check_cmds:
+            rc = checked(c)
+            if rc != 0:
+                return "timeout" if rc == 124 else "killed"
+        return "survived"
 
     def tally(result):
         nonlocal killed, survived, stillborn
@@ -6451,14 +5775,10 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
 
 
 def cmd_mutate(args, conf):
-    """Seeded, bounded mutation testing of a reported run's changed Python lines (--mutate RUN [--max N] [--seed S]).
-
-    Mutates the CURRENT file text (the run's post-run snapshot is not checked), runs the run's acceptance
-    commands against each mutant, and restores every file byte-identically (hash-checked). Survivors are
-    information, not a failure. The per-checkout run lock is held for the whole command.
-
-    With --mutants, or when the run changed a C/C++ source, mutation runs in an isolated copy of the checkout
-    (no run lock, live files untouched); otherwise the live Python mode below runs unchanged."""
+    """Opt-in, seeded, bounded mutation testing of a reported run (--mutate RUN [--max N] [--seed S]): mutants of
+    the run's own changed lines (Python, C/C++) run in an isolated copy of the checkout, graded by the phase's
+    acceptance commands that are not marked (characterization) (all of them when every one is). Survivors are
+    information, not a failure."""
     if args.max < 1:
         die("--max must be >= 1", code=2)
     repo = repo_root(args.repo or os.getcwd())
@@ -6477,6 +5797,12 @@ def cmd_mutate(args, conf):
     acceptance = meta.get("acceptance") or []
     if not acceptance:
         die(f"{run_id} has no acceptance commands; nothing would grade a mutant", code=2)
+    try:
+        marked = parse_acceptance_marked((run_dir / "phase.md").read_text())
+    except OSError:
+        marked = []
+    if [cmd for cmd, _ in marked] == acceptance:
+        acceptance = [cmd for cmd, char in marked if not char] or acceptance
     check_timeout = CHECK_TIMEOUT_S
     state_path = run_dir / "state.json"
     if state_path.exists():
@@ -6484,161 +5810,7 @@ def cmd_mutate(args, conf):
             check_timeout = json.loads(state_path.read_text()).get("check_timeout") or CHECK_TIMEOUT_S
         except (OSError, ValueError):
             pass
-
-    cpp_changed = any(os.path.splitext(f)[1].lower() in C_SOURCE_EXTS and not TEST_PATH.search(f)
-                      and not _mutant_left_out(repo, f)
-                      for f in review_files(repo, meta))
-    if args.mutants is not None or cpp_changed:
-        return mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout)
-
-    print("note: mutating the current files, not the run's post-run snapshot")
-    backup_dir = run_dir / "mutation-backup"
-    originals, hashes = {}, {}
-
-    clean_marker = backup_dir / "CLEAN"
-    backup_dir.mkdir(parents=True, exist_ok=True)   # before any handler can run restore_and_verify
-    state = {"backed_up": False}
-
-    def restore_and_verify():
-        """Put every original back in place and fail loudly if any byte moved (R6). Signals are ignored while the
-        files are written back, so a second SIGTERM cannot abort the restore half-way."""
-        saved = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
-        try:
-            for f, raw in originals.items():
-                try:
-                    (repo / f).write_bytes(raw)
-                except OSError:
-                    pass
-            for f, digest in hashes.items():
-                if file_hash(repo / f) != digest:
-                    die(f"{f} was not restored to its original bytes; backup: {backup_dir / f}", code=3)
-            if originals and state["backed_up"]:      # only a run whose own backups exist may bless the dir
-                clean_marker.write_text("restored and verified\n")   # the backup is no longer the only original
-        finally:
-            for sig, handler in saved.items():
-                signal.signal(sig, handler)
-
-    def on_term(signum, frame):
-        raise KeyboardInterrupt
-
-    old_term = signal.signal(signal.SIGTERM, on_term)
-    old_hup = signal.signal(signal.SIGHUP, on_term)
-    acquired = False
-    try:
-        acquire_lock(root, run_id)             # R4: the lock comes before any file is read
-        acquired = True
-        if not clean_marker.exists():
-            # Every backed-up file is checked, not only this sample's: a leftover mutant may sit in a file the
-            # new sample does not touch, and its backup must never be overwritten.
-            for dst in sorted(q for q in backup_dir.rglob("*") if q.is_file()):
-                rel = dst.relative_to(backup_dir).as_posix()
-                current = repo / rel
-                if not current.is_file() or current.read_bytes() != dst.read_bytes():
-                    die(f"previous --mutate left a mutant in {rel}; restore it from {dst} first, or delete that "
-                        f"backup file if the current {rel} is what you want", code=3)
-        candidates = []
-        mutate_base = run_diff_base(repo, meta)
-        for f in review_files(repo, meta):
-            if not f.endswith(".py") or TEST_PATH.search(f):
-                continue
-            try:
-                raw = (repo / f).read_bytes()
-                text = raw.decode("utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                print(f"skip {f}: cannot read as UTF-8 ({exc.__class__.__name__})")
-                continue
-            try:
-                ast.parse(text)
-            except (SyntaxError, ValueError):
-                print(f"skip {f}: current file has a syntax error")
-                continue
-            originals[f], hashes[f] = raw, hashlib.sha256(raw).hexdigest()
-            ranges = diff_hunks(change_diff(repo, [f], cap=None, base=mutate_base)).get(f, [])
-            for candidate in mutation_candidates(text, ranges):
-                candidate["path"] = f
-                candidates.append(candidate)
-
-        if not candidates:
-            print(f"MUTATION {run_id}: no mutable Python lines in the change")
-            (run_dir / "mutation.json").write_text(json.dumps(
-                {"seed": args.seed, "max": args.max, "candidates": 0, "sampled": []}, indent=1))
-            meta["mutation"] = {"seed": args.seed, "max": args.max, "candidates": 0, "sampled": [],
-                                "killed": 0, "survived": 0}
-            meta_path.write_text(json.dumps(meta, indent=1))
-            return 0
-
-        total = len(candidates)
-        k = min(args.max, total)
-        sampled = [candidates[i] for i in sorted(random.Random(args.seed).sample(range(total), k))]
-        touched = list(dict.fromkeys(c["path"] for c in sampled))
-        # Only the files that will be mutated are backed up, restored and hash-checked: rewriting an untouched
-        # file with its own bytes would still move its mtime (and trigger rebuilds).
-        originals = {f: originals[f] for f in touched}
-        hashes = {f: hashes[f] for f in touched}
-
-        # R5: never clobber a backup that disagrees with the current file when the run that wrote it never
-        # finished its restore (no CLEAN marker): that backup is the only original. A completed run leaves the
-        # marker, so a later legitimate edit of the file is never mistaken for a leftover mutant.
-        if clean_marker.exists():                  # a completed run: its backups are stale, keep only this run's
-            for old in sorted(q for q in backup_dir.rglob("*") if q.is_file() and q != clean_marker):
-                old.unlink()
-        for f in touched:                      # a copy of each original goes under mutation-backup/ first
-            dst = backup_dir / f
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(originals[f])
-        state["backed_up"] = True
-        try:
-            clean_marker.unlink()              # from here until the restore is verified, the backup is the original
-        except FileNotFoundError:
-            pass
-
-        results, killed, survived = [], 0, 0
-        try:
-            for candidate in sampled:
-                f = candidate["path"]
-                try:
-                    (repo / f).write_text(candidate["source"], encoding="utf-8")
-                    rcs = [run_check(cmd, repo, check_timeout)[0] for cmd in acceptance]
-                finally:
-                    (repo / f).write_bytes(originals[f])   # one mutant on disk at a time, whatever happens
-                nonzero = [rc for rc in rcs if rc != 0]
-                if not nonzero:
-                    result = "survived"
-                elif all(rc == 124 for rc in nonzero):
-                    result = "timeout"
-                else:
-                    result = "killed"
-                if result == "survived":
-                    survived += 1
-                else:
-                    killed += 1
-                results.append({"path": f, "line": candidate["line"], "operator": candidate["operator"],
-                                "original": candidate["original"], "mutated": candidate["mutated"],
-                                "result": result})
-        finally:
-            restore_and_verify()
-    except KeyboardInterrupt:
-        restore_and_verify()
-        print(f"MUTATION {run_id}: interrupted; original files restored")
-        return 130
-    finally:
-        if acquired:
-            release_lock(root, run_id)
-        signal.signal(signal.SIGTERM, old_term)
-        signal.signal(signal.SIGHUP, old_hup)
-
-    print(f"MUTATION {run_id}: {k} mutants (sampled from {total}, seed {args.seed}), "
-          f"killed {killed}, survived {survived}")
-    for r in results:
-        if r["result"] == "survived":
-            print(f"SURVIVED {r['path']}:L{r['line']}: {r['operator']}: {r['original']} -> {r['mutated']}")
-    (run_dir / "mutation.json").write_text(json.dumps(
-        {"seed": args.seed, "max": args.max, "candidates": total, "sampled": results}, indent=1))
-    meta["mutation"] = {"seed": args.seed, "max": args.max, "candidates": total,
-                        "sampled": results, "killed": killed, "survived": survived}
-    meta_path.write_text(json.dumps(meta, indent=1))
-    return 0
-
+    return mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout)
 
 def cmd_list(conf):
     for name in EXECUTORS:
@@ -6748,19 +5920,17 @@ def main():
                         help="full: may run shell commands; edit: file edits only where enforceable")
     parser.add_argument("--wall", help="wall-clock limit, e.g. 30m (default from executors.conf)")
     parser.add_argument("--repo", help="repository directory (default: current directory)")
-    parser.add_argument("--extra", help="extra instructions, e.g. verifier feedback for a retry (use --extra=TEXT)")
+    parser.add_argument("--extra", help="extra instructions, e.g. feedback for a retry (use --extra=TEXT)")
     parser.add_argument("--no-ignored", action="store_true", help="do not monitor gitignored paths")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--lint", metavar="PHASE", type=phase_arg, help="read-only pre-flight review of a phase")
-    parser.add_argument("--map", metavar="PLAN", help="print the plan's Intent/Structure/Work map with per-phase status (zero tokens)")
-    parser.add_argument("--mermaid", action="store_true", help="with --map: print a Mermaid mindmap instead of the tree")
     parser.add_argument("--begin", metavar="PHASE", type=phase_arg, help="open a session run (Claude implementer or planner)")
     parser.add_argument("--label", help="with --begin: executor label for the report (default: plan's Executor)")
     parser.add_argument("--end", metavar="RUN_ID", help="close a session run and write its report")
     parser.add_argument("--abort", metavar="RUN_ID", help="release a session run's lock without a report")
-    parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the verifier's outcome")
+    parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the phase's outcome")
     parser.add_argument("--note", help="with --verdict: short reason")
-    parser.add_argument("--cause", choices=CAUSES, help="with --verdict: why a FAIL failed, or SPEC_GAP on a PASS whose review found a case the plan never specified")
+    parser.add_argument("--cause", choices=CAUSES, help="with --verdict: why a FAIL failed (only EXECUTOR counts as an attempt)")
     parser.add_argument("--tokens", metavar="N|auto",
                         help="with --verdict: Claude-session tokens for this phase; 'auto' sums the repository's newest "
                              "session transcript since the previous verdict")
@@ -6772,32 +5942,8 @@ def main():
     parser.add_argument("--force-review", action="store_true",
                         help="with --review/--packet/--review-pr: review even when a prior review covers the content")
     parser.add_argument("--review-record", metavar="RUN_ID", help="store a Claude reviewer's output on the run")
-    parser.add_argument("--review-adjudicate", metavar="RUN_ID",
-                        help="record the verifier's adjudication of a reviewer's findings on the run")
-    parser.add_argument("--close-round", metavar="RUN_ID",
-                        help="adjudicate ids from any reviewer and record the verdict in one call")
-    parser.add_argument("--verdict-result", choices=["PASS", "FAIL"],
-                        help="with --close-round: the verdict to record after adjudicating")
     parser.add_argument("--reviewer", help="with --review-record: reviewer name (e.g. concord:reviewer-opus55)")
     parser.add_argument("--file", help="with --review-record: file holding the reviewer's REVIEW-JSON answer")
-    parser.add_argument("--adopted", type=int, help="with --review-adjudicate: findings the verifier adopted")
-    parser.add_argument("--incorrect", type=int, help="with --review-adjudicate: findings that were wrong")
-    parser.add_argument("--not-adopted", type=int, help="with --review-adjudicate: findings the verifier did not act on")
-    parser.add_argument("--adopt", action="append",
-                        help="with --review-adjudicate/--close-round: comma-separated finding ids to adopt (repeatable)")
-    parser.add_argument("--wrong", action="append",
-                        help="with --review-adjudicate/--close-round: \"F2=reason; F5=reason\" findings that were "
-                             "wrong (repeatable)")
-    parser.add_argument("--decline", action="append",
-                        help="with --review-adjudicate/--close-round: \"F3=reason\" findings not acted on (repeatable)")
-    parser.add_argument("--test", action="append",
-                        help="with --review-adjudicate/--close-round: \"F1=tests/x.py::t; ...\" the test for an "
-                             "adopted fix (repeatable)")
-    parser.add_argument("--review-decide", metavar="RUN_ID",
-                        help="record a binding decision or assumption in the run's ledger")
-    parser.add_argument("--decision", help="with --review-decide: the decision text")
-    parser.add_argument("--kind", choices=["decision", "assumption"], default="decision",
-                        help="with --review-decide: decision (default) or assumption")
     parser.add_argument("--behaviour", help="with --verdict FAIL --cause EXECUTOR: the executor's failure mode "
                                             f"({', '.join(BEHAVIOURS)})")
     parser.add_argument("--review-pr", metavar="PR", help="review an open GitHub PR at its head (N, owner/repo#N or URL)")
@@ -6815,26 +5961,19 @@ def main():
                         help="run the executor even when acceptance already passes before the change; with "
                              "--verdict PASS, record the PASS despite changed acceptance files")
     parser.add_argument("--user-approved", metavar="QUOTE",
-                        help="the user's words allowing a run beyond the attempt cap (exit 8) or a PASS below the "
-                             "phase's review tier (exit 9); recorded in the report or verdict note")
-    parser.add_argument("--stats", action="store_true", help="pass rates, time, tokens and reviewer adoption")
-    parser.add_argument("--since", metavar="YYYY-MM-DD", help="with --stats: only runs started on or after this local date")
-    parser.add_argument("--until", metavar="YYYY-MM-DD", help="with --stats: only runs started on or before this local date")
-    parser.add_argument("--all", action="store_true", help="with --stats: use the cross-repo index")
+                        help="the user's words allowing a run beyond the attempt cap (exit 8), or with --review-pr "
+                             "the go-ahead that lets that review count at its --tier; recorded in the run")
     parser.add_argument("--resolve", metavar="MODEL", help="print how a model name resolves, then exit")
     parser.add_argument("--models", action="store_true", help="print the model registry")
     parser.add_argument("--verify", action="store_true", help="with --models: check IDs against the Zen catalog")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--show", metavar="RUN_ID")
-    parser.add_argument("--card", metavar="RUN_ID", help="verdict card (<=25 lines, zero tokens) + a verify packet "
-                        "for the concord:verifier subagent (RUN_ID or 'last')")
     parser.add_argument("--restore", metavar="RUN_ID")
     parser.add_argument("--mutate", metavar="RUN_ID",
-                        help="seeded, bounded mutation testing of a reported run's changed Python lines; "
-                             "acceptance commands that call concord.py in the same checkout block on the run "
-                             "lock (out of scope)")
-    parser.add_argument("--max", type=int, default=20, help="with --mutate: sample at most N mutants (default 20)")
+                        help="opt-in mutation testing of a reported run's own changed lines (Python, C/C++) in an "
+                             "isolated copy of the checkout; each mutant stops at its first failing acceptance command")
+    parser.add_argument("--max", type=int, default=10, help="with --mutate: sample at most N mutants (default 10)")
     parser.add_argument("--seed", type=int, default=0, help="with --mutate: RNG seed for the sample (default 0)")
     parser.add_argument("--mutants", metavar="FILE", help="with --mutate: a JSON list of planner-written mutants "
                         "{id, file, old, new, occ?, check?, what?} to grade in an isolated copy")
@@ -6861,20 +6000,12 @@ def main():
         return cmd_check(conf)
     if args.show:
         return cmd_show(args)
-    if args.card:
-        return cmd_card(args)
     if args.restore:
         return cmd_restore(args)
     if args.mutate:
         return cmd_mutate(args, conf)
     if args.review_record:
         return cmd_review_record(args)
-    if args.review_decide:
-        return cmd_review_decide(args)
-    if args.review_adjudicate:
-        return cmd_review_adjudicate(args)
-    if args.close_round:
-        return cmd_close_round(args)
     if args.pr_status:
         return cmd_pr_status(args)
     if args.review_pr:
@@ -6883,8 +6014,6 @@ def main():
         return cmd_review_packet(args)
     if args.review:
         return cmd_review(args, " ".join(args.words).strip(), conf)
-    if args.map:
-        return cmd_map(args, conf)
     if args.lint is not None:
         return cmd_lint(args, args.lint, " ".join(args.words).strip(), conf)
     if args.begin is not None:
@@ -6895,8 +6024,6 @@ def main():
         return cmd_abort(args)
     if args.verdict:
         return cmd_verdict(args)
-    if args.stats:
-        return cmd_stats(args)
     if not args.words or phase_key(args.words[-1]) is None:
         parser.error("usage: concord.py [MODEL WORDS ...] PHASE   (PHASE is a number such as 2, or 2.1 for a sub-phase)")
     phase = phase_key(args.words[-1])

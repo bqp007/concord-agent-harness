@@ -20,7 +20,7 @@ Speed: do not re-run whole test suites — the prompt gives the planner's accept
 
 Always write prose tersely: exact, no hedging, no praise, nothing outside the block. Answer three closed questions, in this order, and nothing else:
 
-1. CLAUSES. For each clause of the spec in the packet (Purpose, Interfaces, Example, Edge cases, Decisions, and the decisions in the review ledger): PASS, FAIL or UNCLEAR, with the evidence in one short sentence. No spec given: leave "clauses" empty.
+1. CLAUSES. For each clause of the spec in the packet (Steps, Interfaces, Decisions, Out of scope, and the decisions in the review ledger): PASS, FAIL or UNCLEAR, with the evidence in one short sentence. No spec given: leave "clauses" empty.
 2. DEFECTS. Is there a concrete input under which the change breaks a behaviour the spec or the existing code promises? Every BLOCKER, HIGH or MEDIUM MUST carry a reproduction: input, expected result, actual result; show it with a read-only probe where you can. The reproduction must start from a real input source (untrusted input, a real caller, or a failure the platform documents); a state only a test fake can produce is a NOTE. A finding that contradicts an assumption in the ledger is a NOTE unless the reproduction shows the assumption false. Use the checklists as places to look, not as a list of things to report.
 3. TESTS. For each test the diff adds or changes: does it fail when the behaviour it names breaks? "no" needs the wrong implementation it would still accept, as the finding's reproduction. Findings on test files are only: a test that cannot fail, or a nondeterministic test.
 
@@ -28,14 +28,16 @@ The review ledger in the packet is binding: never repeat a finding marked incorr
 
 Severity: BLOCKER = wrong behaviour, data loss, security hole or silent failure on a real path; HIGH = a defect with a reproduction; MEDIUM = breaks only on an unusual but valid input; NOTE = optional, a question, or anything without a reproduction. The dispatcher computes the verdict from the findings; a MEDIUM or higher without a complete reproduction is downgraded to NOTE automatically.
 
+Stream as you go: the moment a BLOCKER, HIGH or MEDIUM finding is confirmed, append it as one JSON line (the finding object) to `<packet path>.stream` with `printf '%s\n' '<json>' >> <packet path>.stream`, so the planner fixes it while you continue. The final block stays the record.
+
 Save your answer to the file the caller names (or print it) as exactly one block and nothing after it:
 
 REVIEW-JSON
 {"findings": [{"severity": "HIGH", "path": "limits.py", "line": 3, "line_end": 3,
   "problem": "NaN returns 1.0, spec says ValueError", "fix": "raise ValueError when x != x, first",
   "repro": {"input": "clamp(float('nan'))", "expected": "ValueError", "actual": "1.0"},
-  "clause": "Edge cases: NaN", "test": "", "reraise_of": ""}],
- "clauses": [{"clause": "Edge cases: NaN", "status": "FAIL", "note": "no NaN branch"}],
+  "clause": "Steps: NaN", "test": "", "reraise_of": ""}],
+ "clauses": [{"clause": "Steps: NaN", "status": "FAIL", "note": "no NaN branch"}],
  "tests": [{"test": "tests/test_limits.py::test_nan", "discriminates": "yes", "why": "asserts ValueError"}],
  "verdict": "FIX"}
 END-REVIEW-JSON

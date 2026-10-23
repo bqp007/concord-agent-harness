@@ -15,27 +15,27 @@
 
   <rect x="360" y="115" width="240" height="175" rx="12" fill="#ede9fe" stroke="#6d28d9" stroke-width="2"/>
   <text x="480" y="148" text-anchor="middle" class="t">Planner</text>
-  <text x="480" y="173" text-anchor="middle" class="s">Fable 5.1 or Opus 5.5 · effort max</text>
+  <text x="480" y="173" text-anchor="middle" class="s">Fable 5.1 (high) or Opus 5.5 (max)</text>
   <text x="480" y="203" text-anchor="middle" class="s">plans · writes the tests</text>
-  <text x="480" y="225" text-anchor="middle" class="s">verifies · confirms every finding</text>
+  <text x="480" y="225" text-anchor="middle" class="s">checks · confirms every finding</text>
   <text x="480" y="266" text-anchor="middle" class="m">Claude subscription</text>
 
   <rect x="750" y="135" width="190" height="145" rx="12" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
   <text x="845" y="168" text-anchor="middle" class="t">Implementer</text>
-  <text x="845" y="193" text-anchor="middle" class="s">DeepSeek v4.1 Flash #max</text>
+  <text x="845" y="193" text-anchor="middle" class="s">DeepSeek or GLM Flash</text>
   <text x="845" y="217" text-anchor="middle" class="s">writes code, nothing else</text>
-  <text x="845" y="258" text-anchor="middle" class="m">OpenCode Go allowance</text>
+  <text x="845" y="258" text-anchor="middle" class="m">Zen free tier, then Go</text>
   <text x="845" y="304" text-anchor="middle" class="m" style="fill:#b91c1c">never edits tests · never reviews itself</text>
 
   <rect x="330" y="350" width="300" height="100" rx="12" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
   <text x="480" y="380" text-anchor="middle" class="t">Reviewers, fresh context</text>
-  <text x="480" y="405" text-anchor="middle" class="s">Flash on every phase</text>
-  <text x="480" y="427" text-anchor="middle" class="s">+ Opus 5.5 (medium and high risk)</text>
+  <text x="480" y="405" text-anchor="middle" class="s">Flash at low risk</text>
+  <text x="480" y="427" text-anchor="middle" class="s">Opus 5.5 at medium and high</text>
 
   <line x1="212" y1="190" x2="356" y2="190" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
   <text x="284" y="180" text-anchor="middle" class="l">ticket · approval</text>
   <line x1="358" y1="240" x2="214" y2="240" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
-  <text x="284" y="260" text-anchor="middle" class="l">verified diff</text>
+  <text x="284" y="260" text-anchor="middle" class="l">checked diff</text>
 
   <line x1="602" y1="180" x2="746" y2="180" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
   <text x="674" y="170" text-anchor="middle" class="l">plan phase + tests</text>

@@ -9,7 +9,7 @@ Changes to Concord follow Concord. Every change is a small ticket with a plan, t
 
 ## Making a change
 
-1. Write `PLAN_<ticket>.md` from the template: phases with exact files, acceptance commands, risk and a line budget.
+1. Write `PLAN_<ticket>.md` from the template: phases with exact files, acceptance commands and a risk level.
 2. Add or extend a suite under `concord/tests/` that fails before the change (bash, a fake HOME, no network). Tests are written before the implementation and are not edited by whoever implements it.
 3. Implement the phase, by hand or through `concord.py`.
 4. Get an independent review: someone or something that did not write the change.

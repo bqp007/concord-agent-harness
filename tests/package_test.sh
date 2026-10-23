@@ -14,7 +14,7 @@ tmpd() { mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX"; }
 check() { local name=$1; shift; local out
   if out=$(cd "$ROOT" && eval "$*" 2>&1); then echo "check $name: ok"; pass=$((pass+1))
   else echo "check $name: FAIL $(echo "$out" | tail -1 | cut -c1-120)"; fail=$((fail+1)); fi; }
-AGENTS="implementer implementer-opus48 reviewer-opus55 verifier"
+AGENTS="implementer implementer-opus48 reviewer-opus55"
 COMMANDS="plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
 SUITES="acclint delegate delta guards papers pr_review protocol slim testquality worktree"
@@ -82,7 +82,7 @@ s_layout() { local p old
   check layout/old-name "git grep -n -I -F --untracked -e '$old' -- .; [ \$? = 1 ]"; }
 
 s_budgets() { local spec f
-  for spec in README.md:220 install.sh:90 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
+  for spec in README.md:220 install.sh:92 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
       $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:200 tests/demo_test.sh:120 \
       $A/settings.snippet.json:12 $K/repo-notes/README.md:15; do
     local f=${spec%%:*} n=${spec##*:} name; name=$(basename "$f"); [ "$f" = $K/repo-notes/README.md ] && name=repo-notes-README.md
@@ -90,8 +90,8 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6908 ] || { wc -l $K/concord.py; false; }"
-  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 460 ] || { wc -l $K/wt.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6035 ] || { wc -l $K/concord.py; false; }"
+  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
   check budgets/static_checks "grep -q '^static_checks = yes' $K/executors.conf"
@@ -138,7 +138,11 @@ inst_e() { inst --bogus 2>/dev/null; [ $? = 2 ] && { inst --repo 2>/dev/null; [ 
 inst_f() { mkdir "$H/bin" && printf '#!/bin/sh\nexit 1\n' > "$H/bin/python3" && chmod +x "$H/bin/python3"
   PATH="$H/bin:$PATH" inst --no-tests >/dev/null 2>"$H/err"; [ $? = 2 ] && grep -q python3 "$H/err"; }
 inst_g() { env HOME=$H CLAUDE_HOME=$H/x bash install.sh --no-tests >/dev/null && [ -f "$H/x/concord/concord.py" ] && [ ! -e "$H/.claude" ]; }
-s_install() { local c; for c in a b c d e f g; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+inst_h() { local g="$H/.claude/concord/tests/gone_test.sh"   # a suite the source dropped: removed, kept in the backup
+  inst --no-tests >/dev/null && echo old > "$g" && inst --dry-run > "$H/out" && grep -qF "would remove $g" "$H/out" && [ -f "$g" ] &&
+  inst --no-tests > "$H/out" && [ ! -e "$g" ] && grep -qF "remove $g" "$H/out" &&
+  [ "$(cat "$H"/.claude/concord/backup/*-pre-install*/tests/gone_test.sh)" = old ] && [ -f "$H/.claude/concord/tests/run_all.sh" ]; }
+s_install() { local c; for c in a b c d e f g h; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 s_docs() { local h f
   for h in Contents 'How it works' Install 'Try it without credentials' 'Run a ticket' Components Safety Results Citation Contributing License; do
@@ -155,6 +159,8 @@ s_docs() { local h f
   check docs/lint-count "counts_ok \$(sed -n '/^def acceptance_lint(/,/^def /p' $K/concord.py | grep -c 'out\.append(') defects docs/WORKFLOW.md"
   for f in docs/figures/*.svg; do check "docs/figure-$(basename "$f")" "grep -qF '$(basename "$f")' README.md docs/*.md"; done
   check docs/no-todo "! grep -lE 'TODO|TBD|XXX' README.md docs/*.md $A/CLAUDE.md install.sh CONTRIBUTING.md"
+  check docs/review-stream "grep -qF '.stream' $A/agents/reviewer-opus55.md && grep -qF '.stream' $A/commands/delegate.md && grep -qF 'wt.py fork' $A/commands/delegate.md"
+  check docs/acceptance-only "grep -qiF 'only the phase' $K/CONTRACT.md && grep -qiF 'never the full suites' $K/CONTRACT.md"
   check docs/claude-md "grep -q '~/.claude/concord/concord.py' $A/CLAUDE.md && grep -q deepseek-flash $A/CLAUDE.md"
   check docs/plugin-install "grep -qF '/plugin install concord@concord' README.md && grep -qF '/plugin marketplace add' docs/SETUP.md && grep -qF '/concord:plan-then-delegate' README.md"
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).

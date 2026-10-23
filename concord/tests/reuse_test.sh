@@ -149,27 +149,27 @@ git init -q --bare -b main "$O" && git clone -q "$O" "$PR" 2> /dev/null || { ech
   git push -q origin HEAD:refs/pull/20/head; git checkout -q main; git branch -qD pr20 ) || { echo "setup failed: PR history"; exit 1; }
 prjson 20 "$(git -C "$O" rev-parse refs/pull/20/head)"
 
-C0=$(calls); prvp 20 medium; RC=$?
-[ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && ! has COVERED && ok "PR 20 first review at medium runs the model (clean, stores coverage)" \
+C0=$(calls); prvp 20 low; RC=$?
+[ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && ! has COVERED && ok "PR 20 first review at low runs the model (clean, stores coverage)" \
   || { bad "PR first review rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
 ( set -e; cd "$PR"; git fetch -q origin refs/pull/20/head; git checkout -q FETCH_HEAD
   git commit -q --allow-empty -m nop; git push -q origin HEAD:refs/pull/20/head; git checkout -q main ) || { echo "setup failed: empty commit"; exit 1; }
 H20B=$(git -C "$O" rev-parse refs/pull/20/head); prjson 20 "$H20B"
-C0=$(calls); prvp 20 medium; RC=$?
+C0=$(calls); prvp 20 low; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$C0" ] && has "COVERED: 2 files already reviewed" && has "at the same content; no review run" \
   && ok "PR fully covered at a new head (all blobs unchanged): COVERED, no model call" \
   || { bad "PR full reuse rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
 $DP --pr-status 20 --repo "$PR" > "$T/out.txt" 2>&1
-has "CURRENT HEAD ${H20B:0:8}: REVIEWED at medium" \
+has "CURRENT HEAD ${H20B:0:8}: REVIEWED at low" \
   && ok "--pr-status: the recorded suppression reports the gate met at the new head" || { bad "PR reuse status"; cat "$T/out.txt"; }
-C0=$(calls); prvp 20 high; RC=$?
+C0=$(calls); prvp 20 medium; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && ! has COVERED \
-  && ok "PR review at high is not covered by the medium review: the model runs" \
+  && ok "PR review at medium is not covered by the low (flash) review: the model runs" \
   || { bad "PR higher tier rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
 ( set -e; cd "$PR"; git fetch -q origin refs/pull/20/head; git checkout -q FETCH_HEAD
   printf 'x = 3\n' > x.py; git commit -qam "x only"; git push -q origin HEAD:refs/pull/20/head; git checkout -q main ) || { echo "setup failed: x change"; exit 1; }
 prjson 20 "$(git -C "$O" rev-parse refs/pull/20/head)"
-C0=$(calls); prvp 20 medium; RC=$?
+C0=$(calls); prvp 20 low; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && has "reused 1 file(s)" && has "y.py; reviewing x.py" && ! has COVERED \
   && ok "PR partially covered: only the changed x.py is reviewed, the unchanged y.py is reused" \
   || { bad "PR partial rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }

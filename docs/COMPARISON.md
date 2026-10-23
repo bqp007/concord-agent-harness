@@ -8,7 +8,7 @@ Concord grew out of reading other workflows and papers, keeping what held up in 
 
 | | Where a human decides | Evidence a run must leave | Who reviews | Enforced by code, not by a prompt |
 |---|---|---|---|---|
-| Concord | approves every plan; commits | the dispatcher's report (scope, red run, acceptance re-run, budget) and a verdict with a cause | a fresh agent at the phase's risk tier | red run, acceptance-file hashes, attempt cap, review tier, billing guard; edit scope and no web on OpenCode |
+| Concord | approves every plan; commits | the dispatcher's report (scope, red run, acceptance re-run) and a verdict with a cause | a fresh agent, once, at the change's risk tier | red run, acceptance-file hashes, attempt cap, PR review tier, billing guard; edit scope and no web on OpenCode |
 | ECC | `/plan` asks for approval before code; the orchestration pipeline adds a gate before commit (both prompt text) | test-first and verification skills write reports quoting real commands | a separate reviewer agent; cross-provider and adversarial reviews on request | hooks that block `--no-verify`, protect config files and gate a first edit |
 | agentic-sdlc | three sign-offs (advisory); git commands ask first | gate reports quoting command, exit code and runner summary | a separate reviewer agent on the session's model | a hook that asks before commit, tag, push and publish (it fails open by design); strike counters in a state script |
 | agent-protocols | none required | checklists inside the skills | an optional persona | nothing |
@@ -38,7 +38,7 @@ MetaGPT turns a one-line requirement into a repository through a chain of typed 
 Several recent papers let an agent rewrite its own harness and keep a change when a score improves. Concord took specific mechanisms from them and left the automatic loop alone:
 
 - **Self-evolving harness:** reviews in a fresh context, re-reading the plan after a context compaction (the paper saw compaction drop the user's request in all 11 runs where it fired), and a line budget on edits to the workflow itself.
-- **MILO:** rejected changes are kept as evidence. Concord keeps a per-repository ledger of plan gaps that the planner reads before planning.
+- **MILO:** rejected changes are kept as evidence. Concord records every FAIL with its cause and keeps each review's findings in a ledger that later reviewers read.
 - **Harmony Harness:** without protection, an agent edited its own evaluation script and reported full marks. Concord hashes the acceptance files and refuses a PASS when any of them changed during the run.
 - **Terminal-RSI:** trajectories passed every scenario check yet failed the full verifier. Concord re-runs acceptance after the executor stops and has a TEST_DEFECT cause for failures that come from the test rather than the code.
 - **Deep Review:** reviewers each own one segment of a long document but read all of it. Concord built a segmented review of large diffs, then retired it after it added about 400 lines that no daily diff needed; the review cap and the file-group split remain.

@@ -1,9 +1,10 @@
 #!/bin/bash
-# concord.py review-protocol regression (2026-10-19, PLAN_kit-protocol): reviewers answer with one REVIEW-JSON
-# block; the dispatcher validates it, requires a reproduction for every BLOCKER/HIGH/MEDIUM, computes the verdict, renders
-# the report, keeps a per-ticket/per-PR ledger (finding ids, adjudication, decisions, assumptions) that every later
-# reviewer sees, blocks re-raises of rejected findings, retries one unparsable answer, and shows the CURRENT plan
-# phase. No network: fake qwen reviewer/executor, fake gh, local bare origin.
+# concord.py review-protocol regression (2026-10-19, PLAN_kit-protocol; lean revision 2026-10-23): reviewers answer
+# with one REVIEW-JSON block; the dispatcher validates it, requires a reproduction for every BLOCKER/HIGH/MEDIUM,
+# computes the verdict, renders the report, keeps a per-ticket/per-PR ledger of finding ids that every later reviewer
+# sees (its statuses, decisions, assumptions and re-raise rule are checked as units), records Claude reviews with
+# --review-record, retries one unparsable answer, and shows the CURRENT plan phase.
+# No network: fake qwen reviewer/executor, fake gh, local bare origin.
 # Run: bash ~/.claude/concord/tests/protocol_test.sh   (exit 0 = all passed).
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -66,16 +67,6 @@ REVIEW-JSON
    "repro": {"input": "clamp(2)", "expected": "2", "actual": "1"}},
   {"severity": "MEDIUM", "path": "a.py", "line": 1, "problem": "edge case in parser", "fix": "guard it",
    "repro": {"input": "parse('')", "expected": "[]", "actual": "IndexError"}}
- ], "clauses": [], "tests": [], "verdict": "FIX"}
-END-REVIEW-JSON
-EOF
-cat > "$T/rev_reraise.json" <<'EOF'
-REVIEW-JSON
-{"findings": [
-  {"severity": "MEDIUM", "path": "a.py", "line": 3, "problem": "edge case in the parser", "fix": "guard it",
-   "repro": {"input": "parse('')", "expected": "[]", "actual": "IndexError"}},
-  {"severity": "MEDIUM", "path": "a.py", "line": 1, "problem": "edge case in parser with proof", "fix": "guard it",
-   "repro": {"input": "parse(b'')", "expected": "[]", "actual": "TypeError"}, "reraise_of": "F4"}
  ], "clauses": [], "tests": [], "verdict": "FIX"}
 END-REVIEW-JSON
 EOF
@@ -320,10 +311,9 @@ rm -f "$T/calls"; review "$RID"; RC=$?; RV=$(rv); RVD="$R/.git/concord/$RV"
 [ "$(mj "$RVD/review.json" 'm["findings"][0]["id"] + "," + m["findings"][0]["severity"]')" = "F1,HIGH" ] \
   && [ "$(mj "$RUN/meta.json" '(m["reviews"][-1]["verdict"], m["reviews"][-1]["highs"], m["reviews"][-1]["mediums"], m["reviews"][-1]["finding_ids"], m["reviews"][-1]["retried"])')" = "('FIX', 1, 0, ['F1', 'F2'], False)" ] \
   && ok "review.json written; entry has verdict, highs, mediums, finding_ids, retried" || bad "entry: $(mj "$RUN/meta.json" 'm["reviews"][-1]')"
-[ "$(lj PLAN_T '[(f["id"], f["status"], f["reviewer"]) for f in m["findings"]]')" = "[('F1', 'open', 'deepseek-flash'), ('F2', 'note', 'deepseek-flash')]" ] \
+[ "$(lj PLAN_T '[(f["id"], f["status"], f["reviewer"]) for f in m["findings"]]')" = "[('F1', 'open', 'fake/m'), ('F2', 'note', 'fake/m')]" ] \
   && ok "ledger PLAN_T.json holds F1 open and F2 note" || bad "ledger: $(lj PLAN_T 'm')"
 has "verdict FIX" && ! has ", retried" && ok "result line unchanged in shape, no retry flag" || bad "result line: $(grep '^REVIEW' "$T/out.txt")"
-FL=$(mj "$RUN/meta.json" 'm["reviews"][-1]["reviewer"]')
 
 echo "== second review sees the ledger, not the legacy block"
 review "$RID" "$T/rev_two.json"; RV=$(rv); RVD="$R/.git/concord/$RV"
@@ -331,39 +321,6 @@ grep -q "^Review ledger PLAN_T" "$RVD/prompt.txt" && grep -q "^Open:" "$RVD/prom
   && ! grep -q "Findings from earlier review rounds" "$RVD/prompt.txt" && grep -qE "^<<<LEDGER-[0-9a-f]{16}>>>$" "$RVD/prompt.txt" && grep -qE "^<<<END-LEDGER-[0-9a-f]{16}>>>$" "$RVD/prompt.txt" \
   && ok "reviewer prompt carries the ledger (open F1) and drops the legacy earlier-findings block" || { bad "ledger in prompt"; grep -n "ledger\|earlier" "$RVD/prompt.txt" | head; }
 [ "$(mj "$RUN/meta.json" 'm["reviews"][-1]["finding_ids"]')" = "['F3', 'F4']" ] && ok "ids continue across reviews (F3, F4)" || bad "ids: $(mj "$RUN/meta.json" 'm["reviews"][-1]["finding_ids"]')"
-
-echo "== adjudication by id"
-$DP --review-adjudicate "$RID" --reviewer "$FL" --adopt F3 --wrong "F4=not reachable: the parser never sees an empty string" --test "F3=tests/test_a.py::t" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(lj PLAN_T '[(f["id"], f["status"], f.get("test", ""), f.get("reason", "")[:13]) for f in m["findings"] if f["id"] in ("F3", "F4")]')" = "[('F3', 'adopted', 'tests/test_a.py::t', ''), ('F4', 'incorrect', '', 'not reachable')]" ] \
-  && [ "$(mj "$RUN/meta.json" '(m["reviews"][-1]["adopted"], m["reviews"][-1]["incorrect"], m["reviews"][-1]["not_adopted"])')" = "(1, 1, 0)" ] \
-  && ok "--adopt/--wrong/--test set ledger statuses and recompute the entry's counts" || { bad "adjudicate rc=$RC: $(lj PLAN_T 'm["findings"]')"; cat "$T/out.txt"; }
-$DP --review-adjudicate "$RID" --reviewer "$FL" --adopt F9 --repo "$R" > "$T/out.txt" 2>&1; R1=$?
-$DP --review-adjudicate "$RID" --reviewer "$FL" --wrong "F4" --repo "$R" > "$T/out.txt" 2>&1; R2=$?
-$DP --review-adjudicate "$RID" --reviewer "$FL" --adopt F3 --adopted 1 --incorrect 0 --not-adopted 0 --repo "$R" > "$T/out.txt" 2>&1; R3=$?
-$DP --review-adjudicate "$RID" --reviewer "$FL" --test "F4=tests/x.py::t" --repo "$R" > "$T/out.txt" 2>&1; R4=$?
-$DP --review-adjudicate "$RID" --reviewer "$FL" --adopt F1 --repo "$R" > "$T/out.txt" 2>&1; R5=$?
-[ "$R1$R2$R3$R4$R5" = "22222" ] && ! has "unrecognized arguments" && ok "exit 2: unknown id, reason missing, mixed with numeric options, --test without --adopt, id not in the reviewer's latest review" \
-  || bad "adjudicate exits $R1 $R2 $R3 $R4 $R5"
-$DP --review-decide "$RID" --decision "the JVM never passes a null env" --kind assumption --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-has "assumption D1 recorded in ledger PLAN_T" && $DP --review-decide "$RID" --decision "prices are ints in minor units" --repo "$R" > "$T/out.txt" 2>&1 && has "decision D2 recorded" \
-  && [ "$(lj PLAN_T '[(x["id"], x["kind"]) for x in m["decisions"]]')" = "[('D1', 'assumption'), ('D2', 'decision')]" ] \
-  && ok "--review-decide records decisions and assumptions with ids" || { bad "decide rc=$RC"; cat "$T/out.txt"; }
-$DP --review-decide "$RID" --decision "" --repo "$R" > "$T/out.txt" 2>&1; R1=$?
-$DP --review-decide "$RID" --decision "x" --kind guess --repo "$R" > "$T/out.txt" 2>&1; R2=$?
-[ "$R1$R2" = "22" ] && ! has "unrecognized arguments" && ok "--review-decide: empty text or unknown kind -> exit 2" || bad "decide exits $R1 $R2"
-
-echo "== re-raise rule and binding ledger in the prompt"
-review "$RID" "$T/rev_reraise.json"; RV=$(rv); RVD="$R/.git/concord/$RV"
-grep -q '^\[NOTE\] a.py:L3: edge case in the parser.*{F5} (auto: re-raise of F4, incorrect)$' "$RVD/report.md" \
-  && grep -q '^\[MEDIUM\] a.py:L1: edge case in parser with proof.*{F6} (auto: re-raised F4 with new evidence)$' "$RVD/report.md" \
-  && [ "$(lj PLAN_T '[f.get("reraised_by") for f in m["findings"] if f["id"] == "F4"]')" = "['F6']" ] \
-  && ok "re-raise of an incorrect finding -> NOTE; with reraise_of and a reproduction -> kept and linked" || { bad "re-raise"; cat "$RVD/report.md"; }
-for frag in "Assumptions (binding" "- D1 the JVM never passes a null env" "Decisions (binding spec):" "- D2 prices are ints" \
-            "Adopted (check the fix and its test):" "- F3 [HIGH] a.py:L2: off by one again (test: tests/test_a.py::t)" \
-            "Incorrect or declined:" "- F4 [MEDIUM] a.py:L1: edge case in parser -- incorrect: not reachable"; do
-  grep -qF -- "$frag" "$RVD/prompt.txt" || { MISSING="$frag"; break; }
-done
-[ -z "${MISSING:-}" ] && ok "prompt shows assumptions, decisions, adopted (with test) and incorrect findings" || bad "prompt lacks: $MISSING"
 
 echo "== retry and UNPARSED"
 echo 1 > "$T/garbage"; rm -f "$T/calls"; review "$RID"; RV=$(rv); RVD="$R/.git/concord/$RV"
@@ -396,12 +353,6 @@ printf '# Plan\n## Phase 2 - other\nPurpose: OTHER\nFiles: b.py\n' > "$R/PLAN_T.
 review "$RID"; RV=$(rv); RVD="$R/.git/concord/$RV"
 grep -q "ORIGINAL-PURPOSE" "$RVD/prompt.txt" && ! grep -q "not found in plan" "$T/out.txt" && ok "phase gone from the plan: prompt falls back to the dispatch snapshot, no stderr noise" || bad "no snapshot fallback / noise"
 mv "$R/PLAN_T.md.bak" "$R/PLAN_T.md"
-mv "$R/.git/concord/ledger/PLAN_T.json" "$T/ledger.aside"
-$DP --review-adjudicate "$RID" --reviewer "$FL" --adopt F3 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "not in ledger" && ! has Traceback && ok "adjudicating an id the ledger no longer holds: exit 2, no traceback" || { bad "missing id rc=$RC"; tail -2 "$T/out.txt"; }
-mv "$T/ledger.aside" "$R/.git/concord/ledger/PLAN_T.json"
-$DP --review-decide "$RV" --decision "x" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && ! has Traceback && has "no meta.json" && ok "--review-decide on a review run id: exit 2, no traceback" || { bad "decide on review run rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --review ledger --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && ! has Traceback && ok "--review ledger: refused (exit 2), the ledger directory is not a run" || bad "ledger dir as run rc=$RC"
 

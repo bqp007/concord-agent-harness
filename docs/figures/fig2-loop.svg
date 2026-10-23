@@ -12,11 +12,11 @@
     <rect x="20" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
     <text x="90" y="92" text-anchor="middle" class="t">Ticket</text><text x="90" y="112" text-anchor="middle" class="s">own git worktree</text>
     <rect x="180" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
-    <text x="250" y="92" text-anchor="middle" class="t">Read cheaply</text><text x="250" y="112" text-anchor="middle" class="s">notes · gap ledger</text>
+    <text x="250" y="92" text-anchor="middle" class="t">Read cheaply</text><text x="250" y="112" text-anchor="middle" class="s">repo notes · code</text>
     <rect x="340" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
-    <text x="410" y="92" text-anchor="middle" class="t">Gain table</text><text x="410" y="112" text-anchor="middle" class="s">no metric → cut</text>
+    <text x="410" y="92" text-anchor="middle" class="t">Done when</text><text x="410" y="112" text-anchor="middle" class="s">no gain → cut</text>
     <rect x="500" y="60" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
-    <text x="570" y="92" text-anchor="middle" class="t">Write plan</text><text x="570" y="112" text-anchor="middle" class="s">files · tests · budget</text>
+    <text x="570" y="92" text-anchor="middle" class="t">Write plan</text><text x="570" y="112" text-anchor="middle" class="s">files · tests · risk</text>
     <rect x="660" y="60" width="140" height="74" rx="10" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.8"/>
     <text x="730" y="92" text-anchor="middle" class="t">Plan-only review</text><text x="730" y="112" text-anchor="middle" class="s">cheap model, --lint</text>
     <rect x="820" y="60" width="160" height="74" rx="10" fill="#f3f4f6" stroke="#b91c1c" stroke-width="2.4"/>
@@ -35,9 +35,9 @@
   <rect x="660" y="190" width="140" height="74" rx="10" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.8"/>
   <text x="730" y="222" text-anchor="middle" class="t">Implement</text><text x="730" y="242" text-anchor="middle" class="s">files locked</text>
   <rect x="500" y="190" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
-  <text x="570" y="222" text-anchor="middle" class="t">Verify</text><text x="570" y="242" text-anchor="middle" class="s">re-run + read diff</text>
+  <text x="570" y="222" text-anchor="middle" class="t">Check</text><text x="570" y="242" text-anchor="middle" class="s">re-run + read diff</text>
   <rect x="340" y="190" width="140" height="74" rx="10" fill="#fef3c7" stroke="#b45309" stroke-width="1.8"/>
-  <text x="410" y="222" text-anchor="middle" class="t">Review</text><text x="410" y="242" text-anchor="middle" class="s">fresh agents</text>
+  <text x="410" y="222" text-anchor="middle" class="t">Review</text><text x="410" y="242" text-anchor="middle" class="s">one fresh agent</text>
   <rect x="180" y="190" width="140" height="74" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.8"/>
   <text x="250" y="222" text-anchor="middle" class="t">Verdict</text><text x="250" y="242" text-anchor="middle" class="s">PASS / FAIL + cause</text>
   <rect x="20" y="190" width="140" height="74" rx="10" fill="#f3f4f6" stroke="#b91c1c" stroke-width="2.4"/>
@@ -56,7 +56,7 @@
   <rect x="180" y="370" width="640" height="112" rx="10" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
   <text x="200" y="396" class="t" style="font-size:13.5px">A FAIL always names its cause, and the cause decides where work goes back</text>
   <text x="200" y="420" class="m"><tspan font-weight="700">EXECUTOR</tspan> → implement again with evidence (max 3 attempts, tagged with a behaviour)</text>
-  <text x="200" y="442" class="m"><tspan font-weight="700">PLAN_GAP</tspan> → fix the plan, add a line to the repo's gap ledger</text>
+  <text x="200" y="442" class="m"><tspan font-weight="700">PLAN_GAP</tspan> → fix the plan, re-run (not an attempt)</text>
   <text x="200" y="464" class="m"><tspan font-weight="700">TEST_DEFECT</tspan> → fix the tests · <tspan font-weight="700">FLAKY</tspan> → re-run</text>
 
   <rect x="20" y="300" width="14" height="14" fill="#ede9fe" stroke="#6d28d9"/><text x="40" y="312" class="s">planner</text>

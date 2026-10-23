@@ -1,13 +1,13 @@
 #!/bin/bash
 # concord.py fixes for C++ phases (2026-10-22, PLAN_kit-cpptools; issues found on a C++ ticket): the acceptance-file
 # snapshot skips command words, git-ignored paths and CMake build trees and never derives "added" files from a capped
-# list (1, 1c); --restore leaves restored sources newer than the build (2); --mutate runs C/C++ and listed mutants in an
-# isolated copy (3; 3b: NUL strings, over-long path parts and C/C++ files in build trees, found by the third P3 review,
-# and a generated isolated run with no candidate, found by the P3.1 mutation probe); the (characterization) marker
-# variants (4); --stats scope and --plan (5); --map planner phases (6); --close-round reasons holding ';' or ',' (7);
-# --repo takes a directory (8); "Inputs and failure classes:" (9); the lint of git inside $( ) (10); a Files: glob on
-# Python 3.9 (11, found while planning). Sections 1c, 2 and 3 build a small CMake project (SKIP without cmake, ctest,
-# c++).
+# list, so a clean C++ run takes --verdict PASS without --force (1, 1c); --restore leaves restored sources newer than
+# the build (2); --mutate runs C/C++ and listed mutants in an isolated copy (3; 3b: NUL strings, over-long path parts
+# and C/C++ files in build trees, found by the third P3 review, and a generated isolated run with no candidate, found
+# by the P3.1 mutation probe); the (characterization) marker variants (4); --repo takes a directory (8); the field
+# heading "Inputs and failure classes:" (9); the lint of git inside $( ) (10); a Files: glob on Python 3.9 (11, found
+# while planning). Sections 1c, 2 and 3 build a small CMake project (SKIP without cmake, ctest, c++).
+# Sections 5-7 (--stats, --map, --close-round) went with those commands in the lean revision (2026-10-23, kit-lean).
 # No network: fake qwen executor and reviewer.
 # Run: bash ~/.claude/concord/tests/cpptools_test.sh [SECTION ...]   (default all; exit 0 = every selected check passed)
 set -u
@@ -217,82 +217,11 @@ N=$(lint | grep -ci characterization); L=$(lint | grep -i characterization)
   || { bad "near-miss lint rc=$RC n=$N"; lint; }
 fi
 
-if sel 5; then
-echo "== 5 --stats: labelled with the main checkout, --plan filters the runs"
-M="$T/mainrepo"; gitrepo "$M"
-( cd "$M" && printf 'x = 1\n' > a.py && printf '.claude/\n' > .gitignore && git add -A && git commit -qm init && git worktree add -q "$T/TKT-1" -b t1 )
-printf '# Plan\n## Phase 1 - a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n' > "$T/TKT-1/PLAN_A.md"
-printf '# Plan\n## Phase 1 - b\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n' > "$M/PLAN_B.md"
-FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_A.md --via qwen --model fake/m --repo "$T/TKT-1" > "$T/out.txt" 2>&1 || { echo "setup failed: run A"; tail -3 "$T/out.txt"; }
-FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_B.md --via qwen --model fake/m --repo "$M" > "$T/out.txt" 2>&1 || { echo "setup failed: run B"; tail -3 "$T/out.txt"; }
-# a second plan in the worktree: --plan must filter by plan, not by checkout
-printf '# Plan\n## Phase 1 - b\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q z a.py`\n' > "$T/TKT-1/PLAN_B.md"
-FAKE_ACTIONS='echo z >> a.py' $DP 1 --plan PLAN_B.md --via qwen --model fake/m --repo "$T/TKT-1" > "$T/out.txt" 2>&1 || { echo "setup failed: run B2"; tail -3 "$T/out.txt"; }
-$DP --stats --repo "$T/TKT-1" > "$T/out.txt" 2>&1
-has "delegated runs in mainrepo: 3 (phases attempted: 3)" && ! has "in TKT-1" \
-  && ok "--stats in a worktree names the main checkout, not the worktree folder" || { bad "stats label"; head -2 "$T/out.txt"; }
-$DP --stats --plan ./PLAN_A.md --repo "$T/TKT-1" > "$T/out.txt" 2>&1
-has "delegated runs in mainrepo (plan ./PLAN_A.md): 1 (phases attempted: 1)" \
-  && ok "--stats --plan counts only that plan's runs (./ ignored) and says so" || { bad "stats --plan"; head -2 "$T/out.txt"; }
-fi
-
-if sel 6; then
-echo "== 6 --map: a planner phase without a run is not 'not started'"
-newrepo ''
-cat > "$R/PLAN_M.md" <<'P'
-# Plan
-## Map
-### Intent
-- I1 tests guard the parser
-### Structure
-- S1 <- I1 parser
-### Work
-- P1 <- S1 failing tests
-- P2 <- S1 parser change
-## Phase 1 - failing tests (P1 <- S1)
-Executor: planner
-Files: tests/test_a.py
-Acceptance:
-- `python3 tests/test_a.py`
-## Phase 2 - parser change (P2 <- S1)
-Executor: deepseek-flash
-Files: a.py
-Acceptance:
-- `grep -q y a.py`
-P
-$DP --map PLAN_M.md --mermaid --repo "$R" > "$T/out2.txt" 2>&1
-$DP --map PLAN_M.md --repo "$R" > "$T/out.txt" 2>&1
-has "P1 <- S1  [planner (no run)]" && has "P2 <- S1  [not started]" && grep -qF "planner (no run)" "$T/out2.txt" \
-  && ok "planner phase without a run: [planner (no run)] (tree and --mermaid); an executor phase without a run stays [not started]" \
-  || { bad "map"; grep -e P1 -e P2 "$T/out.txt" "$T/out2.txt"; }
-fi
-
-if sel 7; then
-echo "== 7 --close-round: a reason may hold ';' and ','; entries split only before the next id"
-newrepo 'Files: a.py\nAcceptance:\n- `grep -q y a.py`\n'
-run 'echo y >> a.py'; RID=$(rid)
-cat > "$T/rev3.txt" <<'J'
-REVIEW-JSON
-{"findings": [
- {"severity": "HIGH", "path": "a.py", "line": 2, "problem": "first problem", "fix": "f", "repro": {"input": "i", "expected": "e", "actual": "a"}},
- {"severity": "HIGH", "path": "a.py", "line": 2, "problem": "second problem", "fix": "f", "repro": {"input": "i", "expected": "e", "actual": "a"}},
- {"severity": "HIGH", "path": "a.py", "line": 2, "problem": "third problem", "fix": "f", "repro": {"input": "i", "expected": "e", "actual": "a"}}],
- "clauses": [], "tests": [], "verdict": "FIX"}
-END-REVIEW-JSON
-J
-$DP --review-record "$RID" --reviewer reviewer-opus48 --file "$T/rev3.txt" --repo "$R" > "$T/out.txt" 2>&1 || { echo "setup failed: review-record"; tail -3 "$T/out.txt"; }
-$DP --close-round "$RID" --decline "F1=keeps the old API; callers move later" \
-  --wrong "F2=not reachable, the input is validated, F3=duplicate of F1" --verdict-result FAIL --cause EXECUTOR --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-GOT=$(mj "$R/.git/concord/ledger/PLAN_T.json" '[(f["id"], f["status"], f.get("reason")) for f in m["findings"]]')
-[ $RC -eq 0 ] && [ "$GOT" = "[('F1', 'declined', 'keeps the old API; callers move later'), ('F2', 'incorrect', 'not reachable, the input is validated'), ('F3', 'incorrect', 'duplicate of F1')]" ] \
-  && ok "reasons keep their ';' and ','; 'F2=..., F3=...' in one flag gives two entries" || { bad "close-round rc=$RC: $GOT"; tail -2 "$T/out.txt"; }
-fi
-
 if sel 8; then
 echo "== 8 --repo takes a directory"
-( cd "$T" && $DP --stats --repo no-such-checkout ) > "$T/out2.txt" 2>&1; RC2=$?
-( cd "$T" && $DP --stats --repo "$(python3 -I -c 'print("a" * 300)')" ) > "$T/out3.txt" 2>&1; RC3=$?
-( cd "$T" && $DP --map PLAN_T.md --repo no-such-checkout ) > "$T/out.txt" 2>&1; RC=$?
+( cd "$T" && $DP --show last --repo no-such-checkout ) > "$T/out2.txt" 2>&1; RC2=$?
+( cd "$T" && $DP --show last --repo "$(python3 -I -c 'print("a" * 300)')" ) > "$T/out3.txt" 2>&1; RC3=$?
+( cd "$T" && $DP --lint 1 --plan PLAN_T.md --dry-run --repo no-such-checkout ) > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && [ $RC2 -eq 2 ] && [ $RC3 -eq 2 ] && has "--repo takes a directory" && grep -qF -- "--repo takes a directory" "$T/out2.txt" \
   && grep -qF -- "--repo takes a directory" "$T/out3.txt" && ! has "Traceback" && ! grep -q Traceback "$T/out3.txt" \
   && ok "--repo with a name that is not a directory or is too long to look up: exit 2 saying --repo takes a directory" \
@@ -319,10 +248,6 @@ print("  ok   field_block reads 'Inputs <qualifier>:' as Inputs; other field nam
 sys.exit(1 if p else 0)
 EOF
 counted $?
-newrepo 'Risk: medium\nFiles: a.py\nInputs and failure classes:\n- n: `int` in [0, 9]; None -> ValueError\nAcceptance:\n- `grep -q y a.py`\n'
-run 'echo y >> a.py'; RC=$?
-[ $RC -eq 0 ] && has "changed in scope: a.py" && ! has "no Inputs field" && ok "a run of that phase gets no 'no Inputs field' note" \
-  || { bad "Inputs note rc=$RC"; grep -i inputs "$T/out.txt"; tail -4 "$T/out.txt"; }
 fi
 
 if sel 10; then
@@ -575,10 +500,11 @@ newrepo 'Files: a.py\nAcceptance:\n- `grep -q y a.py`\n'
 run 'echo y >> a.py; mkdir -p bld && : > bld/CMakeCache.txt && printf "int v = 1;\n" > bld/gen.c'; MR=$(rid)
 [ -n "$MR" ] || { echo "setup failed: no run for the live-mode check"; tail -5 "$T/out.txt"; exit 1; }
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && ! has Traceback && has "note: mutating the current files" && ! has "isolated copy" \
+GOT=$(mj "$R/.git/concord/$MR/meta.json" '(m["mutation"]["mode"], m["mutation"]["candidates"])')
+[ $RC -eq 0 ] && ! has Traceback && has "MUTATION $MR: no mutable" && [ "$GOT" = "('isolated', 0)" ] \
   && grep -qx 'int v = 1;' "$R/bld/gen.c" && [ -z "$(ls -A "$T/tmp")" ] \
-  && ok "3b a run whose only C/C++ file lies inside a build tree keeps the live Python mode (that file is no reason to isolate)" \
-  || { bad "3b live mode with a build-tree C file rc=$RC"; tail -3 "$T/out.txt"; }
+  && ok "3b a run whose only C/C++ file lies inside a build tree: nothing to mutate, the file untouched, no copy left" \
+  || { bad "3b build-tree C file rc=$RC meta=$GOT"; tail -3 "$T/out.txt"; }
 fi
 
 if sel 1c || sel 2 || sel 3; then
@@ -658,13 +584,9 @@ if sel 1c; then
   || { bad "1c C++ run rc=$RC"; grep -e ACCEPT -e 'note: acc' -e 'changed in scope' "$T/out.txt" | cut -c1-240; tail -6 "$RUN/acceptance.after.txt" 2>/dev/null; }
 [ "$(mj "$RUN/state.json" '[k for k in m["acceptance_hashes"] if k.startswith(("build/", "cmake/"))]')" = "[]" ] \
   && ok "1c the acceptance snapshot holds no build/ or cmake/ file" || bad "1c snapshot: $(mj "$RUN/state.json" 'sorted(m["acceptance_hashes"])[:4]')"
-$DP --review "$CR" --via qwen --model fake/m --repo "$C" > /dev/null 2>&1
-$DP --close-round "$CR" --verdict-result PASS --repo "$C" > "$T/v.txt" 2>&1; RC=$?
+$DP --verdict "$CR" PASS --repo "$C" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(mj "$RUN/meta.json" 'm["verdict"]')" = PASS ] && [ "$(mj "$RUN/meta.json" '"forced" in (m.get("verdict_note") or "")')" = False ] \
-  && ok "1c a clean C++ executor run closes PASS without --force" || { bad "1c close-round PASS rc=$RC"; cat "$T/v.txt"; }
-$DP --card "$CR" --repo "$C" > "$T/card.txt" 2>&1
-grep -q '^FLAGS:' "$T/card.txt" && ! grep '^FLAGS:' "$T/card.txt" | grep -q 'build/' \
-  && ok "1c the card's FLAGS name no build/ file (no test-object or acceptance flags from the build tree)" || { bad "1c card"; grep '^FLAGS' "$T/card.txt" | cut -c1-300; }
+  && ok "1c a clean C++ executor run takes --verdict PASS without --force" || { bad "1c verdict PASS rc=$RC"; cat "$T/v.txt"; }
 fi
 
 if sel 3; then
