@@ -2695,11 +2695,33 @@ def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
     return diff
 
 
+def started_dirty(repo, run_dir, meta, files):
+    """True when an in-scope file has a start copy that differs from its content at the run's start commit
+    (a file missing at that commit counts as different). No head_before or no start copy: False."""
+    sha = meta.get("head_before") if isinstance(meta, dict) else None
+    if not isinstance(sha, str) or not sha:
+        return False
+    for f in files:
+        try:
+            before = (Path(run_dir) / "backup" / f).read_bytes()
+        except OSError:
+            continue
+        try:
+            done = subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{f}"],
+                                  capture_output=True, timeout=PR_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if done.returncode != 0 or done.stdout != before:
+            return True
+    return False
+
+
 def review_diff(repo, run_dir, meta, files, cap=REVIEW_DIFF_CAP, base=None):
-    """Whole-phase runs: change_diff. Sub-phase runs: only the change since start_state's copy (no copy: change_diff)."""
+    """Whole-phase runs: change_diff (also for a clean start). Sub-phase or dirty-start runs: only the change since
+    start_state's copy (no copy: change_diff)."""
     if base is None:
         base = run_diff_base(repo, meta)
-    if not isinstance(phase_key(meta.get("phase")), str):
+    if not isinstance(phase_key(meta.get("phase")), str) and not started_dirty(repo, run_dir, meta, files):
         return change_diff(repo, files, cap=cap, base=base)
     parts = []
     for f in files:
@@ -3736,6 +3758,10 @@ def review_context(args, repo, root, with_diff=True, base=None, only=None):
         task = (first + sep + f"Sub-phase {key}: the diff shows only this run's change, from the files as they were "
                 f"when it started (a file without a start copy shows every change since the run's start commit); "
                 f"the parent phase's change was reviewed in its own run.\n" + rest)
+    elif started_dirty(repo, run_dir, meta, files):
+        first, sep, rest = task.partition("\n")
+        task = (first + sep + f"Re-run of phase {key}: the diff shows only this run's change, from the files as they "
+                f"were when it started; the earlier change to these files was reviewed in its own run.\n" + rest)
     return run_dir, meta_path, meta, files, names, task
 
 

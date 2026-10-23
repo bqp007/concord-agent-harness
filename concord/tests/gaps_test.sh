@@ -257,7 +257,11 @@ FA="seq 1 20000 >> big.txt" run 2.2 PLAN_E.md; E2=$(rid)
 packet "$E2"
 [ -n "$E2" ] && pk "[diff truncated at" && ! pk "PARENT_BIG" && ok "E.6 a sub-phase delta over the cap is cut and still holds no parent hunk" || { bad "E.6 $E2"; tail -3 "$T/out.txt"; }
 packet "$EP"
-pk "+PARENT_LINE = 1" && pk "+SUB_LINE = 2" && ok "E.7 a whole-phase run still shows every change since its start commit" || { bad "E.7"; tail -3 "$T/out.txt"; }
+pk "+PARENT_LINE = 1" && pk "+SUB_LINE = 2" && ! pk "Re-run of phase" && ok "E.7 a whole-phase run that started clean shows every change since its start commit, no re-run header" || { bad "E.7"; tail -3 "$T/out.txt"; }
+FA="echo 'FIX_LINE = 3' >> b.py" run 2 PLAN_E.md; ER=$(rid)
+packet "$ER"
+[ -n "$ER" ] && pk "+FIX_LINE = 3" && ! pk "PARENT_LINE" && ! pk "SUB_LINE" && pk "Re-run of phase 2: the diff shows only this run's change" \
+  && ok "E.8 a whole-phase re-run on changed files shows only its own change, with the header" || { bad "E.8 $ER"; tail -3 "$T/out.txt"; }
 fi
 
 echo "passed $pass, failed $fail"
