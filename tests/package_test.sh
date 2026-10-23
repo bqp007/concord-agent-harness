@@ -14,7 +14,7 @@ tmpd() { mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX"; }
 check() { local name=$1; shift; local out
   if out=$(cd "$ROOT" && eval "$*" 2>&1); then echo "check $name: ok"; pass=$((pass+1))
   else echo "check $name: FAIL $(echo "$out" | tail -1 | cut -c1-120)"; fail=$((fail+1)); fi; }
-AGENTS="implementer implementer-opus48 reviewer-opus55 verifier"
+AGENTS="implementer implementer-opus48 reviewer-opus55"
 COMMANDS="plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
 SUITES="acclint delegate delta guards papers pr_review protocol slim testquality worktree"
@@ -90,8 +90,8 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6908 ] || { wc -l $K/concord.py; false; }"
-  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 460 ] || { wc -l $K/wt.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 5754 ] || { wc -l $K/concord.py; false; }"
+  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 464 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
   check budgets/static_checks "grep -q '^static_checks = yes' $K/executors.conf"

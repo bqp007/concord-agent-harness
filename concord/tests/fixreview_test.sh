@@ -55,9 +55,9 @@ newpr(){ # newpr N 'shell' : a PR N branch off main with the given change
     git push -qf origin "HEAD:refs/pull/$1/head"; git checkout -q main; git branch -qD "pr$1" ) || { echo "setup failed: newpr $1"; exit 1; }
   prjson "$1" "$(headn "$1")"; }
 review(){ # review N [env...] : a full review of PR N at tier high by the fake reviewer; sets RD to its run dir
-  n=$1; shift; env "$@" $DP --review-pr "$n" --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"; }
+  n=$1; shift; env "$@" $DP --review-pr "$n" --via qwen --model fake/m --user-approved "test go-ahead" --tier "${RT:-high}" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"; }
 delta(){ # delta N [env...] : a delta review of PR N at tier high by the fake reviewer; sets RC and RD
-  n=$1; shift; env "$@" $DP --review-pr "$n" --delta --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"; }
+  n=$1; shift; env "$@" $DP --review-pr "$n" --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"; }
 JFIX='REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": 1, "problem": "wrong constant", "fix": "use 2", "repro": {"input": "x", "expected": "2", "actual": "1"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n'
 
 git init -q --bare -b main "$O" && git clone -q "$O" "$R" 2> /dev/null || { echo "setup failed: repos"; exit 1; }
@@ -258,11 +258,11 @@ fi
 
 if [ "$SECTION" != delta ]; then
 echo "== a PR review with a finding keeps the credit of its clean files"
-newpr 27 "printf 'x = 9\n' > a.py; printf 'c = 3\n' > c.py"; G0=$(headn 27); review 27; D="$RD"
+newpr 27 "printf 'x = 9\n' > a.py; printf 'c = 3\n' > c.py"; G0=$(headn 27); RT=low review 27; D="$RD"
 CB=$(git -C "$O" rev-parse "$G0:c.py")
-[ "$(mj "$D/meta.json" '(m["reviews"][-1]["verdict"], m["reviews"][-1].get("covered"), m["reviews"][-1].get("cover_tier"))')" = "('FIX', {'c.py': '$CB'}, 3)" ] \
-  && ok "FIX review at high: covered holds c.py only (a.py carries the finding)" || bad "group credit: $(mj "$D/meta.json" 'm["reviews"][-1]')"
-pushn 27 "printf 'x = 10\n' > a.py"; review 27 FAKE_CLEAN=1
+[ "$(mj "$D/meta.json" '(m["reviews"][-1]["verdict"], m["reviews"][-1].get("covered"), m["reviews"][-1].get("cover_tier"))')" = "('FIX', {'c.py': '$CB'}, 1)" ] \
+  && ok "FIX review at low: covered holds c.py only (a.py carries the finding)" || bad "group credit: $(mj "$D/meta.json" 'm["reviews"][-1]')"
+pushn 27 "printf 'x = 10\n' > a.py"; RT=low review 27 FAKE_CLEAN=1
 has "reused 1 file(s) already reviewed by" && has "c.py; reviewing a.py" && ! grep -q "^diff --git a/c.py" "$RD/prompt.txt" \
   && ok "the next full review skips c.py and reviews a.py only" || { bad "reuse after FIX"; tail -3 "$T/out.txt"; }
 newpr 28 "printf 'x = 11\n' > a.py; printf 'c = 4\n' > c.py"; review 28 FAKE_PATH=zz.py
@@ -285,16 +285,16 @@ CB=$(git -C "$O" rev-parse "$K1:c.py"); AB=$(git -C "$O" rev-parse "$K1:a.py")
   && ok "a HIGH on b/a.py plus a NOTE on c.py: a.py is flagged, c.py stays covered" || bad "b/ path and NOTE: $(mj "$PD/meta.json" 'm["reviews"][-1]' | head -c 300)"
 echo "== a file one review flagged is never credited by another review at the same content"
 newpr 34 "printf 'x = 14\n' > a.py; printf 'c = 7\n' > c.py; printf 'e = 1\n' > e.py"; F0=$(headn 34)
-$DP --review-pr 34 --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1           # HIGH on a.py
-env FAKE_PATH=c.py $DP --review-pr 34 --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1   # HIGH on c.py
-C0=$(calls); $DP --review-pr 34 --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1
+$DP --review-pr 34 --via qwen --model fake/m --user-approved "test go-ahead" --tier low --repo "$R" > "$T/out.txt" 2>&1           # HIGH on a.py
+env FAKE_PATH=c.py $DP --review-pr 34 --via qwen --model fake/m --user-approved "test go-ahead" --tier low --force-review --repo "$R" > "$T/out.txt" 2>&1   # HIGH on c.py
+C0=$(calls); $DP --review-pr 34 --via qwen --model fake/m --user-approved "test go-ahead" --tier low --repo "$R" > "$T/out.txt" 2>&1
 [ "$(calls)" = $((C0 + 1)) ] && ! has "COVERED:" && has "e.py; reviewing a.py, c.py" \
   && ok "two reviews flag a.py and c.py: the next review reuses e.py only and reviews both flagged files" || { bad "cross credit calls=$(calls) C0=$C0"; tail -3 "$T/out.txt"; }
 stn 34; has "CURRENT HEAD ${F0:0:8}: FINDINGS OPEN" && ok "--pr-status: the open findings stay open" || { bad "cross credit status"; cat "$T/out.txt"; }
 newpr 35 "printf 'x = 15\n' > a.py; printf 'c = 8\n' > c.py"
-env FAKE_CLEAN=1 $DP --review-pr 35 --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1        # clean: both files credited
-env FAKE_PATH=zz.py $DP --review-pr 35 --via qwen --model fake/m --tier high --force-review --repo "$R" > "$T/out.txt" 2>&1  # a finding on no file
-C0=$(calls); $DP --review-pr 35 --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1
+env FAKE_CLEAN=1 $DP --review-pr 35 --via qwen --model fake/m --user-approved "test go-ahead" --tier low --repo "$R" > "$T/out.txt" 2>&1        # clean: both files credited
+env FAKE_PATH=zz.py $DP --review-pr 35 --via qwen --model fake/m --user-approved "test go-ahead" --tier low --force-review --repo "$R" > "$T/out.txt" 2>&1  # a finding on no file
+C0=$(calls); $DP --review-pr 35 --via qwen --model fake/m --user-approved "test go-ahead" --tier low --repo "$R" > "$T/out.txt" 2>&1
 [ "$(calls)" = $((C0 + 1)) ] && ! has "COVERED:" && ! has "reused " \
   && ok "a finding on no file flags every file: the clean review's credit covers nothing at that content" || { bad "unplaced flags calls=$(calls) C0=$C0"; tail -3 "$T/out.txt"; }
 fi

@@ -1,7 +1,9 @@
 #!/bin/bash
 # Repo notes in every review prompt and the repo-notes risk floor (2026-10-21, PLAN_kit-review): reviewers get the
 # repo's binding notes (flash prompt, phase packet, PR packet); a `Risk floor <tier>: <globs>` line raises the review
-# tier of a phase or PR whose change touches a matching non-test file. No network: fake qwen and gh.
+# tier of a phase or PR whose change touches a matching non-test file. For a phase run, --review and --packet name the
+# floor, and --packet reuses a prior clean review only when its reviewer reaches the raised tier; --review-pr records
+# the raised tier of a PR. No network: fake qwen and gh.
 # Run: bash ~/.claude/concord/tests/reviewfocus_test.sh   (exit 0 = all passed).
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -37,7 +39,6 @@ pk(){ sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
 meta(){ python3 -I -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))" "$1/meta.json" "$2"; }
 # run PHASE ACTIONS: one fake executor run of PLAN_F.md; ACTIONS is the shell the fake executor runs in the repo
 run(){ FAKE_ACTIONS="$2" $DP "$1" --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1; }
-verdict(){ $DP --verdict "$@" --repo "$R" > "$T/out.txt" 2>&1; }
 flash(){ $DP --review "$1" --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 opus(){ $DP --review-record "$1" --reviewer "$2" --file "$T/clean.txt" --repo "$R" > /dev/null 2>&1; }
 packet(){ $DP --review "$1" --packet --repo "$R" > "$T/out.txt" 2>&1; }
@@ -96,60 +97,63 @@ flash "$S"
 has "risk floor high" && has "sec/key.py matches sec/*" && has "reviewer-opus55" \
   && ok "--review (flash) names the floor, the matched path and the reviewer the phase needs" \
   || { bad "--review printed no floor note"; tail -3 "$T/out.txt"; }
-opus "$S" reviewer-opus48; $DP --close-round "$S" --verdict-result PASS --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 9 ] && grep -q "^REFUSED:" "$T/out.txt" && has "reviewer-opus55" && has "sec/key.py matches sec/*" \
-  && [ "$(meta "$RUNS/$S" verdict)" = None ] \
-  && ok "medium phase on a high-floor path + reviewer-opus48: --close-round PASS refused (exit 9), names path and reviewer" \
-  || { bad "high floor rc=$RC"; tail -2 "$T/out.txt"; }
-verdict "$S" PASS --user-approved "ok" --note n1; RC=$?
-[ $RC -eq 0 ] && [ "$(meta "$RUNS/$S" verdict_note)" = "tier waived (user: ok); n1" ] && ok "--user-approved waives a floor refusal" \
-  || { bad "waiver rc=$RC note=$(meta "$RUNS/$S" verdict_note)"; tail -2 "$T/out.txt"; }
-run 1 "echo '# s' >> sec/key.py"; S2=$(rid); opus "$S2" reviewer-opus55; verdict "$S2" PASS; RC=$?
-[ $RC -eq 0 ] && ok "high floor + reviewer-opus55: PASS" || { bad "high floor + opus55 rc=$RC"; tail -2 "$T/out.txt"; }
-opus "$A" reviewer-opus48; verdict "$A" PASS; RC=$?
-[ $RC -eq 0 ] && ok "medium phase on a.py + reviewer-opus48: PASS (unknown-tier and empty floor lines ignored)" \
-  || { bad "a.py rc=$RC"; tail -2 "$T/out.txt"; }
-run 3 "echo '# r' >> docs/x.md"; L=$(rid); flash "$L"; verdict "$L" PASS; RC=$?
-[ $RC -eq 9 ] && has "reviewer-opus55" && has "docs/x.md" && ok "low phase on a medium-floor path + flash: refused, needs reviewer-opus55" \
-  || { bad "medium floor rc=$RC"; tail -2 "$T/out.txt"; }
-opus "$L" reviewer-opus48; verdict "$L" PASS; RC=$?
-[ $RC -eq 0 ] && ok "low phase on a medium-floor path + reviewer-opus48: PASS" || { bad "medium floor + opus48 rc=$RC"; tail -2 "$T/out.txt"; }
+# The floor also raises the tier a prior clean review must reach before --packet reuses it (COVERED, no packet).
+opus "$S" reviewer-opus48; packet "$S"
+[ -n "$(pk)" ] && ! has "COVERED" && has "needs concord:reviewer-opus55" && has "sec/key.py matches sec/*" \
+  && ok "medium phase on a high-floor path + a clean reviewer-opus48 review: --packet is not covered (the floor raises the tier to high), names path and reviewer" \
+  || { bad "high floor: reviewer-opus48 covered the packet '$(pk)'"; tail -2 "$T/out.txt"; }
+run 1 "echo '# s' >> sec/key.py"; S2=$(rid); opus "$S2" reviewer-opus55; packet "$S2"
+[ -z "$(pk)" ] && has "COVERED" && ok "high floor + a clean reviewer-opus55 review: --packet reuses it (COVERED, no packet)" \
+  || { bad "high floor + opus55 not covered '$(pk)'"; tail -2 "$T/out.txt"; }
+opus "$A" reviewer-opus48; packet "$A"
+[ -z "$(pk)" ] && has "COVERED" && ok "medium phase on a.py + a clean reviewer-opus48 review: COVERED (unknown-tier and empty floor lines ignored)" \
+  || { bad "a.py not covered '$(pk)'"; tail -2 "$T/out.txt"; }
+run 3 "echo '# r' >> docs/x.md"; L=$(rid); flash "$L"; packet "$L"
+[ -n "$(pk)" ] && ! has "COVERED" && has "risk floor medium" && has "docs/x.md matches docs/*" && has "needs concord:reviewer-opus55" \
+  && ok "low phase on a medium-floor path + a clean flash review: --packet is not covered, names the floor and reviewer-opus55" \
+  || { bad "medium floor '$(pk)'"; tail -2 "$T/out.txt"; }
+opus "$L" reviewer-opus48; packet "$L"
+[ -z "$(pk)" ] && has "COVERED" && ok "low phase on a medium-floor path + a clean reviewer-opus48 review: COVERED" \
+  || { bad "medium floor + opus48 not covered '$(pk)'"; tail -2 "$T/out.txt"; }
 run 2 "echo '# m' >> docs/x.md"; Q=$(rid); packet "$Q"
 [ -n "$(pk)" ] && ! has "risk floor" && ok "medium phase on a medium-floor path: no floor note (the floor must rank above the tier)" \
   || { bad "floor note at an equal tier"; tail -3 "$T/out.txt"; }
-run 4 "echo '# s' >> docs/x.md"; H=$(rid); opus "$H" reviewer-opus48; verdict "$H" PASS; RC=$?
-[ $RC -eq 9 ] && has "reviewer-opus55" && ok "high phase on a medium-floor path + reviewer-opus48: refused (a floor never lowers the tier)" \
-  || { bad "floor lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
-run 5 "echo '# r' >> sec/key_test.py"; K=$(rid); flash "$K"; verdict "$K" PASS; RC=$?
-[ $RC -eq 0 ] && ok "low phase changing only sec/key_test.py + flash: PASS (test files never trigger a floor)" \
-  || { bad "test file triggered the floor rc=$RC"; tail -2 "$T/out.txt"; }
+run 4 "echo '# s' >> docs/x.md"; H=$(rid); opus "$H" reviewer-opus48; packet "$H"
+[ -n "$(pk)" ] && ! has "COVERED" && ok "high phase on a medium-floor path + a clean reviewer-opus48 review: --packet is not covered (a floor never lowers the tier)" \
+  || { bad "floor lowered the tier '$(pk)'"; tail -2 "$T/out.txt"; }
+run 5 "echo '# r' >> sec/key_test.py"; K=$(rid); flash "$K"; ! has "risk floor"; NOTE=$?; packet "$K"
+[ $NOTE -eq 0 ] && [ -z "$(pk)" ] && has "COVERED" \
+  && ok "low phase changing only sec/key_test.py + a clean flash review: no floor note, --packet COVERED (test files never trigger a floor)" \
+  || { bad "test file triggered the floor note=$NOTE '$(pk)'"; tail -2 "$T/out.txt"; }
 run 2 "echo '# g' >> a.py; mkdir -p sec/__pycache__; printf c > sec/__pycache__/k.pyc"; G=$(rid)
-opus "$G" reviewer-opus48; verdict "$G" PASS; RC=$?
+opus "$G" reviewer-opus48; packet "$G"
 case "$(meta "$RUNS/$G" generated)" in *"sec/__pycache__/k.pyc"*) GEN=1 ;; *) GEN=0 ;; esac
-[ $GEN -eq 1 ] && [ $RC -eq 0 ] && ok "medium phase on a.py leaving sec/__pycache__/k.pyc + reviewer-opus48: PASS (generated files never trigger a floor)" \
-  || { bad "generated file gen=$GEN rc=$RC"; tail -2 "$T/out.txt"; }
-run 6 "rm sec/old.py"; D=$(rid); opus "$D" reviewer-opus48; verdict "$D" PASS; RC=$?
-[ $RC -eq 9 ] && has "sec/old.py" && ok "deleting a high-floor file + reviewer-opus48: refused (deletions count)" \
-  || { bad "deletion rc=$RC"; tail -2 "$T/out.txt"; }
-run 1 "echo '# t' >> sec/key.py"; F=$(rid); verdict "$F" FAIL --cause FLAKY; RC=$?
-[ $RC -eq 0 ] && ok "FAIL on a floored phase needs no review" || { bad "FAIL rc=$RC"; tail -2 "$T/out.txt"; }
+[ $GEN -eq 1 ] && [ -z "$(pk)" ] && has "COVERED" \
+  && ok "medium phase on a.py leaving sec/__pycache__/k.pyc + a clean reviewer-opus48 review: COVERED (generated files never trigger a floor)" \
+  || { bad "generated file gen=$GEN '$(pk)'"; tail -2 "$T/out.txt"; }
+# a packet needs a file that still exists, so the run also touches a.py (no floor of its own)
+run 6 "rm sec/old.py; echo '# d' >> a.py"; D=$(rid); packet "$D"
+[ -n "$(pk)" ] && has "risk floor high" && has "sec/old.py matches sec/*" && ok "deleting a high-floor file: --packet names the floor (deletions count)" \
+  || { bad "deletion '$(pk)'"; tail -2 "$T/out.txt"; }
 { printf '# clone: binding facts\n'; python3 -I -c "print('- filler ' + 'x' * 4200)"; printf -- '- Risk floor high: big/*\n'; } > "$NOTES"
-run 7 "echo '# r' >> big/f.py"; B=$(rid); opus "$B" reviewer-opus48; verdict "$B" PASS; RC=$?
-[ $RC -eq 9 ] && has "big/f.py" && ok "a floor line past the 4000-character notes cap still counts" || { bad "capped floor rc=$RC"; tail -2 "$T/out.txt"; }
+run 7 "echo '# r' >> big/f.py"; B=$(rid); packet "$B"
+[ -n "$(pk)" ] && has "risk floor high" && has "big/f.py matches big/*" && ok "a floor line past the 4000-character notes cap still counts" \
+  || { bad "capped floor '$(pk)'"; tail -2 "$T/out.txt"; }
 notes
 mv "$NOTES" "$T/notes.off"
-run 1 "echo '# u' >> sec/key.py"; U=$(rid); opus "$U" reviewer-opus48; verdict "$U" PASS; RC=$?
-[ $RC -eq 0 ] && ok "no notes file: medium phase on sec/key.py + reviewer-opus48: PASS (today's behaviour)" \
-  || { bad "no notes file rc=$RC"; tail -2 "$T/out.txt"; }
+run 1 "echo '# u' >> sec/key.py"; U=$(rid); opus "$U" reviewer-opus48; packet "$U"
+[ -z "$(pk)" ] && has "COVERED" && ok "no notes file: medium phase on sec/key.py + a clean reviewer-opus48 review: COVERED (no floor)" \
+  || { bad "no notes file '$(pk)'"; tail -2 "$T/out.txt"; }
 mv "$T/notes.off" "$NOTES"
 run 1 "echo '# v' >> sec/key.py; echo '# v' >> a.py"; X=$(rid)
 $DP --review "$X" --packet --files a.py --repo "$R" > "$T/out.txt" 2>&1
 has "risk floor high" && has "sec/key.py matches sec/*" && ok "--review --packet --files a.py still names the run's floor (--files never narrows it)" \
   || { bad "phase --files narrowed the floor"; tail -3 "$T/out.txt"; }
 printf 'stray \377 byte\n' >> "$NOTES"
-run 1 "echo '# w' >> sec/key.py"; W=$(rid); opus "$W" reviewer-opus48; verdict "$W" PASS; RC=$?
-[ $RC -eq 9 ] && grep -q "^REFUSED:" "$T/out.txt" && ! has "Traceback" && ok "notes with a stray non-UTF-8 byte: floor still refuses, no traceback" \
-  || { bad "stray byte rc=$RC"; tail -3 "$T/out.txt"; }
+run 1 "echo '# w' >> sec/key.py"; W=$(rid); opus "$W" reviewer-opus48; packet "$W"
+[ -n "$(pk)" ] && has "risk floor high" && has "sec/key.py matches sec/*" && ! has "Traceback" \
+  && ok "notes with a stray non-UTF-8 byte: the floor still applies (--packet not covered by reviewer-opus48), no traceback" \
+  || { bad "stray byte '$(pk)'"; tail -3 "$T/out.txt"; }
 # --force-review: W is already covered by its opus48 review above; re-review it to inspect the flash prompt
 $DP --review "$W" --force-review --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
 RV3=$(sed -n 's/^REVIEW \([^ ]*\) of .*/\1/p' "$T/out.txt" | head -1)

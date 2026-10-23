@@ -1,8 +1,10 @@
 #!/bin/bash
-# concord.py test-quality regression (2026-10-19, PLAN_kit-testquality): per-command red run (an acceptance command
-# that already passes before an implementing change must be marked "(characterization)" or the executor is not
-# started), the Inputs plan field, and --mutate (seeded, bounded mutation testing on the changed Python lines with
-# byte-exact restore). No network, fake qwen executor. Run: bash ~/.claude/concord/tests/testquality_test.sh
+# concord.py test-quality regression (2026-10-19, PLAN_kit-testquality; --mutate reworked 2026-10-23, kit-lean):
+# per-command red run (an acceptance command that already passes before an implementing change must be marked
+# "(characterization)" or the executor is not started), the (characterization) marker, and --mutate (opt-in,
+# seeded, bounded mutation testing of a run's own changed lines in an isolated copy of the checkout; each mutant
+# stops at its first failing non-characterization acceptance command). No network, fake qwen executor.
+# Run: bash ~/.claude/concord/tests/testquality_test.sh
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/tq-test.XXXXXX")" && pwd -P)"; export T
@@ -31,6 +33,8 @@ newrepo(){ rm -rf "$R"; mkdir -p "$R/tests"; (
 ); }
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 BASE='Files: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py`%s\n'
+sha(){ shasum -a 256 "$1" | cut -d" " -f1; }
+mut(){ sed -n "s/^MUTATION .*$1 \([0-9]*\).*/\1/p" "$T/out.txt"; }
 
 echo "== per-command red run"
 newrepo "$(printf "$BASE" "")"
@@ -66,16 +70,7 @@ $DP --begin 1 --label planner --plan PLAN_T.md --repo "$R" > "$T/out.txt" 2>&1; 
 [ $RC -eq 0 ] && ! has "NOT RUN" && has "baseline:" && ok "--begin (session run) with a green command: warning only, not refused" || { bad "begin rc=$RC"; tail -3 "$T/out.txt"; }
 BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/out.txt" | tail -1); echo y >> "$R/a.py"; $DP --end "$BID" --repo "$R" > /dev/null 2>&1
 
-echo "== Inputs field"
-newrepo "$(printf "$BASE" " (characterization)")"
-run 'echo y >> a.py'
-has "no Inputs field" && ok "implementing phase without Inputs: report note" || bad "missing Inputs note"
-newrepo 'Files: a.py\nInputs:\n- a.py text: ascii lines; empty file -> no change; missing file -> error\nAcceptance:\n- `grep -q y a.py`\n'
-run 'echo y >> a.py'
-! has "no Inputs field" && has "changed in scope: a.py" && ok "phase with an Inputs block: no note" || { bad "Inputs present but noted"; grep -i inputs "$T/out.txt"; }
-newrepo 'Files: a.py\nInputs:\nAcceptance:\n- `grep -q y a.py`\n'
-run 'echo y >> a.py'
-has "no Inputs field" && ok "empty Inputs: line counts as missing" || bad "empty Inputs accepted"
+echo "== the (characterization) marker"
 python3 -I - "$T/concord/concord.py" <<'EOF'
 import importlib.util, sys
 sys.dont_write_bytecode = True
@@ -83,21 +78,17 @@ spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.u
 p = []
 text = "## Phase 1 - x\nFiles: a.py\nAcceptance: `true` (characterization)\n- `python3 -m pytest tests/t.py::k`\n- `ls` (Characterization) note\nInputs:\n- n: `int` in `[0, 9]`; `None` -> ValueError\n"
 try:
-    if "Inputs" not in d.FIELD_NAMES:
-        p.append("FIELD_NAMES lacks Inputs")
     if d.parse_acceptance(text) != ["true", "python3 -m pytest tests/t.py::k", "ls"]:
-        p.append(f"parse_acceptance swallows Inputs backticks: {d.parse_acceptance(text)}")
+        p.append(f"parse_acceptance swallows the backticks of a later field: {d.parse_acceptance(text)}")
     got = d.parse_acceptance_marked(text)
     if got != [("true", True), ("python3 -m pytest tests/t.py::k", False), ("ls", True)]:
         p.append(f"parse_acceptance_marked: {got}")
     bare = d.parse_acceptance_marked("Acceptance:\n- `pytest` # not a characterization, a real test\n- `ls` (characterization) ok\n")
     if bare != [("pytest", False), ("ls", True)]:
         p.append(f"bare word 'characterization' must not mark: {bare}")
-    if "INPUTS:" not in d.LINT_TASK or "no Inputs field" not in d.LINT_TASK:
-        p.append("LINT_TASK has no INPUTS section")
 except AttributeError as exc:
     p.append(f"missing: {exc}")
-print("  ok   Inputs is a plan field; parse_acceptance_marked reads the (characterization) marker inline and in the body; LINT_TASK checks Inputs"
+print("  ok   parse_acceptance_marked reads the (characterization) marker inline and in the body; a later field ends Acceptance"
       if not p else "  FAIL fields: " + "; ".join(p))
 sys.exit(1 if p else 0)
 EOF
@@ -153,68 +144,71 @@ EOF
 echo "== --mutate on a run"
 newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.clamp(5) == 5"`\n'
 run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
-H0=$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)
+H0=$(sha "$R/lib.py")
 $DP --mutate "$RID" --seed 0 --max 20 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-H1=$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)
-K=$(sed -n 's/^MUTATION .*killed \([0-9]*\), survived \([0-9]*\).*/\1/p' "$T/out.txt"); SV=$(sed -n 's/^MUTATION .*survived \([0-9]*\).*/\1/p' "$T/out.txt")
+K=$(mut killed); SV=$(mut survived)
 [ $RC -eq 0 ] && has "MUTATION $RID:" && has "seed 0" && [ "${K:-0}" -ge 1 ] && [ "${SV:-0}" -ge 1 ] && grep -q "^SURVIVED lib.py:L2: compare: " "$T/out.txt" \
-  && ok "mutants sampled and run: some killed, the untested boundary survives (SURVIVED lib.py:L2: compare)" || { bad "mutate rc=$RC"; cat "$T/out.txt" | head -8; }
-[ "$H0" = "$H1" ] && [ -f "$R/.git/concord/$RID/mutation-backup/lib.py" ] && ok "lib.py restored byte-identically; original kept under mutation-backup/" || bad "restore: $H0 vs $H1"
-[ "$(mj "$R/.git/concord/$RID/meta.json" '(m["mutation"]["seed"], m["mutation"]["killed"] >= 1, m["mutation"]["survived"] >= 1, len(m["mutation"]["sampled"]) == m["mutation"]["killed"] + m["mutation"]["survived"])')" = "(0, True, True, True)" ] \
-  && [ "$(mj "$R/.git/concord/$RID/mutation.json" 'm["seed"]')" = 0 ] && ok "mutation.json and meta.mutation recorded" || bad "mutation meta: $(mj "$R/.git/concord/$RID/meta.json" 'm.get("mutation")')"
-cp "$R/.git/concord/$RID/mutation.json" "$T/m1.json"
+  && ok "mutants sampled and run: some killed, the untested boundary survives (SURVIVED lib.py:L2: compare)" || { bad "mutate rc=$RC"; head -8 "$T/out.txt"; }
+case "$(head -1 "$T/out.txt")" in "note: mutating an isolated copy of the checkout ("*) ok "first output line names the isolated copy";;
+  *) bad "first line: $(head -1 "$T/out.txt")";; esac
+WK=$(sed -n '1s/^note: mutating an isolated copy of the checkout (\(.*\)); the live files are not touched$/\1/p' "$T/out.txt")
+[ "$(sha "$R/lib.py")" = "$H0" ] && [ ! -e "$R/.git/concord/$RID/mutation-backup" ] && [ -n "$WK" ] && [ ! -e "$WK" ] \
+  && ok "the live lib.py is never written, no mutation-backup/, the copy is removed afterwards" || bad "live file or copy: $WK"
+[ "$(mj "$R/.git/concord/$RID/meta.json" '(m["mutation"]["seed"], m["mutation"]["mode"], m["mutation"]["killed"] >= 1, m["mutation"]["survived"] >= 1, len(m["mutation"]["sampled"]) == m["mutation"]["killed"] + m["mutation"]["survived"])')" = "(0, 'isolated', True, True, True)" ] \
+  && ok "meta.mutation recorded" || bad "mutation meta: $(mj "$R/.git/concord/$RID/meta.json" 'm.get("mutation")')"
+mj "$R/.git/concord/$RID/meta.json" '[(x["line"], x["operator"], x["result"]) for x in m["mutation"]["sampled"]]' > "$T/m1.txt"
 $DP --mutate last --seed 0 --max 20 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-python3 -I -c '
-import json,sys; a=json.load(open(sys.argv[1]))["sampled"]; b=json.load(open(sys.argv[2]))["sampled"]
-k=lambda s:[(x["line"],x["operator"],x["result"]) for x in s]; sys.exit(0 if k(a)==k(b) and a else 1)' "$T/m1.json" "$R/.git/concord/$RID/mutation.json" \
-  && [ $RC -eq 0 ] && ok "--mutate last: same seed -> identical sample and results" || bad "determinism rc=$RC"
+mj "$R/.git/concord/$RID/meta.json" '[(x["line"], x["operator"], x["result"]) for x in m["mutation"]["sampled"]]' > "$T/m2.txt"
+[ $RC -eq 0 ] && [ -s "$T/m1.txt" ] && cmp -s "$T/m1.txt" "$T/m2.txt" && ok "--mutate last: same seed -> identical sample and results" || bad "determinism rc=$RC"
 $DP --mutate "$RID" --seed 0 --max 2 --repo "$R" > "$T/out.txt" 2>&1
 has "2 mutants (sampled from" && ok "--max bounds the sample" || { bad "max"; head -2 "$T/out.txt"; }
 $DP --mutate "$RID" --max 0 --repo "$R" > "$T/out.txt" 2>&1; R1=$?
 $DP --mutate "$RID" --max -1 --repo "$R" > "$T/out.txt" 2>&1; R2=$?
-[ "$R1$R2" = "22" ] && ! has Traceback && [ "$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)" = "$H0" ] && ok "--max below 1: exit 2, nothing touched" || bad "max<1 exits $R1 $R2"
+[ "$R1$R2" = "22" ] && ! has Traceback && [ "$(sha "$R/lib.py")" = "$H0" ] && ok "--max below 1: exit 2, nothing touched" || bad "max<1 exits $R1 $R2"
 $DP --mutate "$RID/../x" --repo "$R" > "$T/out.txt" 2>&1; [ $? -eq 2 ] && ok "a RUN with a path separator is refused" || bad "path run id accepted"
-$DP --mutate "$RID" --seed 1 --max 3 --repo "$R" > "$T/out.txt" 2>&1
-[ "$(head -1 "$T/out.txt")" = "note: mutating the current files, not the run's post-run snapshot" ] && ok "first output line says the current files are mutated" || bad "first line: $(head -1 "$T/out.txt")"
-printf '# edited after a clean run\n' >> "$R/lib.py"; H0=$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)
+printf '# edited after the run\n' >> "$R/lib.py"; H0=$(sha "$R/lib.py")
 $DP --mutate "$RID" --max 2 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)" = "$H0" ] && ok "a legitimate edit after a clean run: the next --mutate runs and keeps the edit" || { bad "rerun after edit rc=$RC"; head -3 "$T/out.txt"; }
-rm -f "$R/.git/concord/$RID/mutation-backup/CLEAN"
-printf 'def clamp(x):\n    return 42\n' > "$R/.git/concord/$RID/mutation-backup/lib.py"
-$DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 3 ] && has "previous --mutate left a mutant" && [ "$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)" = "$H0" ] && grep -q "return 42" "$R/.git/concord/$RID/mutation-backup/lib.py" \
-  && ok "a stale backup that differs from the file: exit 3, nothing touched, backup kept" || { bad "stale backup rc=$RC"; head -2 "$T/out.txt"; }
-cp "$R/lib.py" "$R/.git/concord/$RID/mutation-backup/lib.py"
-rm -f "$R/.git/concord/$RID/mutation-backup/CLEAN"; printf 'z = 1\n' > "$R/zz.py"; printf 'z = 2\n' > "$R/.git/concord/$RID/mutation-backup/zz.py"
-$DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 3 ] && has "left a mutant in zz.py" && has "delete that backup file" && [ "$(cat "$R/zz.py")" = "z = 1" ] \
-  && ok "a leftover in a file the new sample does not touch still blocks (every backup file is checked)" || { bad "untouched leftover rc=$RC"; head -2 "$T/out.txt"; }
-rm -f "$R/.git/concord/$RID/mutation-backup/zz.py" "$R/zz.py"
-$DP --mutate "$RID" --max 1 --seed 1 --repo "$R" > "$T/out.txt" 2>&1
-[ "$(ls "$R/.git/concord/$RID/mutation-backup" | sort | tr '\n' ' ')" = "CLEAN lib.py " ] && ok "after a clean run the backup dir holds only that run's files plus CLEAN" || bad "backup dir: $(ls "$R/.git/concord/$RID/mutation-backup" | tr '\n' ' ')"
-printf '\n' > "$R/.git/concord/$RID/meta.json.bak"; cp "$R/.git/concord/$RID/meta.json" "$T/meta.keep"; printf '{"run_id": ' > "$R/.git/concord/$RID/meta.json"
-$DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; cp "$T/meta.keep" "$R/.git/concord/$RID/meta.json"; rm -f "$R/.git/concord/$RID/meta.json.bak"
+[ $RC -eq 0 ] && [ "$(sha "$R/lib.py")" = "$H0" ] && ok "an edit after the run: --mutate runs and the live file keeps the edit" || { bad "rerun after edit rc=$RC"; head -3 "$T/out.txt"; }
+cp "$R/.git/concord/$RID/meta.json" "$T/meta.keep"; printf '{"run_id": ' > "$R/.git/concord/$RID/meta.json"
+$DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; cp "$T/meta.keep" "$R/.git/concord/$RID/meta.json"
 [ $RC -eq 2 ] && has "not valid JSON" && ok "truncated meta.json: exit 2, no traceback" || { bad "bad meta rc=$RC"; head -2 "$T/out.txt"; }
-newrepo 'Files: a.py, b.py\nAcceptance:\n- `python3 -c "import a, b; assert a.f(1) == 2 and b.g(1) == 3"`\n- `shasum -a 256 a.py b.py >> mlog`\n'
+
+echo "== --mutate: the run's own lines, first failing check, characterization excluded"
+newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.mid(5)"`\n'
+printf 'def lo(x):\n    return x < 0\n' > "$R/lib.py"; git -C "$R" add lib.py; git -C "$R" commit -qm lib
+printf 'def pre(x):\n    return x > 9\n' >> "$R/lib.py"            # uncommitted, made before the run: not the run's
+run 'printf "def mid(x):\n    return x == 5\n" >> lib.py'; RID=$(rid)
+$DP --mutate "$RID" --max 50 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+L=$(mj "$R/.git/concord/$RID/meta.json" 'sorted({x["line"] for x in m["mutation"]["sampled"]})')
+[ $RC -eq 0 ] && [ "$L" = "[6]" ] && ok "only the run's own mid() (line 6) is mutated, not the earlier uncommitted pre() (line 4)" \
+  || { bad "own lines rc=$RC lines=$L"; head -3 "$T/out.txt"; }
+newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.clamp(5) == 5"`\n- `python3 -c "import lib" && echo graded >> "$T/glog"`\n- `echo char >> "$T/clog"` (characterization)\n'
+run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
+rm -f "$T/glog"; C0=$(wc -l < "$T/clog" | tr -d ' ')
+$DP --mutate "$RID" --seed 0 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+K=$(mut killed); SV=$(mut survived); G=$(cat "$T/glog" 2> /dev/null | wc -l | tr -d ' ')
+[ $RC -eq 0 ] && [ "${K:-0}" -ge 1 ] && [ "$G" -eq $(( ${SV:-0} + 1 )) ] \
+  && ok "each mutant stops at its first failing command: the second ran only on the unmutated copy and the $SV survivor(s)" \
+  || { bad "early stop rc=$RC killed=$K survived=$SV graded=$G"; head -3 "$T/out.txt"; }
+[ "$(wc -l < "$T/clog" | tr -d ' ')" = "$C0" ] && ok "a (characterization) command never grades a mutant" || bad "characterization command ran"
+newrepo 'Files: a.py, b.py\nAcceptance:\n- `shasum -a 256 a.py b.py >> "$T/mlog"`\n- `python3 -c "import a, b; assert a.f(1) == 2 and b.g(1) == 3"`\n'
 run 'printf "def f(x):\n    return x + 1\n" > a.py; printf "def g(x):\n    return x + 2\n" > b.py'; RID=$(rid)
-HA=$(shasum -a 256 "$R/a.py" | cut -d" " -f1); HB=$(shasum -a 256 "$R/b.py" | cut -d" " -f1); rm -f "$R/mlog"
+HA=$(sha "$R/a.py"); HB=$(sha "$R/b.py"); rm -f "$T/mlog"
 $DP --mutate "$RID" --max 8 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-python3 -I - "$R/mlog" "$HA" "$HB" <<'PYM'
+python3 -I - "$T/mlog" "$HA" "$HB" <<'PYM'
 import sys
 rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
 pairs = list(zip(rows[0::2], rows[1::2]))
 both = sum(1 for a, b in pairs if a[0] != sys.argv[2] and b[0] != sys.argv[3])
-sys.exit(0 if pairs and both == 0 else 1)
+sys.exit(0 if len(pairs) > 1 and both == 0 else 1)
 PYM
-[ $? -eq 0 ] && [ $RC -eq 0 ] && ok "two changed files: never more than one mutant on disk at a time" || { bad "stacked mutants rc=$RC"; cat "$R/mlog" 2>/dev/null | head -4; }
-newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.clamp(5) == 5"`\n- `sleep 4` (characterization)\n'
-run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid); H0=$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)
+[ $? -eq 0 ] && [ $RC -eq 0 ] && ok "two changed files: never more than one mutant in the copy at a time" || { bad "stacked mutants rc=$RC"; head -4 "$T/mlog" 2>/dev/null; }
+newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import time, lib; time.sleep(4); assert lib.clamp(5) == 5"`\n'
+run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid); H0=$(sha "$R/lib.py")
 $DP --mutate "$RID" --max 2 --repo "$R" > "$T/out.txt" 2>&1 & MP=$!
 sleep 1.5; kill -TERM $MP 2>/dev/null; wait $MP; RC=$?
-[ "$(shasum -a 256 "$R/lib.py" | cut -d" " -f1)" = "$H0" ] && [ $RC -eq 130 ] && has "original files restored" \
-  && ok "SIGTERM during a mutant's acceptance: file restored, exit 130" || { bad "sigterm rc=$RC hash $(shasum -a 256 "$R/lib.py" | cut -d" " -f1)"; cat "$T/out.txt"; }
-$DP --mutate "$RID" --max 1 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && ok "the run lock is released after the interrupted command" || { bad "lock left rc=$RC"; head -3 "$T/out.txt"; }
+[ "$(sha "$R/lib.py")" = "$H0" ] && [ $RC -eq 130 ] && has "interrupted; the isolated copy was removed" \
+  && ok "SIGTERM during grading: exit 130, live file untouched" || { bad "sigterm rc=$RC"; cat "$T/out.txt"; }
 newrepo 'Files: notes.txt\nAcceptance:\n- `test -f notes.txt`\n'
 run 'echo hi > notes.txt'; RID=$(rid)
 $DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?

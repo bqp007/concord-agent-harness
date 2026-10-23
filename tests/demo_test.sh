@@ -22,7 +22,7 @@ start=$SECONDS; out=$(demo "$ROOT" "$P" scripts/demo.sh --keep 2>&1); rc=$?; sec
 [ "$rc" = 0 ] && ok a-exit || no a-exit "rc=$rc: $(echo "$out" | tail -1)"
 [ "$secs" -le 60 ] && ok a-time || no a-time "${secs}s"
 for pat in '^OUT OF SCOPE \(source\): README\.md' 'baseline: .*fail(ed)? before the change' 'verdict FAIL \[EXECUTOR\]' \
-    'acceptance after run: 1/1 pass' 'verdict PASS' 'fake/m +2 +1 +1 '; do
+    'acceptance after run: 1/1 pass' 'verdict PASS'; do
   echo "$out" | grep -qE "$pat" && ok "a-output $pat" || no a-output "missing: $pat"; done
 K=$(echo "$out" | sed -n 's/^kept: //p' | tail -1)
 if [ -n "$K" ] && [ -d "$K" ]; then ok a-kept

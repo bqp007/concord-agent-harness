@@ -118,6 +118,10 @@ def cmd_new(args):
     if wt.exists():
         die(f"{wt} already exists; enter it with EnterWorktree path={wt}, or `wt.py done {ticket}` first")
     branch = args.branch or f"feature/{ticket}"
+    try:                                               # argv bytes that are not UTF-8 arrive as lone surrogates
+        branch.encode("utf-8")
+    except UnicodeEncodeError:
+        die("branch name is not UTF-8 text")
     name = git(repo, "check-ref-format", "--branch", branch)   # option-like names refused before any other git call
     if name != branch:
         die(f"--branch {branch} is git's shorthand for {name}; give the branch name itself")

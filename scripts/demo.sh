@@ -127,14 +127,9 @@ unset FAKE_ACTIONS
 out=$(D --review "$RUN2" --via qwen --model fake/m 2>&1); need "the review"
 printf '%s\n' "$out"
 
-# 9. Close the round: the verdict is recorded after the review, and the ledger gets its PASS.
-echo "9. Close: record PASS with the review on file."
-out=$(D --close-round "$RUN2" --verdict-result PASS --note "demo" 2>&1); need "closing the round"
-printf '%s\n' "$out"
-
-# 10. Stats: the same evidence, summarised from the ledger rather than from the output above.
-echo "10. Stats: read the ledger back as one executor row."
-out=$(D --stats 2>&1); need "the stats table"
+# 9. Verdict: the acceptance passed and the review is on file, so the phase passes.
+echo "9. Verdict: record PASS with the review on file."
+out=$(D --verdict "$RUN2" PASS --note "demo" 2>&1); need "the PASS verdict"
 printf '%s\n' "$out"
 
 [ -n "$KEEP" ] && { echo "kept: $W"; KEPT=1; }
@@ -143,5 +138,4 @@ echo "- Attempt 1 changed README.md outside Files: FAIL, cause EXECUTOR."
 echo "- Restore reverted cart.py and README.md."
 echo "- Attempt 2 changed cart.py only: the baseline failed and the acceptance after the run passed."
 echo "- Review: CLEAN. Verdict: PASS."
-echo "- Executor row: 2 runs, 1 PASS, 1 FAIL."
 exit 0

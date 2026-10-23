@@ -6,7 +6,7 @@ This guide covers requirements, installation, executors and configuration. The [
 
 - macOS or Linux, bash 3.2+, git, Python 3.9+ (standard library only).
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) for the `concord` plugin, which carries the commands and agents. The planner, the Claude implementer and the Opus reviewers run as Claude Code subagents on your subscription.
-- [OpenCode](https://opencode.ai) on PATH for the cheap executors (`opencode run`). The default executor is DeepSeek v4.1 Flash on the OpenCode Go allowance. Without OpenCode the dispatcher still runs Claude subagent phases, reviews and verdicts.
+- [OpenCode](https://opencode.ai) on PATH for the cheap executors (`opencode run`). Phases go first to DeepSeek or GLM Flash on the OpenCode Zen free tier, then to DeepSeek v4.1 Flash on the OpenCode Go allowance (the `default`). Without OpenCode the dispatcher still runs Claude subagent phases, reviews and verdicts.
 - The `hookify` plugin for Claude Code if you want the four hook rules enforced. They are plain Markdown rule files; without the plugin they do nothing.
 
 The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
@@ -16,7 +16,7 @@ The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 ./install.sh --dry-run            # shows every copy, keep and backup; writes nothing
-./install.sh                      # installs the dispatcher, then runs Concord's eighteen test suites from the installed copy
+./install.sh                      # installs the dispatcher, then runs Concord's seventeen test suites from the installed copy
 ./install.sh --repo ~/src/myrepo  # also drops the hook rules into that repository's .claude/
 ```
 
@@ -31,7 +31,7 @@ Then add the plugin in Claude Code:
 
 What `install.sh` does: copies `concord/` to `~/.claude/concord/` (or `$CLAUDE_HOME/delegate/`). Before overwriting an earlier install it copies the old files to `~/.claude/concord/backup/<timestamp>-pre-install/`; backups are never pruned. `models.conf`, `executors.conf`, `worktrees.conf` and `repo-notes/README.md` are kept when they already exist, so your edits survive upgrades. Command and agent files that an earlier install left in `~/.claude/commands/` and `~/.claude/agents/` are listed, not removed: delete them once the plugin is installed, so each command exists once.
 
-What the plugin adds: the commands `/concord:plan-then-delegate`, `/concord:delegate` and `/concord:rules-review`, and the agents `concord:implementer`, `concord:implementer-opus48`, `concord:reviewer-opus48` and `concord:reviewer-opus55`.
+What the plugin adds: the commands `/concord:plan-then-delegate`, `/concord:delegate` and `/concord:rules-review`, and the agents `concord:implementer`, `concord:implementer-opus48` and `concord:reviewer-opus55`.
 
 What it never touches: `~/.claude/CLAUDE.md` and `~/.claude/settings.json`. Merge `adapters/claude-code/CLAUDE.md` and `adapters/claude-code/settings.snippet.json` into them by hand; both are short. `--no-tests` skips the suites; exit code 2 means a usage error or a missing prerequisite.
 
@@ -39,10 +39,10 @@ Restart Claude Code once after installing: new agent files load only at session 
 
 ## Executors
 
-- `concord/models.conf` maps plain names to a harness and a model id: `deepseek-flash` (default), `glm`, `kimi`, `qwen` and `minimax` on the OpenCode Go allowance; `zen-*` on OpenCode credits. `sonnet`, `haiku` and `opus` always mean the Claude Code `concord:implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
+- `concord/models.conf` maps plain names to a harness and a model id: `free-deepseek-flash` and `free-glm-flash` on the OpenCode Zen free tier (no credits, a daily limit); `deepseek-flash` (default), `glm`, `kimi`, `qwen` and `minimax` on the OpenCode Go allowance; `zen-*` on OpenCode credits, used only after you agree. `sonnet`, `haiku` and `opus` always mean the Claude Code `concord:implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
 - Reasoning effort for OpenCode models is the `#high` suffix on the model id.
 - The native `qwen`, `pi`, `dsh` and `kimi` harness adapters ship but are untested in this release; OpenCode is the reference harness.
-- Review tiers are fixed in `concord.py` (`TIER_RANK`, `REVIEWER_RANK`): low = a cheap `--review` run, medium and high = the `concord:reviewer-opus55` agent; the dispatcher drops the `concord:` prefix before it compares. To retarget a tier, change the agent file's `model:` line and the `REVIEWER_RANK` entry together; `concord/tests/guards_test.sh` pins the names.
+- Review tiers are fixed in `concord.py` (`TIER_RANK`, `REVIEWER_RANK`): low = a cheap `--review` run, medium and high = the `concord:reviewer-opus55` agent; the dispatcher drops the `concord:` prefix before it compares. At the PR gate a review counts at most at its reviewer's rank, and `--pr-status` names the reviewer a pull request still needs. To retarget a tier, change the agent file's `model:` line and the `REVIEWER_RANK` entry together; `concord/tests/lean_test.sh` pins the names.
 
 ## Other harnesses
 
@@ -56,20 +56,20 @@ The dispatcher does not depend on Claude Code. What the Claude Code adapter prov
 | `concord:reviewer-opus*` agents | medium and high review tiers | a second Codex session fed the packet from `concord.py --review <run> --packet`, its REVIEW-JSON recorded with `--review-record` | same, with any strong model; keep the reviewer's context fresh |
 | hookify rules | block destructive commands before they run | Codex's own sandbox and approval policy | your shell's discipline |
 
-Reports, ledgers, red runs, scope enforcement on OpenCode, attempt caps and tier guards live in `concord.py` and work the same everywhere.
+Reports, ledgers, red runs, scope enforcement on OpenCode, attempt caps and the PR-gate tier check live in `concord.py` and work the same everywhere.
 
 ## Configuration files
 
 - `concord/executors.conf`: wall-clock limit, red-run and post-run acceptance toggles, static checks (ruff), extra "generated" globs.
 - `concord/worktrees.conf`: per repository, the untracked folders `wt.py` links into each worktree and the base branch.
-- `concord/repo-notes/`: per-repository notes for executors (`<repo>.md`) and the planner's plan-gap ledger (`<repo>.gaps.md`).
+- `concord/repo-notes/`: per-repository notes for executors and the planner (`<repo>.md`); its README gives the format.
 
 ## Running the checks
 
 ```bash
 bash tests/package_test.sh                 # the repository's contract (about a minute; installs into temporary HOMEs)
 bash tests/demo_test.sh                    # the credential-free demo, end to end
-bash concord/tests/run_all.sh              # the dispatcher's eighteen suites against this checkout
+bash concord/tests/run_all.sh              # the dispatcher's seventeen suites against this checkout
 bash ~/.claude/concord/tests/run_all.sh   # the same suites against the installed copy
 ```
 

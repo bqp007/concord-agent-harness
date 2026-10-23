@@ -1,11 +1,11 @@
 #!/bin/bash
 # One mechanism per concern (2026-10-23, PLAN_kit-harmony; from the workflow review after kit-cpptools): every entry
 # point fails closed on hostile input (exit 2, never a traceback), run ids name a run folder and nothing else, plans
-# must be UTF-8 (1); --lint reads every phase with the lint model, Claude executors included (2); Interfaces: checks
-# signature-shaped spans only (3); the Zen free tier has aliases, its own billing label and a PROVIDER LIMIT line (4);
-# --check compares the installed plugin and dispatcher with their marketplace source (5); wt.py new cuts from the
-# remote default branch, writes no .git/config, leaves nothing behind on failure and git-excludes plan files (6);
-# one Opus reviewer above the low tier (7).
+# must be UTF-8 (1); --lint reads every phase with the lint model, Claude executors included (2); the Zen free tier has
+# aliases, its own billing label and a PROVIDER LIMIT line (4); --check compares the installed plugin and dispatcher
+# with their marketplace source (5); wt.py new cuts from the remote default branch, writes no .git/config, leaves
+# nothing behind on failure and git-excludes plan files (6); one Opus reviewer above the low tier (7).
+# Section 3 (the Interfaces: signature check) went with that check in the lean revision (2026-10-23, kit-lean).
 # No network: fake qwen executor and reviewer, a local bare repository as the remote.
 # Run: bash ~/.claude/concord/tests/harmony_test.sh [SECTION ...]   (default all; exit 0 = every selected check passed)
 set -u
@@ -97,7 +97,6 @@ runid(){ local name=$1 v a n=0; shift
     fc "${args[@]}" && has "no such run" || { n=$((n+1)); echo "    $name '${v:0:24}': rc=$RC $(tail -1 "$T/out.txt" | cut -c1-100)"; }
   done
   [ $n -eq 0 ] && ok "1 $name: an over-long name, '..', '.', 'a/b' and an outside folder exit 2 'no such run'" || bad "1 $name ($n of 5 values)"; }
-runid --card --card @
 runid --show --show @
 runid --restore --restore @
 runid --mutate --mutate @
@@ -106,15 +105,13 @@ runid --abort --abort @
 runid --verdict --verdict @ PASS
 runid --review-record --review-record @ --reviewer x --file "$T/clean.txt"
 runid "--review --packet" --review @ --packet
-runid --close-round --close-round @ --verdict-result PASS
 # On a case-insensitive filesystem (the macOS default) LEDGER and Ledger name the review ledger folder.
 mkdir -p "$R/.git/concord/ledger"; n=0
-for args in "--card LEDGER" "--show Ledger" "--restore LEDGER" "--mutate LEDGER" "--end LEDGER" "--abort LEDGER" \
-  "--verdict LEDGER PASS" "--review-record LEDGER --reviewer x --file $T/clean.txt" "--review Ledger --packet" \
-  "--close-round LEDGER --verdict-result PASS"; do
+for args in "--show Ledger" "--restore LEDGER" "--mutate LEDGER" "--end LEDGER" "--abort LEDGER" \
+  "--verdict LEDGER PASS" "--review-record LEDGER --reviewer x --file $T/clean.txt" "--review Ledger --packet"; do
   fc $args && { has "no such run" || has "ledger is not a run"; } || { n=$((n+1)); echo "    $args: rc=$RC $(tail -1 "$T/out.txt" | cut -c1-100)"; }
 done
-[ $n -eq 0 ] && ok "1 a case variant of the ledger name (LEDGER, Ledger) exits 2 on every run-id flag" || bad "1 ledger case variants ($n of 10)"
+[ $n -eq 0 ] && ok "1 a case variant of the ledger name (LEDGER, Ledger) exits 2 on every run-id flag" || bad "1 ledger case variants ($n of 8)"
 fc --verdict "" PASS && has "no such run" && ok "1 --verdict with an empty run id: exit 2 'no such run'" \
   || bad "1 --verdict '': rc=$RC $(tail -1 "$T/out.txt" | cut -c1-100)"
 [ "$(tree_sha "$T/outside")" = "$OUT_SHA" ] && ok "1 a folder outside the runs root is never written through a run id" \
@@ -130,13 +127,11 @@ plan(){ local name=$1 a n=0 v want; shift
   done
   [ $n -eq 0 ] && ok "1 $name: an over-long plan name, a non-UTF-8 plan and an unreadable plan exit 2 with the reason" \
     || bad "1 $name ($n of 3 values)"; }
-plan --map --map @
-plan "--map --mermaid" --map @ --mermaid
 plan --lint --lint 1 --plan @ --dry-run --via qwen --model fake/m
 plan --begin --begin 1 --plan @
 plan "a run" 1 --plan @ --via qwen --model fake/m --dry-run
 run "echo y >> a.py"; G=$(rid)
-$DP --card "$G" --repo "$R" > "$T/out.txt" 2>&1; RC1=$?; $DP --card last --repo "$R" > "$T/out.txt" 2>&1; RC2=$?
+$DP --show "$G" --repo "$R" > "$T/out.txt" 2>&1; RC1=$?; $DP --show last --repo "$R" > "$T/out.txt" 2>&1; RC2=$?
 [ -n "$G" ] && [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && ok "1 a real run id and 'last' still resolve (characterization)" \
   || bad "1 real run id rc=$RC1/$RC2 id='$G'"
 fi
@@ -161,60 +156,6 @@ C0=$(calls); $DP --lint 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R"
 $DP --lint 2 --dry-run --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "LINT SKIPPED" && ok "2 a sonnet phase: the dry run builds the lint call" \
   || { bad "2 sonnet phase rc=$RC"; tail -3 "$T/out.txt"; }
-fi
-
-if sel 3; then
-echo "== 3 Interfaces: only signature-shaped spans (name followed by an open parenthesis) are checked"
-mkrepo '## Phase 1 - interfaces (P1 <- S1)
-Executor: deepseek-flash
-Risk: low
-Files: a.py
-Interfaces:
-- `foo(x)` (new): returns x
-- `num_word N` (a shell example): prints N as a word, as in `17 -> seventeen`
-- `<number word>`, `docs/suite-count` and `--repo DIR` are descriptions
-Acceptance:
-- `grep -q "def foo" a.py`'
-$DP 1 --plan PLAN_T.md --via qwen --model fake/m --dry-run --repo "$R" > "$T/out.txt" 2>&1
-has "interfaces: 1   characterize:" && ok "3 the dry run counts one signature (five descriptive spans skipped)" \
-  || { bad "3 dry-run count"; grep -o 'interfaces: [0-9]*' "$T/out.txt"; }
-run "printf 'def foo(x):\n    return x\n' >> a.py"
-has "interfaces: 1/1 found verbatim in Files" && ! has "INTERFACE MISMATCH" \
-  && ok "3 descriptive spans no longer read as INTERFACE MISMATCH" || { bad "3 descriptive spans"; grep -E 'interfaces|INTERFACE' "$T/out.txt"; }
-mkrepo '## Phase 1 - missing (P1 <- S1)
-Executor: deepseek-flash
-Risk: low
-Files: a.py
-Interfaces:
-- `foo(x)` (new)
-- `bar(y)` (new)
-Acceptance:
-- `grep -q "def foo" a.py`'
-run "printf 'def foo(x):\n    return x\n' >> a.py"
-has 'INTERFACE MISMATCH: `bar(y)` (not found)' && ! has '`foo(x)` (' \
-  && ok "3 a missing signature is still a mismatch (characterization)" || { bad "3 missing signature"; grep -E 'interfaces|INTERFACE' "$T/out.txt"; }
-mkrepo '## Phase 1 - prose only (P1 <- S1)
-Executor: deepseek-flash
-Risk: low
-Files: a.py
-Interfaces:
-- `num_word N`: prints `17 -> seventeen`; `<number word>` in `docs/suite-count`
-Acceptance:
-- `grep -q y a.py`'
-run "echo y >> a.py"
-! has "interfaces:" && ! has "INTERFACE MISMATCH" && ok "3 an Interfaces block of descriptions only: no interfaces line" \
-  || { bad "3 descriptions only"; grep -E 'interfaces|INTERFACE' "$T/out.txt"; }
-mkrepo '## Phase 1 - c++ (P1 <- S1)
-Executor: deepseek-flash
-Risk: low
-Files: a.cpp
-Interfaces:
-- `int Foo::bar(int x) const` (new)
-Acceptance:
-- `grep -q bar a.cpp`'
-run "printf 'int Foo::bar(int x) const { return x; }\n' > a.cpp"
-has "interfaces: 1/1 found verbatim in Files" && ok "3 a C++ member signature with a return type is checked and found (characterization)" \
-  || { bad "3 c++ signature"; grep -E 'interfaces|INTERFACE' "$T/out.txt"; }
 fi
 
 if sel 4; then

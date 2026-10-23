@@ -1,9 +1,9 @@
 #!/bin/bash
-# concord.py regression for the 2026-10-18 nine-paper changes (no network, fake qwen executor, ~30 s):
-# webfetch denied by default + tool-call parsing; acceptance files hashed (report line, PASS refused with exit 7,
-# --force, session runs exempt, directory tokens); post-run acceptance pass; NO CHANGES flag; reviewer-finding
-# post-filters (outside diff, TODO-as-fix, delete-only); --review-adjudicate + reviewer table in --stats;
-# --behaviour tag on EXECUTOR failures.
+# concord.py regression for the 2026-10-18 nine-paper changes, lean revision 2026-10-23 (no network, fake qwen
+# executor, ~30 s): webfetch denied by default + tool-call parsing; acceptance files hashed (report line, PASS refused
+# with exit 7, --force, session runs exempt, directory tokens); post-run acceptance pass; NO CHANGES flag; review file
+# lists without generated files and the diff base of a committed run; reviewer-finding post-filters (outside diff,
+# TODO-as-fix, delete-only) on --review-record; --behaviour tag on EXECUTOR failures.
 # Run: bash ~/.claude/concord/tests/papers_test.sh   (exit 0 = all passed). Copies Concord into a temp dir with
 # HOME pointing at a temp home, so runs.jsonl and the real config stay untouched.
 set -u
@@ -35,9 +35,6 @@ line(){ grep "^$1" "$T/out.txt" | grep -F -- "$2" > /dev/null; }
 rid(){ sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
 meta(){ python3 -I -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))" "$R/.git/concord/$1/meta.json" "$2"; }
 pyblock(){ python3 -I - "$T/concord/concord.py" "$T" "$@"; [ $? -eq 0 ] && pass=$((pass+1)) || fail=$((fail+1)); }
-# A PASS needs a review at the phase's tier (medium here): record a clean reviewer-opus48 answer first.
-printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n' > "$T/clean.txt"
-rev48(){ $DP --review-record "$1" --reviewer reviewer-opus48 --file "$T/clean.txt" --repo "$R" > /dev/null 2>&1; }
 
 echo "== network"
 pyblock <<'EOF'
@@ -85,24 +82,24 @@ line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" && ok "edit of an 
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 7 ] && grep -qi "acceptance files changed" "$T/v.txt" && [ "$(meta "$RID" verdict)" = "None" ] \
   && ok "PASS refused (exit 7), verdict not recorded" || { bad "PASS not refused rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
-rev48 "$RID"; $DP --verdict "$RID" PASS --force --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+$DP --verdict "$RID" PASS --force --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] && meta "$RID" verdict_note | grep -q "forced" \
   && ok "--force records PASS with a 'forced' note" || { bad "--force rc=$RC note=$(meta "$RID" verdict_note)"; cat "$T/v.txt"; }
-newrepo 'python3 tests/test_a.py'; run 'echo y >> a.py'; RID=$(rid); rev48 "$RID"
+newrepo 'python3 tests/test_a.py'; run 'echo y >> a.py'; RID=$(rid)
 ! has "ACCEPTANCE FILES CHANGED" && $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1 \
   && ok "untouched acceptance files: no line, PASS accepted" || { bad "clean run flagged or refused"; cat "$T/v.txt"; grep ACCEPT "$T/out.txt"; }
 newrepo 'python3 tests/test_a.py'
 $DP --begin 1 --label planner --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
 BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
 echo "# planner edit" >> "$R/tests/test_a.py"
-$DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1; rev48 "$BID"
+$DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1 && ok "planner session run may edit acceptance files (PASS accepted)" \
   || { bad "planner run refused ($BID)"; cat "$T/v.txt"; }
 newrepo 'ls tests/'; run 'echo y >> a.py; echo "# t" >> tests/test_b.py'
 line "ACCEPTANCE FILES CHANGED:" "tests/test_b.py (modified)" && ok "directory token in acceptance: files under it hashed" \
   || { bad "directory acceptance not hashed"; grep -i accept "$T/out.txt" | head -5; }
 
-newrepo 'grep -q y a.py && find . -name "*.py" && ls /'; run 'echo y >> a.py'; RID=$(rid); rev48 "$RID"
+newrepo 'grep -q y a.py && find . -name "*.py" && ls /'; run 'echo y >> a.py'; RID=$(rid)
 ! has "ACCEPTANCE FILES CHANGED" && $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1 \
   && ok "in-scope file named by acceptance, '.' and '/' tokens: not acceptance files" \
   || { bad "in-scope/root tokens treated as acceptance files"; grep ACCEPT "$T/out.txt"; cat "$T/v.txt"; }
@@ -260,19 +257,6 @@ EOF
 rm "$R/a.py"; $DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/rev.txt" --repo "$R" > "$T/rr.txt" 2>&1
 python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))['reviews'][-1]; sys.exit(0 if r.get('highs')==4 and r.get('blockers')==1 else 1)" "$R/.git/concord/$RID/meta.json" \
   && ok "review record on a run whose files are gone keeps findings as written" || { bad "no-files record downgraded"; cat "$T/rr.txt"; }
-git -C "$R" checkout -q -- a.py; echo y >> "$R/a.py"
-
-echo "== adjudication and stats"
-$DP --review-adjudicate "$RID" --reviewer reviewer-opus48 --adopted 2 --incorrect 1 --not-adopted 1 --repo "$R" > "$T/a.txt" 2>&1; RC=$?
-python3 -I -c "
-import json,sys; r=[x for x in json.load(open(sys.argv[1]))['reviews'] if x.get('reviewer')=='reviewer-opus48'][-1]
-sys.exit(0 if (r.get('adopted'),r.get('incorrect'),r.get('not_adopted'))==(2,1,1) else 1)" "$R/.git/concord/$RID/meta.json"; PY=$?
-[ $RC -eq 0 ] && [ $PY -eq 0 ] && ok "--review-adjudicate stores adopted/incorrect/not adopted" || { bad "adjudicate rc=$RC"; cat "$T/a.txt"; }
-$DP --review-adjudicate "$RID" --reviewer nobody --adopted 1 --incorrect 0 --not-adopted 0 --repo "$R" > "$T/a.txt" 2>&1
-[ $? -eq 2 ] && ok "adjudicating a reviewer with no review on the run -> exit 2" || bad "unknown reviewer not refused"
-$DP --stats --repo "$R" > "$T/s.txt" 2>&1
-grep -q "^reviewer" "$T/s.txt" && grep "reviewer-opus48" "$T/s.txt" | grep -q "50%" \
-  && ok "--stats reviewer table with adoption 50%" || { bad "reviewer table"; cat "$T/s.txt"; }
 
 echo "== behaviour tag"
 newrepo 'grep -q y a.py'; run 'echo y >> a.py; echo w >> b.py'; RID=$(rid)
@@ -284,8 +268,5 @@ $DP --verdict "$RID" FAIL --cause EXECUTOR --behaviour nonsense --repo "$R" > "$
 [ $? -eq 2 ] && ok "unknown behaviour slug -> exit 2" || bad "unknown slug accepted"
 $DP --verdict "$RID" FAIL --cause EXECUTOR --repo "$R" > /dev/null 2>&1
 [ "$(meta "$RID" behaviour)" = "scope" ] && ok "re-verdict without --behaviour keeps the stored behaviour" || bad "behaviour wiped: $(meta "$RID" behaviour)"
-$DP --verdict "$RID" FAIL --cause EXECUTOR --behaviour scope --repo "$R" > /dev/null 2>&1
-$DP --stats --repo "$R" > "$T/s.txt" 2>&1
-grep -q "behaviours: scope 1" "$T/s.txt" && ok "--stats counts behaviours" || { bad "behaviours line"; tail -5 "$T/s.txt"; }
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
