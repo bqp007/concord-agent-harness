@@ -113,7 +113,8 @@ packet "$H"; RC=$?
 
 echo "== a phase review with findings stores no credit (partial credit is for PR reviews only)"
 run 1 "echo '# u' >> a.py; echo '# u' >> b.py"; U=$(rid)
-printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": 1, "problem": "wrong", "fix": "f", "repro": {"input": "x", "expected": "1", "actual": "2"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/fix.txt"
+UL=$(wc -l < "$R/a.py" | tr -d ' ')   # the line this run added (a re-run's review diff holds only its own change)
+printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": '"$UL"', "problem": "wrong", "fix": "f", "repro": {"input": "x", "expected": "1", "actual": "2"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/fix.txt"
 FAKE_ACTIONS="cat $T/fix.txt" $DP --review "$U" --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
 [ "$(lastrev "$U" verdict)" = FIX ] && [ "$(lastrev "$U" covered)" = None ] && [ "$(lastrev "$U" flagged)" = None ] \
   && ok "a flash phase review with a HIGH on a.py: no covered or flagged map" \
