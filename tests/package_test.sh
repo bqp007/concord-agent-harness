@@ -82,8 +82,8 @@ s_layout() { local p old
   check layout/old-name "git grep -n -I -F --untracked -e '$old' -- .; [ \$? = 1 ]"; }
 
 s_budgets() { local spec f
-  for spec in README.md:220 install.sh:150 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
-      $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:260 tests/demo_test.sh:120 \
+  for spec in README.md:220 install.sh:160 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
+      $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:270 tests/demo_test.sh:120 \
       $A/settings.snippet.json:12 $K/repo-notes/README.md:15; do
     local f=${spec%%:*} n=${spec##*:} name; name=$(basename "$f"); [ "$f" = $K/repo-notes/README.md ] && name=repo-notes-README.md
     check "budgets/$name" "[ -f '$f' ] && [ \$(wc -l < '$f') -le $n ] || { wc -l '$f'; false; }"
@@ -173,7 +173,13 @@ inst_n() { mkdir -p "$H/.claude" && printf 'MINE\n<!-- concord:begin -->\nold\nM
 inst_o() { mkdir -p "$H/.claude" "$H/dot" && printf 'DOTFILES\n' > "$H/dot/CLAUDE.md" && ln -s "$H/dot/CLAUDE.md" "$H/.claude/CLAUDE.md" &&
   inst --no-tests >/dev/null && [ -L "$H/.claude/CLAUDE.md" ] && grep -qF "<!-- concord:begin -->" "$H/dot/CLAUDE.md" && grep -qxF DOTFILES "$H/dot/CLAUDE.md" &&
   b=$(ls "$H"/.claude/concord/backup/*/CLAUDE.md | head -1) && [ ! -L "$b" ] && [ "$(cat "$b")" = DOTFILES ]; }
-s_install() { local c; for c in a b c d e f g h i j k l m n o; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+inst_p() { mkdir -p "$H/.claude" && { echo MINE; git -C "$K/.." show f811c1d:adapters/claude-code/CLAUDE.md; echo AFTER; } > "$H/.claude/CLAUDE.md" &&
+  inst --no-tests >/dev/null && [ "$(grep -c '^# Default workflow' "$H/.claude/CLAUDE.md")" = 1 ] &&
+  [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" = 1 ] && [ "$(head -1 "$H/.claude/CLAUDE.md")" = MINE ] &&
+  [ "$(tail -1 "$H/.claude/CLAUDE.md")" = AFTER ] && ! grep -qF free-deepseek-flash "$H/.claude/CLAUDE.md"; }
+inst_q() { mkdir -p "$H/.claude/concord/tests" && echo mine > "$H/.claude/concord/tests/mine_test.sh" &&
+  inst --no-tests >/dev/null && { [ -f "$H/.claude/concord/tests/mine_test.sh" ] || ls "$H"/.claude/concord/backup/*/tests/mine_test.sh >/dev/null 2>&1; }; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.

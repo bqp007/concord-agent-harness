@@ -2269,8 +2269,8 @@ def lesson_lines(tag):
         return []
     out = []
     for l in LESSONS.read_text(errors="replace").splitlines():
-        m = re.match(r"L(\d+) ", l)
-        if m and f"[{tag}]" in l:
+        m = re.match(r"L(\d+) \S+ ((?:\[(?:plan|exec)\] )+)", l)   # tags only from the prefix, never the text
+        if m and f"[{tag}]" in m.group(2):
             out.append((int(m.group(1)), l))
     return out
 

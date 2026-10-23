@@ -57,7 +57,7 @@ if [ -e "$DEST/concord/concord.py" ]; then
 fi
 for f in "$SRC"/concord/*.py "$SRC"/concord/*.md; do put "$f" "$DEST/concord/$(basename "$f")"; done
 for f in "$SRC"/concord/tests/*.sh; do put "$f" "$DEST/concord/tests/$(basename "$f")"; done
-if [ -d "$DEST/concord/tests" ]; then   # suites this source no longer ships; the backup above keeps them
+if [ -n "${BK:-}" ] && [ -d "$DEST/concord/tests" ]; then   # suites this source no longer ships; the backup above keeps them
   for f in "$DEST"/concord/tests/*_test.sh; do [ -e "$SRC/concord/tests/$(basename "$f")" ] && continue
     if [ "$DRY" = 1 ]; then echo "would remove $f"; else rm "$f"; echo "remove $f"; fi
   done
@@ -99,7 +99,13 @@ old = open(md).read().split("\n") if os.path.exists(md) else []
 if old and old[-1] == "":
     old.pop()
 nb, ne = old.count(B), old.count(E)
-if (nb, ne) == (0, 0):
+heads = [i for i, l in enumerate(old) if l.startswith("# Default workflow: plan, then delegate")]
+if (nb, ne) == (0, 0) and heads:   # a block merged by hand before 2.1: replace it, from its heading to its "- Tokens:" rule
+    ends = [i for i, l in enumerate(old) if i > heads[0] and l.startswith("- Tokens:")]
+    if len(heads) != 1 or not ends:
+        sys.exit(f"error: {md} holds an unmarked Concord block install.sh cannot delimit; wrap it in the markers by hand (left untouched)")
+    new = old[:heads[0]] + block + old[ends[0] + 1:]
+elif (nb, ne) == (0, 0):
     new = old + block
 elif (nb, ne) == (1, 1) and old.index(B) < old.index(E):
     new = old[:old.index(B)] + block + old[old.index(E) + 1:]
