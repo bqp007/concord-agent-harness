@@ -142,6 +142,9 @@ TIER_NAME = {1: "low", 2: "medium", 3: "high"}
 REVIEWER_RANK = {"reviewer-opus48": 2, "reviewer-opus55": 3}
 TIER_REVIEWER = {"low": "a flash review (concord.py --review)", "medium": "concord:reviewer-opus55",
                  "high": "concord:reviewer-opus55"}
+APPROVE_ONLY = ("APPROVE-ONLY REVIEW: this change is low tier. Report only BLOCKER or HIGH findings, each with a "
+                "reproduction. Report no MEDIUM or NOTE findings. None found: findings [] and verdict CLEAN, which "
+                "approves the change.")
 RISK_FLOOR_LINE = re.compile(r"^\s*(?:[-*]\s+)?risk floor\s+(\w+)\s*:\s*(.*)$", re.I)  # repo-notes floor line
 # Provider refusals in the executor log: (log text, report label, what to do). Not executor failures:
 # a FAIL with one of these is recorded with --cause PROVIDER and never counts as an attempt.
@@ -998,7 +1001,7 @@ def pick_floor(floors, files):
     """(tier, path, pattern) of the highest floor a non-test file matches (ties: first file, line, pattern)."""
     best, best_rank = (None, None, None), 0
     for path in files:
-        if not isinstance(path, str) or not path or TEST_PATH.search(path):
+        if not isinstance(path, str) or not path or LIGHT_TEST_PATH.search(path):
             continue
         for tier, pats in floors:
             for pat in pats:
@@ -3421,11 +3424,12 @@ def current_phase_text(meta, run_dir):
     return ""
 
 
-def process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text):
+def process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, approve_only=False):
     """Parse a model's (or a file's) answer into the structured review, ground it against diff_text (None skips the
     filter, e.g. PR reviews), append the findings to the ledger and render the report. The report is rendered before
-    the ledger is saved and the ledger is saved last: on a parse failure nothing is written (C10). Returns a dict
-    with ok/errors/findings/verdict/report/json/counts/downgraded."""
+    the ledger is saved and the ledger is saved last: on a parse failure nothing is written (C10). An approve-only
+    (low-tier) review keeps only BLOCKER and HIGH. Returns a dict with
+    ok/errors/findings/verdict/report/json/counts/downgraded."""
     parsed, errors = parse_review_json(raw_text)
     if parsed is None:
         return {"ok": False, "errors": errors, "verdict": "UNPARSED",
@@ -3436,6 +3440,8 @@ def process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text):
     downgraded = {"outside_diff": 0, "todo": 0, "delete_only": 0}
     if diff_text is not None:
         findings, downgraded = filter_finding_dicts(findings, diff_text)
+    if approve_only:
+        findings = [f for f in findings if f.get("severity") in ("BLOCKER", "HIGH")]
     ledger = load_ledger(root, ledger_key(meta))
     findings = ledger_add(ledger, findings, reviewer, run_id)
     verdict = review_verdict(findings)
@@ -3671,6 +3677,8 @@ def cmd_review_record(args):
     refused (exit 2) without touching meta or the ledger."""
     if not args.reviewer or not args.file:
         die("--review-record needs --reviewer NAME and --file PATH")
+    if args.tokens is not None and not re.fullmatch(r"[0-9]{1,12}", args.tokens.strip()):
+        die("--tokens with --review-record takes a number", code=2)
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
     run_dir = find_run(root, args.review_record, want="reported")
@@ -3682,7 +3690,8 @@ def cmd_review_record(args):
         files = review_files(repo, meta)
         if files:                             # no surviving files = no diff to anchor to: keep findings as written
             diff_text = review_diff(repo, run_dir, meta, files, base=run_diff_base(repo, meta))
-    result = process_review(text, meta, root, repo, args.reviewer, run_dir.name, diff_text)
+    approve_only = meta.get("kind") != "pr-review" and meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"]
+    result = process_review(text, meta, root, repo, args.reviewer, run_dir.name, diff_text, approve_only)
     if not result["ok"]:
         print(f"delegate: review not recorded: {'; '.join(result['errors'])}", file=sys.stderr)
         return 2
@@ -3700,6 +3709,8 @@ def cmd_review_record(args):
              "blockers": counts["blockers"], "highs": counts["highs"], "mediums": counts["mediums"],
              "report": str(report), "downgraded": result["downgraded"],
              "finding_ids": [f.get("id") for f in result["findings"]], "retried": False}
+    if args.tokens is not None:
+        entry["tokens"] = int(args.tokens)
     if meta.get("kind") == "pr-review":                   # a PR review is reviewed at its fetched head
         pf, phead = meta.get("files") or [], meta.get("head")
         if pf and phead and result["verdict"] in ("CLEAN", "FIX", "BLOCK"):
@@ -3755,7 +3766,8 @@ def refusal_report(run_dir, result, refusals):
 
 
 def run_model_review(args, repo, conf, res, executor, model, binary, task, run_dir, meta, meta_path, names,
-                     dry_line, result_line, entry_extra=None, set_meta_review=False, diff_text=None, cover=None):
+                     dry_line, result_line, entry_extra=None, set_meta_review=False, diff_text=None, cover=None,
+                     approve_only=False):
     """Run a cheap review model read-only on `task`, parse its REVIEW-JSON answer, store the dispatcher verdict on `meta`
     and print the review. One retry when the answer does not parse (never after a timeout, rc 124): the command is
     rebuilt from build_command with the task extended, and the retry output goes to output-retry.log (C3/C21).
@@ -3774,7 +3786,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     pre = snapshot(repo)
     rc, secs = run_process(cmd, env, repo, run_dir / "output.log", timeout_s)
     out = ANSI.sub("", (run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
-    result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text)
+    result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
     if not result["ok"]:
         refusals = review_refusals(tail(run_dir / "output.log", 60))
         if refusals:
@@ -3789,7 +3801,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         log = run_dir / f"output-transport{transport_retries}.log"
         rc, secs = run_process(cmd, env, repo, log, timeout_s)
         out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
-        result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text)
+        result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
         if not result["ok"]:
             refusals = review_refusals(tail(log, 60))
             if refusals:
@@ -3805,7 +3817,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         (run_dir / "prompt-retry.txt").write_text(combined)            # the prompt artifact of the retry
         rc, secs = run_process(cmd, env, repo, run_dir / "output-retry.log", timeout_s)
         out = ANSI.sub("", (run_dir / "output-retry.log").read_bytes().decode("utf-8", "replace"))
-        result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text)
+        result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
         if not result["ok"]:
             refusals = review_refusals(tail(run_dir / "output-retry.log", 60))
             if refusals:
@@ -3824,12 +3836,15 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
                           "verdict": verdict, "blockers": counts["blockers"]}
     # D2: a model review is recorded under the model that ran (its models.conf name when neither --model nor --via
     # changed the model, else the model id).
+    usage = opencode_usage(run_dir.name) if executor == "opencode" else None
     entry = {"reviewer": reviewer, "name": res["name"], "model": model, "billing": billing(executor, model),
              "verdict": verdict,
              "blockers": counts["blockers"], "highs": counts["highs"], "mediums": counts["mediums"],
              "report": str(run_dir / "report.md"), "downgraded": result["downgraded"],
              "finding_ids": [f.get("id") for f in result["findings"]], "retried": retried,
              "transport_retries": transport_retries}
+    if usage and isinstance(usage.get("total"), int):
+        entry["tokens"] = usage["total"]
     if entry_extra:
         entry.update(entry_extra)
     if cover and verdict == "CLEAN":          # a clean review covers its content for later reuse
@@ -3846,7 +3861,6 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     if changed or created or deleted:
         print(f"WARNING: review run touched files: changed={changed} created={created} deleted={deleted}")
     print(result["report"].strip())
-    usage = opencode_usage(run_dir.name) if executor == "opencode" else None
     if usage:
         print(usage_line(usage, model))
     print("note: confirm every BLOCKER and HIGH against the diff before failing the phase; a cheap reviewer can be wrong")
@@ -3876,7 +3890,8 @@ def cmd_review(args, target, conf):
         pr_cap_exit(files, parts, len(raw_diff), subject=f"diff of {run_dir.name}")
     rev_dir = new_run_dir(root, res["name"], meta.get("phase") or 0, prefix="review-")
     diff_text = review_diff(repo, run_dir, meta, files, base=base)
-    task = header + f"\nDiff:\n```\n{diff_text}```\n"      # what review_context builds with with_diff=True
+    approve_only = meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"]
+    task = ((APPROVE_ONLY + "\n\n") if approve_only else "") + header + f"\nDiff:\n```\n{diff_text}```\n"
     print_floor_note(repo, meta)
     return run_model_review(
         args, repo, conf, res, executor, model, binary, task, rev_dir, meta, meta_path, names,
@@ -3886,7 +3901,8 @@ def cmd_review(args, target, conf):
         result_line=lambda d: (f"REVIEW {d['run']} of {run_dir.name}: {d['name']} -> {d['executor']} {d['model']}  "
                                f"(exit {d['rc']}, {d['secs']}s, checklists {', '.join(names)}, verdict {d['verdict']}, "
                                f"blockers {d['blockers']}{', retried' if d.get('retried') else ''})"),
-        set_meta_review=True, diff_text=diff_text, cover=(blob_shas(repo, files), reviewer_rank(res["name"])))
+        set_meta_review=True, diff_text=diff_text, cover=(blob_shas(repo, files), reviewer_rank(res["name"])),
+        approve_only=approve_only)
 
 
 # ---------- --review-pr: review an open GitHub PR at its head (delegate.md §6) ----------

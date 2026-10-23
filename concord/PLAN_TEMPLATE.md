@@ -45,8 +45,8 @@ ETA: 30 min (critical path), lands at <hh:mm> local
 
 <!--
 - Passes and their diagram: `/concord:plan-then-delegate` steps 3 and 5.
-- Risk (default medium) picks the reviewer: low = flash, else concord:reviewer-opus55. High: untrusted input, scores
-  or thresholds, security, money, data deletion or concurrency.
+- Risk (default medium) picks the reviewer: low = approve-only flash, else concord:reviewer-opus55. High: untrusted
+  input, scores or thresholds, security, money, data deletion or concurrency.
 - Files: every changed file, exact paths, comma-separated; OpenCode refuses edits outside them.
 - Notes: the dispatcher inlines each pointer's current code into the executor's task, resolving functions by name, as
   line numbers drift between passes.
