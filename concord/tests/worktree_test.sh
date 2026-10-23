@@ -1,5 +1,5 @@
 #!/bin/bash
-# Worktree regression (43 checks, ~20 s, no network, fake qwen executor): wt.py new/list/done, concord.py
+# Worktree regression (49 checks, ~20 s, no network, fake qwen executor): wt.py new/list/done/fork/join, concord.py
 # per-checkout locks, per-checkout "last", main-checkout snapshot ignoring nested worktrees, done refusals,
 # plan archive on done, OVERLAP and DRIFT lines in `wt.py list`.
 # Run: bash ~/.claude/concord/tests/worktree_test.sh   (exit 0 = all passed; temp repo under $TMPDIR, removed).
@@ -160,5 +160,33 @@ $WT done T1 --repo "$M" > "$T/d12.txt" 2>&1 || { bad "second T1 done"; cat "$T/d
 SECOND=$(ls "$M/.git/concord/plans/T1/" | grep -x 'PLAN_T\.[0-9]\{8\}-[0-9]\{6\}\.md' | head -1)
 cmp -s "$T/orig/PLAN_T.md" "$M/.git/concord/plans/T1/PLAN_T.md" && [ -n "$SECOND" ] && grep -q "second round" "$M/.git/concord/plans/T1/$SECOND" \
   && ok "first archive intact, second plan saved as $SECOND" || { bad "archive overwrite"; ls -la "$M/.git/concord/plans/T1/"; }
+echo "== fork and join: a phase's own worktree holding the ticket's uncommitted work"
+$WT new T8 --repo "$M" --no-fetch --base main --link data > /dev/null 2>&1; W8="$M/.claude/worktrees/T8"
+printf 'x = 2\n' > "$W8/a.py"; printf 'n = 1\n' > "$W8/new.py"; printf '# Plan T8\n' > "$W8/PLAN_T8.md"
+st8(){ git -C "$W8" status --porcelain -uall; git -C "$W8" rev-parse HEAD; git -C "$W8" ls-files -s; }
+B8=$(st8)
+$WT fork T8 2 --repo "$W8" > "$T/f1.txt" 2>&1; RF=$?; F8="$M/.claude/worktrees/T8-p2"
+[ $RF -eq 0 ] && grep -qF "$F8" "$T/f1.txt" && [ "$(cat "$F8/a.py" 2>/dev/null)" = "x = 2" ] && [ -f "$F8/new.py" ] \
+  && [ -f "$F8/PLAN_T8.md" ] && [ -L "$F8/data" ] && ok "fork holds the tracked edit, the untracked file, the plan and the links" \
+  || { bad "fork rc=$RF"; cat "$T/f1.txt"; }
+[ "$(st8)" = "$B8" ] && ok "fork leaves the ticket's HEAD, index and status alone" || bad "fork changed the ticket worktree"
+$WT fork T8 2 --repo "$W8" > "$T/f2.txt" 2>&1; RF2=$?
+[ $RF2 -eq 2 ] && grep -q "exists" "$T/f2.txt" && ok "a second fork of the same phase exits 2" || { bad "second fork rc=$RF2"; cat "$T/f2.txt"; }
+printf 'x = 3\n' > "$F8/a.py"; printf 'm = 1\n' > "$F8/made.py"
+$WT join T8 2 --repo "$W8" > "$T/j1.txt" 2>&1; RJ=$?
+[ $RJ -eq 0 ] && [ "$(cat "$W8/a.py")" = "x = 3" ] && [ "$(cat "$W8/made.py" 2>/dev/null)" = "m = 1" ] && [ "$(cat "$W8/new.py")" = "n = 1" ] \
+  && [ ! -e "$F8" ] && [ -f "$M/data/blob" ] && ok "join applies the phase's changes and removes the fork (link target kept)" \
+  || { bad "join rc=$RJ"; cat "$T/j1.txt"; }
+$WT fork T8 3 --repo "$W8" > /dev/null 2>&1; F9="$M/.claude/worktrees/T8-p3"
+[ -d "$F9" ] && printf 'x = 4\n' > "$F9/a.py"; printf 'x = 5\n' > "$W8/a.py"
+$WT join T8 3 --repo "$W8" > "$T/j2.txt" 2>&1; RJ2=$?
+[ $RJ2 -eq 2 ] && [ -d "$F9" ] && [ "$(cat "$W8/a.py")" = "x = 5" ] && grep -q "a.py" "$T/j2.txt" \
+  && ok "a conflicting ticket edit: join exits 2, names a.py, keeps the fork" || { bad "conflict join rc=$RJ2"; cat "$T/j2.txt"; }
+mkdir -p "$W8/sub"; printf 's\n' > "$W8/sub/s.txt"; F10="$M/.claude/worktrees/T8-p4"
+( cd "$W8/sub" && $WT fork T8 4 > /dev/null 2>&1 ); FA=$(cat "$F10/a.py" 2>/dev/null); [ -d "$F10" ] && printf 't\n' > "$F10/top2.txt"
+( cd "$W8/sub" && $WT join T8 4 > "$T/j3.txt" 2>&1 ); RJ3=$?
+[ "$FA" = "x = 5" ] && [ -f "$W8/top2.txt" ] && [ ! -e "$F10" ] \
+  && ok "fork and join from a subdirectory work on the whole checkout" || { bad "subdir join rc=$RJ3"; cat "$T/j3.txt"; }
+git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1; $WT done T8 --repo "$M" --force > /dev/null 2>&1
 [ "$(git -C "$M" worktree list --porcelain | grep -c 'worktrees/T')" = 0 ] && ok "worktree list clean" || bad "worktrees left"
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

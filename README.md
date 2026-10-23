@@ -34,7 +34,7 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 
 1. **Plan.** In Claude Code, `/concord:plan-then-delegate <task>`. The planner reads the code cheaply and writes a one-page `PLAN_<ticket>.md`: what done means, how it ships, the open questions, and per phase the executor, a risk level, exact files, steps and acceptance commands. `concord.py --lint` checks each delegated phase once, with zero-token rules and then a cheap model's questions. The planner shows you the phases and the open questions, then stops until you approve.
 2. **Tests first.** The planner writes tests that fail on the current code. The dispatcher refuses to start a delegated phase whose acceptance already passes.
-3. **Delegate.** The planner writes changes of up to about 60 lines itself; `concord.py free-deepseek-flash <phase>` runs a bulky phase on a cheap model, free tier first. On OpenCode, edits outside the phase's `Files:` are refused by the harness itself.
+3. **Delegate.** The planner writes changes of up to about 60 lines itself; `concord.py free-deepseek-flash <phase>` runs a bulky phase on a cheap model, free tier first. On OpenCode, edits outside the phase's `Files:` are refused by the harness itself. Phases run in passes, not one after another: the first pass starts them all at once at rough quality, and each later pass fixes only the largest gaps the last check found.
 4. **Check and review.** The dispatcher re-runs the acceptance commands and writes an evidence report: changes in and out of scope, the red run, acceptance after the run. The planner reads its blocking lines, re-runs the acceptance commands and reads the diff. An independent reviewer then reads the change once at its risk tier, a cheap model for low risk and Opus 5.5 above it; a ticket that ships by pull request is reviewed at the PR gate. Confirmed findings are fixed in place and re-reviewed once as a delta. A review already done at the same or a higher tier on unchanged files is reused, not repeated.
 5. **Record.** Every FAIL carries a cause (EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER, BLOCKED). Three executor failures stop a phase until you decide. Every run and verdict goes to `~/.claude/concord/runs.jsonl`, and review findings to a ledger that later reviewers read.
 6. **Commit.** You review the diff and commit. Concord never commits or pushes.
@@ -46,7 +46,7 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 ./install.sh --dry-run   # shows every copy, keep and backup; writes nothing
-./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its seventeen suites
+./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its nineteen suites
 ```
 
 Then, in Claude Code, add the plugin that carries the commands and agents:
@@ -78,7 +78,7 @@ python3 ~/.claude/concord/wt.py new <TICKET>     # one git worktree per ticket
 python3 ~/.claude/concord/concord.py --pr-status <PR>   # REVIEWED once the PR's current head has its review
 ```
 
-Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown model; 5 billing guard; 6 acceptance already green (red run); 7 PASS refused because acceptance files changed; 8 attempt cap; 124 timeout. `concord.py --help` lists every command.
+Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown model; 5 billing guard; 6 acceptance already green (red run); 7 PASS refused because acceptance files changed; 8 attempt cap; 9 a provider refused a review (nothing recorded); 124 timeout. `concord.py --help` lists every command.
 
 ## Components
 
@@ -90,7 +90,7 @@ Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown m
 | `concord/PLAN_TEMPLATE.md` | `~/.claude/concord/` | the plan format |
 | `concord/REVIEW.md` | `~/.claude/concord/` | review checklists: generic, Python, C++, Kotlin, Swift, security, ML, tests |
 | `concord/*.conf` | `~/.claude/concord/` (kept if present) | model registry and billing routes, harness settings, worktree links |
-| `concord/tests/` | `~/.claude/concord/tests/` | seventeen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
+| `concord/tests/` | `~/.claude/concord/tests/` | nineteen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
 | `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` and the implementer and reviewer agents; also four hook rules (`install.sh --repo`), the rules file and a settings snippet to merge by hand |
 | `scripts/demo.sh`, `examples/` | nowhere | the credential-free demo and its plan |
 | `tests/` | nowhere | the repository's own checks: layout, budgets, install, docs, demo |

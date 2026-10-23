@@ -311,7 +311,7 @@ rm -f "$T/calls"; review "$RID"; RC=$?; RV=$(rv); RVD="$R/.git/concord/$RV"
 [ "$(mj "$RVD/review.json" 'm["findings"][0]["id"] + "," + m["findings"][0]["severity"]')" = "F1,HIGH" ] \
   && [ "$(mj "$RUN/meta.json" '(m["reviews"][-1]["verdict"], m["reviews"][-1]["highs"], m["reviews"][-1]["mediums"], m["reviews"][-1]["finding_ids"], m["reviews"][-1]["retried"])')" = "('FIX', 1, 0, ['F1', 'F2'], False)" ] \
   && ok "review.json written; entry has verdict, highs, mediums, finding_ids, retried" || bad "entry: $(mj "$RUN/meta.json" 'm["reviews"][-1]')"
-[ "$(lj PLAN_T '[(f["id"], f["status"], f["reviewer"]) for f in m["findings"]]')" = "[('F1', 'open', 'deepseek-flash'), ('F2', 'note', 'deepseek-flash')]" ] \
+[ "$(lj PLAN_T '[(f["id"], f["status"], f["reviewer"]) for f in m["findings"]]')" = "[('F1', 'open', 'fake/m'), ('F2', 'note', 'fake/m')]" ] \
   && ok "ledger PLAN_T.json holds F1 open and F2 note" || bad "ledger: $(lj PLAN_T 'm')"
 has "verdict FIX" && ! has ", retried" && ok "result line unchanged in shape, no retry flag" || bad "result line: $(grep '^REVIEW' "$T/out.txt")"
 

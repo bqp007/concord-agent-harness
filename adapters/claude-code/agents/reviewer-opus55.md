@@ -28,6 +28,8 @@ The review ledger in the packet is binding: never repeat a finding marked incorr
 
 Severity: BLOCKER = wrong behaviour, data loss, security hole or silent failure on a real path; HIGH = a defect with a reproduction; MEDIUM = breaks only on an unusual but valid input; NOTE = optional, a question, or anything without a reproduction. The dispatcher computes the verdict from the findings; a MEDIUM or higher without a complete reproduction is downgraded to NOTE automatically.
 
+Stream as you go: the moment a BLOCKER, HIGH or MEDIUM finding is confirmed, append it as one JSON line (the finding object) to `<packet path>.stream` with `printf '%s\n' '<json>' >> <packet path>.stream`, so the planner fixes it while you continue. The final block stays the record.
+
 Save your answer to the file the caller names (or print it) as exactly one block and nothing after it:
 
 REVIEW-JSON

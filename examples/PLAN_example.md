@@ -22,7 +22,16 @@ Risk: low
 Files: cart.py
 Steps:
 1. Multiply each item's price by its qty inside `total`.
+Notes:
+- cart.py:total - sums prices, ignores qty
 Decisions: an empty list still totals `0`.
 Acceptance:
 - `python3 tests/check_cart.py`
 Out of scope: any file other than `cart.py`; do not edit the test.
+
+## Passes
+One pass: Phase 2 starts as soon as Phase 1's test exists.
+```text
+Phase 1  planner              5 min ──> Phase 2  free-deepseek-flash  10 min
+```
+ETA: 15 min (critical path); started at 10:00, it lands at 10:15.

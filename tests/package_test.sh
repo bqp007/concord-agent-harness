@@ -82,7 +82,7 @@ s_layout() { local p old
   check layout/old-name "git grep -n -I -F --untracked -e '$old' -- .; [ \$? = 1 ]"; }
 
 s_budgets() { local spec f
-  for spec in README.md:220 install.sh:90 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
+  for spec in README.md:220 install.sh:92 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
       $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:200 tests/demo_test.sh:120 \
       $A/settings.snippet.json:12 $K/repo-notes/README.md:15; do
     local f=${spec%%:*} n=${spec##*:} name; name=$(basename "$f"); [ "$f" = $K/repo-notes/README.md ] && name=repo-notes-README.md
@@ -90,8 +90,8 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 5754 ] || { wc -l $K/concord.py; false; }"
-  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 464 ] || { wc -l $K/wt.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6035 ] || { wc -l $K/concord.py; false; }"
+  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
   check budgets/static_checks "grep -q '^static_checks = yes' $K/executors.conf"
@@ -159,6 +159,8 @@ s_docs() { local h f
   check docs/lint-count "counts_ok \$(sed -n '/^def acceptance_lint(/,/^def /p' $K/concord.py | grep -c 'out\.append(') defects docs/WORKFLOW.md"
   for f in docs/figures/*.svg; do check "docs/figure-$(basename "$f")" "grep -qF '$(basename "$f")' README.md docs/*.md"; done
   check docs/no-todo "! grep -lE 'TODO|TBD|XXX' README.md docs/*.md $A/CLAUDE.md install.sh CONTRIBUTING.md"
+  check docs/review-stream "grep -qF '.stream' $A/agents/reviewer-opus55.md && grep -qF '.stream' $A/commands/delegate.md && grep -qF 'wt.py fork' $A/commands/delegate.md"
+  check docs/acceptance-only "grep -qiF 'only the phase' $K/CONTRACT.md && grep -qiF 'never the full suites' $K/CONTRACT.md"
   check docs/claude-md "grep -q '~/.claude/concord/concord.py' $A/CLAUDE.md && grep -q deepseek-flash $A/CLAUDE.md"
   check docs/plugin-install "grep -qF '/plugin install concord@concord' README.md && grep -qF '/plugin marketplace add' docs/SETUP.md && grep -qF '/concord:plan-then-delegate' README.md"
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).

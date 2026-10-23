@@ -5,6 +5,8 @@ Usage:
   wt.py new TICKET [--repo DIR] [--base REF] [--branch NAME] [--link PATH ...] [--no-fetch]
   wt.py list [--repo DIR]
   wt.py done TICKET [--repo DIR] [--force]
+  wt.py fork TICKET N [--repo DIR]
+  wt.py join TICKET N [--repo DIR]
 
 new   creates <main>/.claude/worktrees/<TICKET> on branch NAME (default feature/<TICKET>; an existing local
       branch is checked out instead of created), starting from --base (default: <repo>.base in
@@ -20,6 +22,13 @@ done  removes a finished ticket's worktree. First its PLAN_*.md files are archiv
       output and wt.py's own copies would be lost (listed with sizes), or (c) this session's sandbox
       write-protects files inside (Claude Code protects .claude/settings*.json of a worktree it entered:
       run `done` unsandboxed then). --force skips (a) and (b). Branches and commits are never deleted.
+fork  snapshots DIR's working state (tracked and untracked, not ignored; DIR's HEAD, index and branch stay
+      untouched) in a temporary commit and checks it out detached at
+      <main>/.claude/worktrees/<TICKET>-p<N>, then copies DIR's top-level PLAN_*.md and links the folders
+      `new` linked (plus the configured ones). Prints the path; exits 2 when it exists.
+join  applies the fork's changes (binary diff of its working tree, untracked included, against its HEAD) to
+      DIR, then unlinks its links and runs `git worktree remove --force`. A patch that does not apply exits 2
+      naming the files and keeps the fork. Prints the files applied.
 """
 import argparse
 import os
@@ -27,6 +36,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -403,6 +413,127 @@ def cmd_done(args):
     return 0
 
 
+def git_bytes(dirpath, *args, env=None):
+    """Run git and return stdout as bytes; refuse (exit 2) with git's stderr on failure."""
+    res = subprocess.run(["git", "-C", str(dirpath), *args], capture_output=True, env=env)
+    if res.returncode != 0:
+        die(f"git {' '.join(args)} failed: {res.stderr.decode(errors='replace').strip()}")
+    return res.stdout
+
+
+def snapshot_commit(dirpath):
+    """Commit dirpath's working state (tracked and untracked, not ignored) with a temporary index and return
+    the commit id. dirpath's HEAD, real index and branch are never touched."""
+    tmp = Path(tempfile.mkdtemp(prefix="wt-fork-index-"))
+    try:
+        env = dict(os.environ, GIT_INDEX_FILE=str(tmp / "index"))
+        git_bytes(dirpath, "read-tree", "HEAD", env=env)
+        git_bytes(dirpath, "add", "-A", "--", ".", env=env)
+        tree = git_bytes(dirpath, "write-tree", env=env).decode().strip()
+        return git_bytes(dirpath, "commit-tree", tree, "-p", "HEAD", "-m",
+                         f"wt fork snapshot {datetime.now():%Y-%m-%d %H:%M:%S}", env=env).decode().strip()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def marked_links(dirpath):
+    """The links `new` made in this checkout (its MARK file), minus the .claude copies and non-links."""
+    gitdir = Path(git(dirpath, "rev-parse", "--path-format=absolute", "--git-dir"))
+    mark = gitdir / MARK
+    if not mark.is_file():
+        return []
+    out = []
+    for rel in mark.read_text(errors="replace").splitlines():
+        rel = rel.strip().strip("/")
+        if rel and not rel.startswith(".claude/") and (dirpath / rel).is_symlink():
+            out.append(rel)
+    return out
+
+
+def cmd_fork(args):
+    repo = main_checkout(args.repo or os.getcwd())
+    conf = load_conf()
+    dirpath = Path(git(args.repo or os.getcwd(), "rev-parse", "--show-toplevel").strip())   # the whole checkout
+    ticket = safe_name(args.ticket)
+    wt = repo / ".claude" / "worktrees" / f"{ticket}-p{args.n}"
+    if wt.exists():
+        die(f"{wt} exists; run `wt.py join {ticket} {args.n}` first or remove it")
+    sha = snapshot_commit(dirpath)
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    res = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), sha],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        die(f"git worktree add --detach {wt} failed: {res.stderr.strip()}")
+    links = list(dict.fromkeys(conf.get(f"{repo.name}.links", "").split() + marked_links(dirpath)))
+    made, skipped = [], []
+    for rel in links:
+        rel = rel.strip("/")
+        src, dst = repo / rel, wt / rel
+        if not src.exists():
+            skipped.append(f"{rel} (absent in the main checkout)")
+            continue
+        if tracked_under(repo, rel):
+            skipped.append(f"{rel} (holds tracked files; link only fully untracked folders)")
+            continue
+        if dst.exists() or dst.is_symlink():
+            skipped.append(f"{rel} (already present in the worktree)")
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(src, dst)
+        made.append(rel)
+    plans = [p.name for p in sorted(dirpath.glob(PLAN_GLOB)) if p.is_file() and not p.is_symlink()]
+    for name in plans:
+        shutil.copy2(dirpath / name, wt / name)
+    gitdir = Path(git(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
+    (gitdir / MARK).write_text("\n".join(made) + "\n")
+    exclude_add(repo, [".claude/worktrees/"] + link_patterns(repo, made))
+    print(f"{wt}")
+    if skipped:
+        print(f"skipped: {'; '.join(skipped)}", file=sys.stderr)
+    return 0
+
+
+def fork_patch(fork):
+    """(patch bytes, file names) for the fork's working tree against its HEAD, untracked files included."""
+    tmp = Path(tempfile.mkdtemp(prefix="wt-join-index-"))
+    try:
+        env = dict(os.environ, GIT_INDEX_FILE=str(tmp / "index"))
+        git_bytes(fork, "read-tree", "HEAD", env=env)
+        git_bytes(fork, "add", "-A", "--", ".", env=env)
+        names = [p.decode(errors="replace") for p in
+                 git_bytes(fork, "diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD",
+                           env=env).split(b"\0") if p]
+        patch = git_bytes(fork, "diff", "--cached", "--binary", "--no-renames", "HEAD", env=env)
+        return patch, names
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cmd_join(args):
+    repo = main_checkout(args.repo or os.getcwd())
+    dirpath = Path(git(args.repo or os.getcwd(), "rev-parse", "--show-toplevel").strip())   # the whole checkout
+    ticket = safe_name(args.ticket)
+    fork = repo / ".claude" / "worktrees" / f"{ticket}-p{args.n}"
+    if not fork.exists():
+        die(f"no fork {fork}")
+    patch, names = fork_patch(fork)
+    if patch.strip():
+        res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
+                             capture_output=True)
+        if res.returncode != 0:
+            die(f"{dirpath}: the fork's patch does not apply; fork kept at {fork}; files: "
+                f"{', '.join(names) or 'none'}\n  {res.stderr.decode(errors='replace').strip()}")
+    for rel in marked_links(fork):
+        (fork / rel).unlink()
+    res = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(fork)],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        die(f"git worktree remove --force {fork} failed: {res.stderr.strip()}")
+    git(repo, "worktree", "prune", check=False)
+    print(f"applied: {', '.join(names) or 'nothing'}")
+    return 0
+
+
 DISPOSABLE = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "build", ".DS_Store", ".claude"}
 
 
@@ -456,8 +587,10 @@ def main():
     n.add_argument("--branch"); n.add_argument("--link", action="append"); n.add_argument("--no-fetch", action="store_true")
     l = sub.add_parser("list"); l.add_argument("--repo")
     d = sub.add_parser("done"); d.add_argument("ticket"); d.add_argument("--repo"); d.add_argument("--force", action="store_true")
+    f = sub.add_parser("fork"); f.add_argument("ticket"); f.add_argument("n", type=int); f.add_argument("--repo")
+    j = sub.add_parser("join"); j.add_argument("ticket"); j.add_argument("n", type=int); j.add_argument("--repo")
     args = ap.parse_args()
-    return {"new": cmd_new, "list": cmd_list, "done": cmd_done}[args.cmd](args)
+    return {"new": cmd_new, "list": cmd_list, "done": cmd_done, "fork": cmd_fork, "join": cmd_join}[args.cmd](args)
 
 
 if __name__ == "__main__":
