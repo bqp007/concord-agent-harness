@@ -110,7 +110,7 @@ opus "$A" reviewer-opus48; verdict "$A" PASS; RC=$?
 [ $RC -eq 0 ] && ok "medium phase on a.py + reviewer-opus48: PASS (unknown-tier and empty floor lines ignored)" \
   || { bad "a.py rc=$RC"; tail -2 "$T/out.txt"; }
 run 3 "echo '# r' >> docs/x.md"; L=$(rid); flash "$L"; verdict "$L" PASS; RC=$?
-[ $RC -eq 9 ] && has "reviewer-opus48" && has "docs/x.md" && ok "low phase on a medium-floor path + flash: refused, needs reviewer-opus48" \
+[ $RC -eq 9 ] && has "reviewer-opus55" && has "docs/x.md" && ok "low phase on a medium-floor path + flash: refused, needs reviewer-opus55" \
   || { bad "medium floor rc=$RC"; tail -2 "$T/out.txt"; }
 opus "$L" reviewer-opus48; verdict "$L" PASS; RC=$?
 [ $RC -eq 0 ] && ok "low phase on a medium-floor path + reviewer-opus48: PASS" || { bad "medium floor + opus48 rc=$RC"; tail -2 "$T/out.txt"; }

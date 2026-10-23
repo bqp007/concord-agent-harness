@@ -15,7 +15,7 @@
 | Phase | Executor | Risk | Runs as | Billed to | Review | Why this executor |
 |---|---|---|---|---|---|---|
 | 1 | planner | - | this session | Claude subscription | flash (tests checklist) | writes the failing tests (never the implementer) |
-| 2 | deepseek-flash | medium | OpenCode, opencode-go/deepseek-v4.1-flash | OpenCode Go allowance | flash loop + Opus 4.8 (subscription) | well-specified change, discriminating tests exist |
+| 2 | deepseek-flash | medium | OpenCode, opencode-go/deepseek-v4.1-flash | OpenCode Go allowance | flash loop + Opus 5.5 (subscription) | well-specified change, discriminating tests exist |
 | 3 | deepseek-flash | high | OpenCode, opencode-go/deepseek-v4.1-flash | OpenCode Go allowance | flash loop + Opus 5.5 (subscription) | multi-file change, split small with strong tests (always flash) |
 
 ## Open questions
@@ -112,9 +112,9 @@ Rules for the planner (evidence: docs/WORKFLOW.md in the Concord repository):
   default); the dispatcher checks this and refuses to spend credits when it does not. Behaviour-preserving
   phases set `Baseline: pass`; test-writing phases set `Baseline: skip`.
 - Risk sets how hard the verifier checks: low = acceptance + diff + flash review loop; medium = + the wider test
-  suite, a short input probe (empty, very long, special characters, combinations) and one Opus 4.8 review round
-  (concord:reviewer-opus48, Claude subscription); high = + property tests written in the test phase (seeded, bounded), a
-  mutation probe and one Opus 5.5 review round (concord:reviewer-opus55). High whenever the code parses untrusted input
+  suite, a short input probe (empty, very long, special characters, combinations) and one Opus 5.5 review round
+  (concord:reviewer-opus55, Claude subscription); high = + property tests written in the test phase (seeded, bounded) and a
+  mutation probe. High whenever the code parses untrusted input
   (message text, URLs, files), sets scores or thresholds, touches security, money, data deletion or concurrency. Show the
   reviewer per phase in the Executors table ("Review" column) so the user sees the subscription spend.
 - Budget = rough upper bound on changed lines (about 2x your estimate); the report flags overruns.

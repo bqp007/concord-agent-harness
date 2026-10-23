@@ -35,7 +35,7 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 1. **Plan.** In Claude Code, `/concord:plan-then-delegate <task>`. The planner reads the code cheaply and writes `PLAN_<ticket>.md`. It opens with a one-screen map: why the change is made, which parts it touches and the phases that do the work, each linked to its parent. Below the map come the phases, with exact files, interfaces, input classes, acceptance commands, a risk level and a line budget. `concord.py --map` draws the map with each phase's live status. A zero-token lint and a cheap plan review check the plan; the planner shows you the map and the open questions, then stops until you approve.
 2. **Tests first.** The planner writes tests that fail on the current code. The dispatcher refuses to start an implementing phase whose acceptance already passes.
 3. **Delegate.** `concord.py deepseek-flash <phase>` runs the phase on a cheap model. On OpenCode, edits outside the phase's `Files:` are refused by the harness itself.
-4. **Verify.** The dispatcher re-runs the acceptance commands and writes an evidence report: changes in and out of scope, the red run, acceptance after the run, the budget. `concord.py --card` condenses it to one screen plus a verify packet, which a fresh verifier agent checks, so the planner's own context stays small. An independent reviewer reads the diff at the phase's risk tier: a cheap model for low risk, Opus 4.8 for medium, Opus 5.5 for high. A review already done at the same or a higher tier on unchanged files is reused, not repeated.
+4. **Verify.** The dispatcher re-runs the acceptance commands and writes an evidence report: changes in and out of scope, the red run, acceptance after the run, the budget. `concord.py --card` condenses it to one screen plus a verify packet, which a fresh verifier agent checks, so the planner's own context stays small. An independent reviewer reads the diff at the phase's risk tier: a cheap model for low risk, Opus 5.5 above it. A review already done at the same or a higher tier on unchanged files is reused, not repeated.
 5. **Record.** Every verdict carries a cause (EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER, BLOCKED; a PASS whose review found a case the plan never specified carries SPEC_GAP). Three executor failures stop a phase until you decide. `concord.py --stats` reports first-attempt rates, review adoption, rounds per phase and spend.
 6. **Commit.** You review the diff and commit. Concord never commits or pushes.
 
@@ -46,7 +46,7 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 ./install.sh --dry-run   # shows every copy, keep and backup; writes nothing
-./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its seventeen suites
+./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its eighteen suites
 ```
 
 Then, in Claude Code, add the plugin that carries the commands and agents:
@@ -90,7 +90,7 @@ Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown m
 | `concord/PLAN_TEMPLATE.md` | `~/.claude/concord/` | the plan format |
 | `concord/REVIEW.md` | `~/.claude/concord/` | review checklists: generic, Python, C++, Kotlin, Swift, security, ML, tests |
 | `concord/*.conf` | `~/.claude/concord/` (kept if present) | model registry and billing routes, harness settings, worktree links |
-| `concord/tests/` | `~/.claude/concord/tests/` | seventeen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
+| `concord/tests/` | `~/.claude/concord/tests/` | eighteen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
 | `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` and the implementer, reviewer and verifier agents; also four hook rules (`install.sh --repo`), the rules file and a settings snippet to merge by hand |
 | `scripts/demo.sh`, `examples/` | nowhere | the credential-free demo and its plan |
 | `tests/` | nowhere | the repository's own checks: layout, budgets, install, docs, demo |

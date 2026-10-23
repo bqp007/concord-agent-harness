@@ -49,7 +49,7 @@ newrepo(){ rm -rf "$R"; gitrepo "$R"; ( cd "$R" && mkdir -p tests
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 # mut FILE [ARGS]: --mutate run $MR with the mutants listed in FILE; the isolated copy goes under $T/tmp
 mut(){ TMPDIR="$T/tmp" $DP --mutate "$MR" --mutants "$1" "${@:2}" --repo "$R" > "$T/out.txt" 2>&1; }
-# PLAN_L.md: phases for --lint with a Claude executor (no model call)
+# PLAN_L.md: phases for --lint with a Claude executor (dry runs: no model call)
 lintplan(){ cat > "$R/PLAN_L.md" <<'P'
 # Plan
 ## Phase 1 - git inside a command substitution
@@ -210,7 +210,7 @@ run 'echo y >> a.py'; RC=$?
 [ $RC -eq 0 ] && has "changed in scope: a.py" && ! has "NOT RUN" && ok "the marker on the wrapped next line of the bullet -> the run proceeds" \
   || { bad "wrapped marker rc=$RC"; tail -3 "$T/out.txt"; }
 newrepo ''; lintplan
-$DP --lint 2 --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --lint 2 --plan PLAN_L.md --dry-run --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 N=$(lint | grep -ci characterization); L=$(lint | grep -i characterization)
 [ $RC -eq 0 ] && [ "$N" = 1 ] && case "$L" in *"python3 tests/test_a.py"*"(characterization)"*|*"(characterization)"*"python3 tests/test_a.py"*) true;; *) false;; esac \
   && ok "--lint: one ACCEPTANCE LINT line for the word characterization without a marker, none for the marked variants" \
@@ -328,7 +328,7 @@ fi
 if sel 10; then
 echo "== 10 --lint: git inside \$( ) gets the git diff --quiet form"
 newrepo ''; lintplan
-$DP --lint 1 --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --lint 1 --plan PLAN_L.md --dry-run --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 N=$(lint | grep -cF 'git diff --quiet HEAD --'); L=$(lint | grep -F 'git diff --quiet HEAD --')
 [ $RC -eq 0 ] && [ "$N" = 1 ] && case "$L" in *'test -z "$(git diff'*) true;; *) false;; esac \
   && ok "one ACCEPTANCE LINT line for test -z \"\$(git diff ...)\", suggesting git diff --quiet HEAD --; none for that form itself" \

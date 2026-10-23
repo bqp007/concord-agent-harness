@@ -30,7 +30,7 @@
   <rect x="330" y="350" width="300" height="100" rx="12" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
   <text x="480" y="380" text-anchor="middle" class="t">Reviewers, fresh context</text>
   <text x="480" y="405" text-anchor="middle" class="s">Flash on every phase</text>
-  <text x="480" y="427" text-anchor="middle" class="s">+ Opus 4.8 (medium risk) · + Opus 5.5 (high)</text>
+  <text x="480" y="427" text-anchor="middle" class="s">+ Opus 5.5 (medium and high risk)</text>
 
   <line x1="212" y1="190" x2="356" y2="190" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
   <text x="284" y="180" text-anchor="middle" class="l">ticket · approval</text>

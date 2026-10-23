@@ -15,7 +15,7 @@ Frontier tokens are the scarce resource. Concord spends them where judgment matt
 | Plan check before approval (`--lint`) | DeepSeek v4.1 Flash via OpenCode | high | OpenCode Go allowance |
 | Implementer | DeepSeek v4.1 Flash | high | Go allowance; pay-per-token credit (`zen-*`) only after asking |
 | Implementer for a "subtle logic" phase, or when Go and Zen are both unavailable | Claude Opus 4.8 (`concord:implementer-opus48`) | high | Claude subscription |
-| Reviewers | low risk: Flash; medium: Opus 4.8 only; high: Opus 5.5 only | high | Go allowance or subscription |
+| Reviewers | low risk: Flash; medium and high: Opus 5.5 only | high | Go allowance or subscription |
 | Approver and committer | you | | |
 
 One cheap executor does every implementing phase. A hard phase is split or its tests are tightened; it does not get a heavier model. The choice came from data: a longer phase given to another model once ran for thirty minutes chasing two defective tests and used most of a five-hour allowance window, while DeepSeek Flash was the cheapest adequate model on the boards we checked and the fastest in our runs.
@@ -64,7 +64,7 @@ python3 ~/.claude/concord/concord.py --lint 2 --plan PLAN_x.md --repo .         
 python3 ~/.claude/concord/concord.py deepseek-flash 2 --plan PLAN_x.md --repo .  # implement phase 2
 python3 ~/.claude/concord/concord.py --review last                               # cheap review (low tier)
 python3 ~/.claude/concord/concord.py --review last --packet                      # prompt for an Opus reviewer agent
-python3 ~/.claude/concord/concord.py --review-record last --reviewer concord:reviewer-opus48 --file review.txt
+python3 ~/.claude/concord/concord.py --review-record last --reviewer concord:reviewer-opus55 --file review.txt
 python3 ~/.claude/concord/concord.py --close-round last --adopt F1,F3 --wrong "F2=why" \
     --verdict-result PASS --note "..."                                             # adjudication + verdict
 python3 ~/.claude/concord/concord.py --stats                                     # rounds per phase, causes, spend
@@ -94,7 +94,7 @@ A run that exits successfully without changing a file is flagged `NO CHANGES`, t
 
 ## Review tiers and findings
 
-Review depth follows risk. Low-risk phases get a cheap review; medium-risk phases one Opus 4.8 round; high-risk phases an Opus 5.5 round plus property tests and a mutation probe (`--mutate`). A phase is high risk whenever it parses untrusted input, sets scores or thresholds, or touches security, money, data deletion or concurrency. The tiers earned their keep early: one Opus 5.5 round caught a not-a-number bug the cheap reviewer had only flagged, raised it to a blocker, and showed that the cheap reviewer's suggested fix would itself overflow on very large integers. A repository can raise the floor for sensitive paths with a `Risk floor <tier>: <globs>` line in its notes: a change to a matching non-test file then needs that tier's reviewer.
+Review depth follows risk. Low-risk phases get a cheap review; medium-risk phases one Opus 5.5 round; high-risk phases the same plus property tests and a mutation probe (`--mutate`). A phase is high risk whenever it parses untrusted input, sets scores or thresholds, or touches security, money, data deletion or concurrency. The tiers earned their keep early: one Opus 5.5 round caught a not-a-number bug the cheap reviewer had only flagged, raised it to a blocker, and showed that the cheap reviewer's suggested fix would itself overflow on very large integers. A repository can raise the floor for sensitive paths with a `Risk floor <tier>: <globs>` line in its notes: a change to a matching non-test file then needs that tier's reviewer.
 
 Reviewer output is a claim, not evidence. The dispatcher downgrades to a NOTE, with the reason, any finding located outside the diff (three lines of slack), any fix that is only a to-do marker and any fix that only deletes code. After confirming a review the planner records what happened to each finding (adopted, wrong, declined); findings carry ledger ids (F1, F2, ...) that bind later rounds, so the choice of reviewer per tier rests on data. A repeated false finding is often a harness bug rather than a model failure: a cheap reviewer once reported a "committed cache" in five rounds because the dispatcher had passed it every file a run created, caches included. Reviews now leave out generated files.
 

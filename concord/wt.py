@@ -8,11 +8,11 @@ Usage:
 
 new   creates <main>/.claude/worktrees/<TICKET> on branch NAME (default feature/<TICKET>; an existing local
       branch is checked out instead of created), starting from --base (default: <repo>.base in
-      worktrees.conf, else the remote default branch). Links the configured untracked folders from the
-      main checkout, copies hookify rules and .claude/settings.local.json, and prints the path for
-      Claude Code's EnterWorktree tool.
+      worktrees.conf, else the remote default branch (origin's, or the only remote's)). Links the
+      configured untracked folders from the main checkout, copies hookify rules and
+      .claude/settings.local.json, and prints the path for Claude Code's EnterWorktree tool.
 list  shows every worktree of the repository with size, branch, uncommitted changes and merge state.
-done  removes a finished ticket's worktree. First its untracked PLAN_*.md files are archived to
+done  removes a finished ticket's worktree. First its PLAN_*.md files are archived to
       <git-common-dir>/concord/plans/<TICKET>/ and removed from the worktree; then it unlinks the links
       wt.py made (targets untouched) and runs `git worktree remove`, which deletes the folder with its ignored
       files. Before touching anything it
@@ -76,7 +76,11 @@ def default_base(repo, conf):
     if base:
         return base
     head = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
-    return head or "HEAD"
+    if head:
+        return head
+    heads = [l for l in git(repo, "for-each-ref", "--format=%(symref:short)", "refs/remotes/",
+                            check=False).splitlines() if l.strip()]
+    return heads[0] if len(heads) == 1 else "HEAD"
 
 
 def tracked_under(repo, rel):
@@ -114,6 +118,9 @@ def cmd_new(args):
     if wt.exists():
         die(f"{wt} already exists; enter it with EnterWorktree path={wt}, or `wt.py done {ticket}` first")
     branch = args.branch or f"feature/{ticket}"
+    name = git(repo, "check-ref-format", "--branch", branch)   # option-like names refused before any other git call
+    if name != branch:
+        die(f"--branch {branch} is git's shorthand for {name}; give the branch name itself")
     if not args.no_fetch:
         res = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "origin"], capture_output=True, text=True)
         if res.returncode != 0:
@@ -121,10 +128,21 @@ def cmd_new(args):
     exists = subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]).returncode == 0
     base = args.base or default_base(repo, conf)
     wt.parent.mkdir(parents=True, exist_ok=True)
-    if exists:
-        git(repo, "worktree", "add", str(wt), branch)
-    else:
-        git(repo, "worktree", "add", "-b", branch, str(wt), base)
+    sha = git(repo, "rev-parse", "--verify",
+              f"refs/heads/{branch}^{{commit}}" if exists else f"{base}^{{commit}}")
+    if not exists:
+        git(repo, "branch", "--no-track", branch, sha)   # a branch another run just made dies here, before the add
+    add_args = ["worktree", "add", str(wt), branch]
+    res = subprocess.run(["git", "-C", str(repo), *add_args], capture_output=True, text=True)
+    if res.returncode != 0:
+        held = any(w.get("branch") == f"refs/heads/{branch}" for w in worktrees(repo))
+        if not exists and not held:   # git keeps the branch while it still points at that commit; a held one stays
+            git(repo, "update-ref", "-d", f"refs/heads/{branch}", sha, check=False)
+        try:
+            wt.rmdir()                # nothing left behind; a folder with content is kept
+        except OSError:
+            pass
+        die(f"git {' '.join(add_args)} failed: {res.stderr.strip()}")
     links = (conf.get(f"{repo.name}.links", "").split()) + list(args.link or [])
     made, skipped = [], []
     for rel in links:
@@ -153,8 +171,9 @@ def cmd_new(args):
                 skipped.append(f".claude/{f.name} (not copied: {e.strerror}; a sandbox protects it, copy it unsandboxed)")
     gitdir = Path(git(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
     (gitdir / MARK).write_text("\n".join(made + [f".claude/{c}" for c in copied]) + "\n")
-    exclude_add(repo, [".claude/worktrees/"] + link_patterns(repo, made))
-    print(f"WORKTREE {wt}\nbranch {branch} ({'existing' if exists else 'new from ' + base})\n"
+    exclude_add(repo, [".claude/worktrees/", "/PLAN_*.md"] + link_patterns(repo, made))
+    state = f"existing at {sha[:7]}" if exists else f"new from {base} at {sha[:7]}"
+    print(f"WORKTREE {wt}\nbranch {branch} ({state})\n"
           f"linked: {', '.join(made) or 'none'}\ncopied: {', '.join(copied) or 'none'}"
           + (f"\nskipped: {'; '.join(skipped)}" if skipped else "")
           + f"\nnext: EnterWorktree path={wt}")

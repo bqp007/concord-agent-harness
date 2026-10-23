@@ -1,6 +1,6 @@
 ---
 name: reviewer-opus55
-description: Independent read-only code reviewer on Claude Opus 5.5 (Claude subscription). High-risk delegated phases (the only reviewer at that tier), and high-tier PRs at the PR gate (delegate.md §6). Give it the path of a review packet (`concord.py --review <run> --packet`, or a PR packet). Answers with one REVIEW-JSON block.
+description: Independent read-only code reviewer on Claude Opus 5.5 (Claude subscription). Medium- and high-risk delegated phases (the only reviewer above low), and medium- and high-tier PRs at the PR gate (delegate.md §6). Give it the path of a review packet (`concord.py --review <run> --packet`, or a PR packet). Answers with one REVIEW-JSON block.
 tools: Read, Grep, Glob, Bash
 model: claude-opus-5-5
 effort: high

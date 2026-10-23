@@ -93,7 +93,7 @@ rm -rf "$RUNS"/20000101-*
 echo "== review tier"
 run 3 PLAN_G.md; M=$(rid); flash "$M"
 verdict "$M" PASS; RC=$?
-[ $RC -eq 9 ] && [ "$(meta "$M" verdict)" = "None" ] && grep -q "^REFUSED:" "$T/out.txt" && has "reviewer-opus48" && has "--user-approved" \
+[ $RC -eq 9 ] && [ "$(meta "$M" verdict)" = "None" ] && grep -q "^REFUSED:" "$T/out.txt" && has "reviewer-opus55" && has "--user-approved" \
   && ok "medium + flash only: --verdict PASS refused (exit 9)" || { bad "medium/flash rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --close-round "$M" --verdict-result PASS --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 9 ] && [ "$(meta "$M" verdict)" = "None" ] && ok "medium + flash only: --close-round PASS refused (exit 9)" || bad "close-round rc=$RC"
@@ -123,7 +123,7 @@ verdict "$L" PASS; RC=$?
 run 3 PLAN_G.md; X=$(rid); flash "$X"
 python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); m["risk"]=["high"]; json.dump(m, open(sys.argv[1], "w"))' "$RUNS/$X/meta.json"
 verdict "$X" PASS; RC=$?
-[ $RC -eq 9 ] && ! has "Traceback" && has "reviewer-opus48" && ok "a risk that is not a string counts as medium" \
+[ $RC -eq 9 ] && ! has "Traceback" && has "reviewer-opus55" && ok "a risk that is not a string counts as medium" \
   || { bad "list risk rc=$RC"; tail -2 "$T/out.txt"; }
 flash "$L"; verdict "$L" PASS; RC=$?
 [ $RC -eq 0 ] && ok "low + flash accepted" || { bad "low/flash rc=$RC"; tail -2 "$T/out.txt"; }
@@ -140,9 +140,9 @@ verdict "$F" PASS --force --user-approved "go" --note n2; RC=$?
 echo "== plugin names (agents are concord:<name> inside the Claude Code plugin)"
 run 3 PLAN_G.md; P=$(rid)
 $DP --review "$P" --packet --repo "$R" > "$T/out.txt" 2>&1
-has "subagent_type concord:reviewer-opus48 (medium) or concord:reviewer-opus55 (high)" && ok "the packet hint names the plugin agents" || bad "packet hint"
+has "subagent_type concord:reviewer-opus55 with prompt" && ok "the packet hint names the plugin agent" || bad "packet hint"
 verdict "$P" PASS; RC=$?
-[ $RC -eq 9 ] && has "needs concord:reviewer-opus48" && ok "the tier refusal names concord:reviewer-opus48" || bad "tier refusal name rc=$RC"
+[ $RC -eq 9 ] && has "needs concord:reviewer-opus55" && ok "the tier refusal names concord:reviewer-opus55" || bad "tier refusal name rc=$RC"
 opus "$P" concord:reviewer-opus48; verdict "$P" PASS; RC=$?
 [ $RC -eq 0 ] && [ "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["reviews"][-1]["reviewer"])' "$RUNS/$P/meta.json")" = reviewer-opus48 ] \
   && ok "concord:reviewer-opus48 meets the medium tier and is stored as reviewer-opus48" || { bad "plugin reviewer rc=$RC"; tail -2 "$T/out.txt"; }
