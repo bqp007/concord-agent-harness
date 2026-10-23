@@ -15,25 +15,26 @@ The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
 
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
-./install.sh --dry-run            # shows every copy, keep and backup; writes nothing
-./install.sh                      # installs the dispatcher, then runs Concord's nineteen test suites from the installed copy
-./install.sh --repo ~/src/myrepo  # also drops the hook rules into that repository's .claude/
+bash install.sh --dry-run            # shows every link, copy, keep and backup; writes nothing
+bash install.sh                      # the default: links the commands and agents, installs the dispatcher, then runs Concord's twenty test suites from the installed copy
+bash install.sh --plugin             # the marketplace layout instead of the links; prints the /plugin commands
+bash install.sh --repo ~/src/myrepo  # also drops the hook rules into that repository's .claude/
 ```
 
-Then add the plugin in Claude Code:
+The default (`--link`) symlinks `/concord:plan-then-delegate`, `/concord:delegate` and `/concord:rules-review` and the agents into `~/.claude`, and edits your live setup: it writes the Concord rules into `~/.claude/CLAUDE.md` between `<!-- concord:begin -->` and `<!-- concord:end -->`, and adds any missing keys to `~/.claude/settings.json`. It backs up each file it changes first and leaves everything outside the markers untouched.
+
+With `--plugin` the commands and agents come from the marketplace instead; add it in Claude Code:
 
 ```text
 /plugin marketplace add bqp007/concord-agent-harness
 /plugin install concord@concord
 ```
 
-`/plugin marketplace add` also takes the path of a local clone, so the commands and agents come from your checkout. To update, pull, run `./install.sh` again, then `claude plugin marketplace update concord` and `claude plugin update concord@concord`, and restart Claude Code.
+To update, run `git pull` then `bash install.sh`, and restart Claude Code.
 
-What `install.sh` does: copies `concord/` to `~/.claude/concord/` (or `$CLAUDE_HOME/concord/`). Before overwriting an earlier install it copies the old files to `~/.claude/concord/backup/<timestamp>-pre-install/`; backups are never pruned. Suites the new version no longer ships are then removed from `tests/` (the backup keeps them). `models.conf`, `executors.conf`, `worktrees.conf` and `repo-notes/README.md` are kept when they already exist, so your edits survive upgrades. Command and agent files that an earlier install left in `~/.claude/commands/` and `~/.claude/agents/` are listed, not removed: delete them once the plugin is installed, so each command exists once.
+What `install.sh` does: copies `concord/` to `~/.claude/concord/` (or `$CLAUDE_HOME/concord/`). Before overwriting an earlier install it copies the old files to `~/.claude/concord/backup/<timestamp>-pre-install/`; backups are never pruned. Suites the new version no longer ships are then removed from `tests/` (the backup keeps them). `models.conf`, `executors.conf`, `worktrees.conf` and `repo-notes/README.md` are kept when they already exist, so your edits survive upgrades. `--no-tests` skips the suites; exit code 2 means a usage error or a missing prerequisite.
 
-What the plugin adds: the commands `/concord:plan-then-delegate`, `/concord:delegate` and `/concord:rules-review`, and the agents `concord:implementer`, `concord:implementer-opus48` and `concord:reviewer-opus55`.
-
-What it never touches: `~/.claude/CLAUDE.md` and `~/.claude/settings.json`. Merge `adapters/claude-code/CLAUDE.md` and `adapters/claude-code/settings.snippet.json` into them by hand; both are short. `--no-tests` skips the suites; exit code 2 means a usage error or a missing prerequisite.
+Prose style: `~/.claude/concord/style.conf` sets `prose = terse` (the default) or a sentence of your own; the planner, executors and reviewers follow it.
 
 Restart Claude Code once after installing: new agent files load only at session start.
 
@@ -69,7 +70,7 @@ Reports, ledgers, red runs, scope enforcement on OpenCode, attempt caps and the 
 ```bash
 bash tests/package_test.sh                 # the repository's contract (about a minute; installs into temporary HOMEs)
 bash tests/demo_test.sh                    # the credential-free demo, end to end
-bash concord/tests/run_all.sh              # the dispatcher's nineteen suites against this checkout
+bash concord/tests/run_all.sh              # the dispatcher's twenty suites against this checkout
 bash ~/.claude/concord/tests/run_all.sh   # the same suites against the installed copy
 ```
 

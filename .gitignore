@@ -1,4 +1,7 @@
 __pycache__/
+PLAN_*.md
+!concord/PLAN_TEMPLATE.md
+!examples/PLAN_example.md
 .DS_Store
 *.html
 /paper/

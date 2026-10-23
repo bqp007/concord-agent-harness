@@ -3,5 +3,6 @@
     "claude-opus-5-5": {"autoCompactWindow": 400000},
     "claude-fable-5-1": {"autoCompactWindow": 400000}
   },
+  "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 \"$HOME/.claude/concord/concord.py\" --lessons-hook 2>/dev/null || true", "timeout": 5}]}]},
   "sandbox": {"excludedCommands": ["gh *", "git push *", "git fetch *", "git pull *", "git clone *"]}
 }

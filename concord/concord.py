@@ -83,7 +83,11 @@ HERE = Path(__file__).resolve().parent
 CONTRACT = HERE / "CONTRACT.md"
 CONF = HERE / "executors.conf"
 MODELS = HERE / "models.conf"
+STYLE = HERE / "style.conf"          # prose = terse (default) or a sentence of your own; installed with keep
 NOTES_DIR = HERE / "repo-notes"
+LESSONS = HERE / "LESSONS.md"          # live lessons: "L<n> <date> [plan|exec] text"; folded in by /concord:rules-review
+LESSONS_SEEN = HERE / "lessons-seen"   # per Claude Code session: the highest lesson id it has been shown
+LESSONS_NEXT = HERE / "lessons-next"   # the next lesson id; ids never repeat, even after the review folds lessons
 INDEX = HERE / "runs.jsonl"          # cross-repo run index (best effort; may be read-only in a sandbox)
 
 DEFAULT_BINS = {
@@ -327,6 +331,24 @@ END-REVIEW-JSON
 
 "findings": [] when there are none. "verdict": CLEAN, FIX or BLOCK (the dispatcher recomputes it from the findings).
 """
+
+# The default prose line (pinned by tests); `prose = <sentence>` in style.conf replaces it.
+PROSE_TERSE = "Write all prose tersely: exact, no hedging, no praise."
+
+
+def prose_line():
+    """The prose instruction: `prose =` from $CLAUDE_HOME/concord/style.conf, else style.conf here; `terse` or unset = the default."""
+    ch = os.environ.get("CLAUDE_HOME")
+    for path in ([Path(ch) / "concord" / "style.conf"] if ch else []) + [STYLE]:
+        for left, right in read_kv_lines(path):
+            if left == "prose":
+                return PROSE_TERSE if right.strip() in ("", "terse") else right.strip()
+    return PROSE_TERSE
+
+
+def styled_review_task():
+    """REVIEW_TASK with the prose line swapped for the configured one."""
+    return REVIEW_TASK.replace(PROSE_TERSE, prose_line())
 
 
 # Static checks (zero model tokens): findings on the phase's files before and after the run; only NEW ones reported.
@@ -2241,11 +2263,67 @@ def pick_executor(args, target, phase, conf, entries):
     return res["name"], executor, model
 
 
+def lesson_lines(tag):
+    """(id, line) for the current lesson lines carrying [tag]."""
+    if not LESSONS.is_file():
+        return []
+    out = []
+    for l in LESSONS.read_text(errors="replace").splitlines():
+        m = re.match(r"L(\d+) ", l)
+        if m and f"[{tag}]" in l:
+            out.append((int(m.group(1)), l))
+    return out
+
+
+def cmd_lesson(text, tags):
+    """Append one lesson; every session sees it on its next prompt ([plan]), every executor task carries it ([exec])."""
+    tags = tags or ["plan"]
+    if any(t not in ("plan", "exec") for t in tags):
+        die("--tag takes plan or exec")
+    ids = [int(m.group(1)) for l in (LESSONS.read_text().splitlines() if LESSONS.is_file() else [])
+           for m in [re.match(r"L(\d+) ", l)] if m]
+    stored = LESSONS_NEXT.read_text().strip() if LESSONS_NEXT.is_file() else ""
+    n = max([int(stored) if stored.isdigit() else 1] + [i + 1 for i in ids])
+    LESSONS_NEXT.write_text(f"{n + 1}\n")
+    line = f"L{n} {time.strftime('%Y-%m-%d')} {' '.join('[' + t + ']' for t in tags)} {' '.join(text.split())}"
+    with LESSONS.open("a") as f:
+        f.write(line + "\n")
+    print(line)
+    return 0
+
+
+def cmd_lessons_hook():
+    """UserPromptSubmit hook: print the [plan] lessons this session has not been shown yet. Never fails the prompt."""
+    try:
+        sid = re.sub(r"[^A-Za-z0-9_-]", "", str(json.load(sys.stdin).get("session_id", "")))[:80]
+        lines = lesson_lines("plan")
+        if not sid or not lines:
+            return 0
+        LESSONS_SEEN.mkdir(exist_ok=True)
+        seen = LESSONS_SEEN / sid
+        shown = int(seen.read_text() or 0) if seen.is_file() else 0
+        new = [l for i, l in lines if i > shown]
+        if new:
+            ctx = "Concord lessons (new; apply them now):\n" + "\n".join(new)
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}}))
+        seen.write_text(str(max([shown] + [i for i, _ in lines])))
+        cutoff = time.time() - 14 * 86400
+        for f in LESSONS_SEEN.iterdir():
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+    except Exception:
+        pass
+    return 0
+
+
 def build_task(repo, plan_rel, phase, phase_text, extra):
     notes = repo_notes(repo)
     task = f"Plan file: {plan_rel} (repository root: {repo}).\n"
     if notes:
         task += f"\nRepository notes (binding; written by the maintainers):\n{notes}\n"
+    lessons = [l for _, l in lesson_lines("exec")]
+    if lessons:
+        task += "\nLessons (current; binding):\n" + "\n".join(lessons) + "\n"
     found = ticket_notes(repo, plan_rel)
     if found:
         task += f"\nTicket notes (found by earlier executors of this plan):\n{found}\n"
@@ -2259,6 +2337,7 @@ def build_task(repo, plan_rel, phase, phase_text, extra):
             task += (code + "\n") if code else f"(not found: {spec})\n"
     if extra:
         task += f"\nFeedback from the previous attempt:\n{extra}\n"
+    task += f"\n{prose_line()}\n"
     task += "\nFinish with the report block defined in your contract."
     return task
 
@@ -3578,7 +3657,7 @@ def cmd_review_packet(args):
     print_floor_note(repo, meta)
     n = len(list(run_dir.glob("review-packet-*.md"))) + 1
     packet = run_dir / f"review-packet-{n}.md"
-    packet.write_text(f"{REVIEW_TASK}\n---\n\n{task}")
+    packet.write_text(f"{styled_review_task()}\n---\n\n{task}")
     print(f"PACKET {packet}\nrun {run_dir.name}, checklists {', '.join(names)}, files {', '.join(files)}, "
           f"{len(packet.read_text()):,} chars\nnext: Agent subagent_type concord:reviewer-opus55 with prompt "
           f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record "
@@ -3686,7 +3765,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     # D2: a model review is recorded under the model that ran (its models.conf name when neither --model nor --via
     # changed the model, else the model id).
     reviewer = res["name"] if (executor == res["executor"] and model == res["model"]) else model
-    cmd, env, combined = build_command(executor, binary, task, REVIEW_TASK, model, "readonly", wall, run_dir, conf)
+    cmd, env, combined = build_command(executor, binary, task, styled_review_task(), model, "readonly", wall, run_dir, conf)
     (run_dir / "prompt.txt").write_text(combined)
     if args.dry_run:
         print(dry_line({"name": res["name"], "executor": executor, "model": model, "chars": len(combined)}))
@@ -3720,7 +3799,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         retried = True
         retry_task = task + (f"\n\nYour previous answer could not be used: {'; '.join(result['errors'])}. "
                              f"Answer again with only the REVIEW-JSON block.")
-        cmd, env, combined = build_command(executor, binary, retry_task, REVIEW_TASK, model, "readonly",
+        cmd, env, combined = build_command(executor, binary, retry_task, styled_review_task(), model, "readonly",
                                            wall, run_dir, conf)
         (run_dir / "prompt-retry.txt").write_text(combined)            # the prompt artifact of the retry
         rc, secs = run_process(cmd, env, repo, run_dir / "output-retry.log", timeout_s)
@@ -4260,7 +4339,7 @@ def write_pr_packet(root, n, slug, base, head, tier, files, excluded, names, tas
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
     k = len(list(run_dir.glob("review-packet-*.md"))) + 1
     packet = run_dir / f"review-packet-{k}.md"
-    packet.write_text(f"{REVIEW_TASK}\n---\n\n{task}")
+    packet.write_text(f"{styled_review_task()}\n---\n\n{task}")
     print(f"PACKET {packet}\nrun {run_dir.name}, head {head[:8]}, tier {tier}, checklists {', '.join(names)}, "
           f"files {', '.join(files)}, {len(packet.read_text()):,} chars")
     print(f"next: Agent subagent_type concord:reviewer-opus55 with prompt "
@@ -5941,6 +6020,9 @@ def main():
                         help="with --review: write the review prompt for a Claude reviewer subagent, call no model")
     parser.add_argument("--force-review", action="store_true",
                         help="with --review/--packet/--review-pr: review even when a prior review covers the content")
+    parser.add_argument("--lesson", metavar="TEXT", help="record a lesson: open sessions see [plan] ones on their next prompt, executor tasks carry [exec] ones")
+    parser.add_argument("--tag", action="append", choices=["plan", "exec"], help="with --lesson: who must act on it (repeatable; default plan)")
+    parser.add_argument("--lessons-hook", action="store_true", help="UserPromptSubmit hook: print the lessons this session has not seen")
     parser.add_argument("--review-record", metavar="RUN_ID", help="store a Claude reviewer's output on the run")
     parser.add_argument("--reviewer", help="with --review-record: reviewer name (e.g. concord:reviewer-opus55)")
     parser.add_argument("--file", help="with --review-record: file holding the reviewer's REVIEW-JSON answer")
@@ -5985,6 +6067,10 @@ def main():
         if isinstance(value, str) and value.lower().startswith("concord:"):
             setattr(args, name, value[len("concord:"):])
     args.plan_given = args.plan is not None
+    if args.lessons_hook:
+        return cmd_lessons_hook()
+    if args.lesson:
+        return cmd_lesson(args.lesson, args.tag)
     if args.plan is None:
         args.plan = "PLAN.md"
     if args.repo and not os.path.isdir(args.repo):
