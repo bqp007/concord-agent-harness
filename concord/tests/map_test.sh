@@ -114,7 +114,7 @@ mkdir -p "$RUNS"
 mkmeta(){ mkdir -p "$RUNS/$1"; python3 -I -c "import json,sys; json.dump({'run_id':sys.argv[1],'repo':sys.argv[2],'plan':'PLAN_M.md','phase':int(sys.argv[3]),'verdict':(sys.argv[4] or None),'cause':(sys.argv[5] or None),'started':float(sys.argv[6]),'kind':'run'}, open(sys.argv[7],'w'))" "$1" "$R" "$2" "$3" "$4" "$5" "$RUNS/$1/meta.json"; }
 mkmeta 20260101-000001-x-p1 1 PASS "" 100
 mkmeta 20260101-000002-x-p2 2 FAIL EXECUTOR 200
-# phase 3: no run at all -> not started; phase 4: a run with state.json but no meta -> running
+# phase 3 (planner): no run at all -> planner (no run); phase 4 (planner): a run with state.json but no meta -> running
 mkdir -p "$RUNS/20260101-000003-x-p4"
 python3 -I -c "import json,sys; json.dump({'repo':sys.argv[1],'plan':'PLAN_M.md','phase':4,'started':300.0}, open(sys.argv[2],'w'))" "$R" "$RUNS/20260101-000003-x-p4/state.json"
 # a lint-prefixed run for phase 1 must be ignored (not a real attempt)
@@ -128,7 +128,7 @@ has "Map: PLAN_M.md" && has "Intent" && has "Structure" && has "Work" && ok "A.2
 has "I1  ship the feature" && has "S1 <- I1  the module that changes" && ok "A.3 intent and structure lines with parents" || { bad "A.3"; cat "$T/out.txt"; }
 has "P1 <- S1  [PASS]  phase one" && ok "A.4 PASS status from the ledger" || { bad "A.4"; grep P1 "$T/out.txt"; }
 has "P2 <- S2  [FAIL [EXECUTOR]]  phase two" && ok "A.5 FAIL status carries the cause" || { bad "A.5"; grep P2 "$T/out.txt"; }
-has "P3 <- S1  [not started]" && ok "A.6 not started when no run (lint-prefixed run ignored)" || { bad "A.6"; grep P3 "$T/out.txt"; }
+has "P3 <- S1  [planner (no run)]" && ok "A.6 a planner phase with no run says so (lint-prefixed run ignored)" || { bad "A.6"; grep P3 "$T/out.txt"; }
 has "P4 <- S1  [running]" && ok "A.7 running when a run has state but no verdict" || { bad "A.7"; grep P4 "$T/out.txt"; }
 has "Open questions (blocked):" && has "Q1 -> S2  should the docs mention X" && ok "A.8 blocked open question names its node" || { bad "A.8"; cat "$T/out.txt"; }
 fi

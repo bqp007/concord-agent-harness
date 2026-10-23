@@ -31,6 +31,22 @@ links_ok() { local f l p bad=0
     done
   done; [ $bad = 0 ]; }
 
+# A count the docs write as a word matches the code. num_word N spells 0-99 the way the docs do (seventeen,
+# twenty-one); counts_ok N NOUN FILE... passes when every "<number word> [regression |test ]NOUN" in each FILE
+# spells N and each FILE has at least one.
+NUM_WORDS="zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen"
+NUM_TENS="twenty thirty forty fifty sixty seventy eighty ninety"
+num_word() { local u=($NUM_WORDS) t=($NUM_TENS)
+  if [ "$1" -lt 20 ]; then echo "${u[$1]}"; else echo "${t[$(($1 / 10 - 2))]}$([ $(($1 % 10)) = 0 ] || echo "-${u[$(($1 % 10))]}")"; fi; }
+counts_ok() { local want noun=$2 f got bad=0 re
+  want=$(num_word "$1"); shift 2
+  re="(^|[^a-z-])((${NUM_TENS// /|})(-(${NUM_WORDS// /|}))?|${NUM_WORDS// /|})( regression| test)? $noun([^a-z]|\$)"
+  for f in "$@"; do
+    got=$(grep -oiE "$re" "$f" | sed -E 's/^[^a-zA-Z]+//' | awk '{print tolower($1)}' | sort -u | tr '\n' ' ')
+    [ -n "$got" ] || { echo "$f: no count of $noun"; bad=1; continue; }
+    [ "$got" = "$want " ] || { echo "$f says ${got% } where the code has $want"; bad=1; }
+  done; [ $bad = 0 ]; }
+
 s_scrub() { local trees="$*" t pat
   [ -f "$SCRUB_FILE" ] || { echo "skip scrub (no pattern file)"; return 0; }
   pat=$(tmpd)/patterns; grep -vE '^[[:space:]]*(#|$)' "$SCRUB_FILE" > "$pat"
@@ -74,7 +90,7 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6181 ] || { wc -l $K/concord.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6829 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 441 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 30 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
@@ -135,6 +151,9 @@ s_docs() { local h f
   check docs/readme-links "grep -q 'docs/SETUP.md' README.md && grep -q 'docs/WORKFLOW.md' README.md && grep -q install.sh README.md"
   check docs/setup-harnesses "grep -q Codex docs/SETUP.md && grep -q OpenCode docs/SETUP.md"
   check docs/links "links_ok README.md CONTRIBUTING.md docs/*.md"
+  # the suites run_all.sh runs (every *_test.sh beside it); acceptance_lint() appends one line per defect kind
+  check docs/suite-count "counts_ok \$(ls $K/tests/*_test.sh | wc -l) suites README.md docs/SETUP.md"
+  check docs/lint-count "counts_ok \$(sed -n '/^def acceptance_lint(/,/^def /p' $K/concord.py | grep -c 'out\.append(') defects docs/WORKFLOW.md"
   for f in docs/figures/*.svg; do check "docs/figure-$(basename "$f")" "grep -qF '$(basename "$f")' README.md docs/*.md"; done
   check docs/no-todo "! grep -lE 'TODO|TBD|XXX' README.md docs/*.md $A/CLAUDE.md install.sh CONTRIBUTING.md"
   check docs/claude-md "grep -q '~/.claude/concord/concord.py' $A/CLAUDE.md && grep -q deepseek-flash $A/CLAUDE.md"

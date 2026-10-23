@@ -26,7 +26,7 @@ Usage:
   concord.py --abort RUN_ID|last [--repo DIR]
   concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED|SPEC_GAP] [--note TEXT]
               [--tokens N] [--user-approved QUOTE]
-  concord.py --stats [--all] [--repo DIR]                                 # pass rates, time, tokens, reviewer adoption
+  concord.py --stats [--all] [--plan PLAN] [--repo DIR]                   # pass rates, time, tokens, reviewer adoption
   concord.py --resolve "MODEL WORDS"
   concord.py --models [--verify]
   concord.py --list | --check
@@ -563,7 +563,8 @@ PHASE_HEAD = re.compile(r"^(#{1,6})\s*Phase\s+(\d+(?:\.\d+)*)\b.*$", re.I | re.M
 PHASE_WORD = re.compile(r"(\d+)(?:\.([1-9]\d*))?")
 FIELD_NAMES = ("Executor|Purpose|Risk|Files|Context|Interfaces|Inputs|Steps|Examples?|Edge cases|Decisions|"
                "Budget|Baseline|Characterize|Acceptance|Out of scope")
-FIELD = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(" + FIELD_NAMES + r")\s*\**\s*:", re.I)
+FIELD = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(" + FIELD_NAMES + r")(?:(?<=inputs)\s+(?:and\s[^:*\n]{1,40}|"
+                   r"\([^():*\n]{1,40}\)))?\s*\**\s*:", re.I)
 
 
 def phase_key(value):
@@ -666,20 +667,38 @@ def parse_backticked(phase_text, name):
     return out
 
 
-def parse_acceptance_marked(phase_text):
-    """Like parse_acceptance, but each command carries whether its line is marked `(characterization)`:
-    the text after the command's closing backtick, up to the next backtick or the line end, contains the
-    marker (case-insensitive). Same lines and order as parse_acceptance."""
+MARKED = re.compile(r"\(characterization\b[^)]*\)", re.I)
+
+
+def acceptance_tails(phase_text):
+    """[(command, tail)] in parse_acceptance order: `tail` is the text after the command's closing backtick, up to
+    the next backtick or the line end. A body line that is not a bullet and holds no backtick is a continuation: its
+    stripped text is appended, after one space, to the tail of the last command produced so far."""
     inline, body = field_block(phase_text, "Acceptance")
     out = []
-    for line in ([inline] if inline else []) + body:
+
+    def add(line):
         for m in re.finditer(r"`([^`]+)`", line):
             tail = line[m.end():]
             nxt = tail.find("`")
-            if nxt >= 0:
-                tail = tail[:nxt]
-            out.append((m.group(1), "(characterization)" in tail.lower()))   # the literal marker, not the bare word
+            out.append((m.group(1), tail if nxt < 0 else tail[:nxt]))
+
+    if inline:
+        add(inline)
+    for line in body:
+        if not re.match(r"(?:[-*]|\d+\.)", line.strip()) and "`" not in line:
+            if out:
+                cmd, tail = out[-1]
+                out[-1] = (cmd, tail + " " + line.strip())
+            continue
+        add(line)
     return out
+
+
+def parse_acceptance_marked(phase_text):
+    """Like parse_acceptance, but each command carries whether its tail holds the marker `(characterization...)`
+    (case-insensitive). Same commands and order as parse_acceptance."""
+    return [(cmd, bool(MARKED.search(tail))) for cmd, tail in acceptance_tails(phase_text)]
 
 
 LINT_VACUOUS = re.compile(r"grep\s+-[A-Za-z]*c[A-Za-z]*\b[^|&;]*\|\s*grep\s+-[qx]+\s+0\b")
@@ -712,6 +731,12 @@ def acceptance_lint(repo, phase_text, files):
                         and not any(f.endswith("/") and tok.startswith(f) for f in files) and not (repo / tok).exists()):
                     seen.add(tok)
                     out.append(f"names a missing file outside Files: {tok}")
+    for cmd, tail in acceptance_tails(phase_text):
+        if re.search(r"\bcharacterization\b", tail, re.I) and not MARKED.search(tail):
+            out.append('characterization without the marker (write "(characterization)" after the command): ' + cmd)
+        if re.search(r"\$\(\s*git\b", cmd):
+            out.append("git inside $( ) is refused by the Claude Code worktree guard; use git diff --quiet HEAD -- "
+                       "<paths> (exit 1 on a diff): " + cmd)
     return out
 
 
@@ -1025,7 +1050,12 @@ def expand_scope(repo, files):
             cands = sorted(str(q.relative_to(repo)) for q in p.rglob("*")
                            if q.is_file() and ".git" not in q.relative_to(repo).parts)
         elif any(ch in f for ch in "*?["):
-            cands = sorted(c for c in glob.glob(f, root_dir=repo, recursive=True) if (repo / c).is_file())
+            cands = []
+            for m in sorted(glob.glob(os.path.join(glob.escape(str(repo)), f), recursive=True)):
+                rel = os.path.relpath(m, repo)
+                if rel.startswith("..") or not os.path.isfile(m):
+                    continue
+                cands.append(rel)
         else:
             cands = []
         for c in cands:
@@ -1668,53 +1698,167 @@ ACCEPTANCE_FILES_CAP = 500
 ACCEPTANCE_HASH_MAX_BYTES = 50000000
 
 
+def acceptance_path_tokens(cmd):
+    """Yield the tokens of one shell command that may name a path: arguments and any command word containing `/`.
+    A command word (the first word of each simple command -- at the start; after `&&`, `||`, `;`, `|`, `(`, `$(`;
+    after leading `NAME=value` words) is not a path unless it holds a `/`. A leading `$(` or `(` and a trailing `)`
+    or `;` are stripped from a token before deciding; `$(` / `(` open a new simple command and `;` / `)` / `|` /
+    `&&` / `||` close one."""
+    expect_cw = True      # the next yielded word is a command word
+    assign_ok = True       # still in the leading NAME=value run of the current simple command
+    for raw in cmd.split():
+        t = raw
+        while t[:2] == "$(" or (t[:1] == "(" and t != "("):
+            t = t[2:] if t[:2] == "$(" else t[1:]
+            expect_cw = True
+            assign_ok = True
+        semi = False
+        while t and t[-1] in ");":
+            semi = semi or t[-1] == ";"
+            t = t[:-1]
+        if t in ("&&", "||", ";", "|", "("):
+            expect_cw = True
+            assign_ok = True
+            continue
+        if not t:
+            # a token emptied only by stripping `)` (a closed `$(`/`(`) leaves the state as it was, so the
+            # outer command's next word stays an argument; a stripped `;` starts a new simple command.
+            if semi:
+                expect_cw = True
+                assign_ok = True
+            continue
+        if expect_cw and assign_ok and re.fullmatch(r"[A-Za-z_]\w*=\S*", t):
+            # a leading NAME=value word is yielded like an argument (so its value names a file) but is never
+            # the command word; stay in the leading NAME=value run.
+            yield t
+            expect_cw = True
+            assign_ok = True
+            continue
+        if expect_cw:
+            if "/" in t:
+                yield t
+        else:
+            yield t
+        expect_cw = False
+        assign_ok = False
+        if semi:
+            expect_cw = True
+            assign_ok = True
+
+
 def acceptance_files(repo, acceptance, notes=None, exclude=()):
-    """Repo-relative files the acceptance commands name: whitespace tokens (quotes and a leading ./ stripped,
-    and each token additionally split on `::` and `=` so pytest node ids and `--file=path` still name their file)
-    that are an existing regular file under repo, plus every regular file under a token that is an existing
-    directory (hidden .git / __pycache__ dirs skipped). Paths matching `exclude` (the phase's Files:) are dropped
-    BEFORE the cap, so an acceptance command may grep the very files the phase changes without using up the cap.
-    Sorted, capped at ACCEPTANCE_FILES_CAP files (the cap is appended to `notes` when it bites). These are the
-    tests that grade the phase; an implementer must not edit them, so they are hashed before the run and compared
-    after. Tokens that resolve to the repository root or outside it are ignored (`find .`, `ls /`)."""
+    """Repo-relative files the acceptance commands NAME (never a command word, a git-ignored path or a CMake build
+    tree): the command word of each simple command is not a path unless it holds a `/`, and a named file -- or a
+    file under a named directory -- counts only when `git ls-files -co --exclude-standard` lists it, it exists as a
+    regular file, no path part is `__pycache__` or `.git`, and it is not under a directory holding CMakeCache.txt.
+    Each token is additionally split on `::` and `=` so pytest node ids and `--file=path` still name their file; a
+    flag value (`--cov=src`) names a file but is never walked as a directory. Paths matching `exclude` (the phase's
+    Files:) are dropped BEFORE the cap, so an acceptance command may grep the very files the phase changes without
+    using up the cap. Sorted, capped at ACCEPTANCE_FILES_CAP files (a cap note naming the first dropped files is
+    appended to `notes` when it bites). These are the tests that grade the phase; an implementer must not edit them,
+    so they are hashed before the run and compared after. Tokens that resolve to the repository root or outside it
+    are ignored (`find .`, `ls /`). When `git ls-files` fails, fall back to a directory walk (command words and
+    CMakeCache.txt trees still skipped, but ignored files not filtered) and note it."""
     repo = Path(repo).resolve()
     exclude = list(exclude)
+    try:
+        res = subprocess.run(["git", "-C", str(repo), "-c", "core.quotePath=false", "ls-files", "-co",
+                              "--exclude-standard", "-z"], capture_output=True)
+    except OSError:
+        die("git not found on PATH (install git)", code=3)
+    if res.returncode == 0:
+        universe = [p.decode("utf-8", "surrogateescape").replace(os.sep, "/")
+                    for p in res.stdout.split(b"\0") if p]
+    else:
+        universe = []
+        for root, dirs, names in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for name in names:
+                universe.append(os.path.relpath(Path(root) / name, repo).replace(os.sep, "/"))
+        if notes is not None:
+            notes.append("acceptance files: git ls-files failed; ignored files not filtered")
+    uset = set(universe)
+    dirset = set()
+    for p in universe:
+        parts = p.split("/")
+        for i in range(1, len(parts)):
+            dirset.add("/".join(parts[:i]))
+    cmake_dirs = set()
+    for p in universe:
+        if p.rsplit("/", 1)[-1] == "CMakeCache.txt":
+            cd = p[:-len("CMakeCache.txt")].rstrip("/")
+            if cd:                       # the repository root never counts as a CMake build tree
+                cmake_dirs.add(cd)
+    for d in dirset:                     # a build tree whose CMakeCache.txt is git-ignored by name (not in the list)
+        try:
+            if (repo / d / "CMakeCache.txt").is_file():
+                cmake_dirs.add(d)
+        except OSError:
+            pass
+
+    def dropped(rel):
+        parts = rel.split("/")
+        if "__pycache__" in parts or ".git" in parts:
+            return True
+        for cd in cmake_dirs:
+            if rel == cd or rel.startswith(cd + "/"):
+                return True
+        return in_scope(rel, exclude)
+
+    def git_spelling(rel, candidates):
+        """The list's spelling of `rel` when it is absent under its own case but present under another (a
+        case-insensitive filesystem); `rel` itself when listed; else None."""
+        if rel in candidates:
+            return rel
+        low = rel.lower()
+        for c in candidates:
+            if c.lower() == low:
+                try:
+                    if os.path.samefile(repo / rel, repo / c):
+                        return c
+                except OSError:
+                    pass
+        return None
+
     found = set()
-
-    def add(rel):
-        if not in_scope(rel, exclude):
-            found.add(rel)
-
     for cmd in acceptance:
-        for raw in cmd.split():
-            for i, part in enumerate(re.split(r"(::|=)", raw)):
+        for token in acceptance_path_tokens(cmd):
+            parts = re.split(r"(::|=)", token)
+            for i, part in enumerate(parts):
                 if part in ("::", "="):
                     continue
-                after_eq = i > 0 and re.split(r"(::|=)", raw)[i - 1] == "="   # `--cov=src`: a flag value, never walked
+                after_eq = i > 0 and parts[i - 1] == "="      # `--cov=src`: a flag value, never walked
                 tok = clean_path(part)
                 if not tok:
                     continue
                 path = (repo / tok).resolve()
                 if path == repo or repo not in path.parents:
                     continue
+                rel = os.path.relpath(path, repo).replace(os.sep, "/")
                 try:
                     if path.is_file():
-                        add(os.path.relpath(path, repo))
+                        g = git_spelling(rel, uset)      # git's spelling (folds case on a case-insensitive fs)
+                        if g is not None and not dropped(g):
+                            found.add(g)
                     elif path.is_dir() and not after_eq:
-                        for root, dirs, names in os.walk(path):
-                            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
-                            for name in names:
-                                full = Path(root) / name
-                                if full.is_file():
-                                    add(os.path.relpath(full, repo))
-                            if len(found) > ACCEPTANCE_FILES_CAP:
-                                break
+                        prefix = rel + "/"
+                        if not any(e.startswith(prefix) for e in universe):
+                            d = git_spelling(rel, dirset)
+                            if d is not None:
+                                prefix = d + "/"
+                        for e in universe:
+                            if e.startswith(prefix) and not dropped(e) and (repo / e).is_file():
+                                found.add(e)
                 except OSError:
                     continue
     out = sorted(found)
     if len(out) > ACCEPTANCE_FILES_CAP:
         if notes is not None:
-            notes.append(f"acceptance file list capped at {ACCEPTANCE_FILES_CAP} files (at least {len(out)} named)")
+            n_over = len(out) - ACCEPTANCE_FILES_CAP
+            head = ", ".join(out[ACCEPTANCE_FILES_CAP:ACCEPTANCE_FILES_CAP + 5])
+            more = f" and {n_over - 5} more" if n_over > 5 else ""
+            notes.append(f"acceptance file list capped at {ACCEPTANCE_FILES_CAP} files (at least {len(out)} named); "
+                         f"not hashed: {head}{more}; files added under acceptance directories are not checked")
         out = out[:ACCEPTANCE_FILES_CAP]
     return out
 
@@ -1802,13 +1946,15 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     # Hash the acceptance files AFTER the baseline/characterize commands: a red run may rewrite them (e.g. an
     # acceptance command that regenerates a fixture), and that must not be blamed on the executor.
     acceptance_max = acceptance_hash_max(conf)
-    acceptance_hashes = {p: acceptance_hash(repo / p, acceptance_max)
-                         for p in acceptance_files(repo, acceptance, notes, exclude=files)}
+    notes_before = len(notes)
+    acc_list = acceptance_files(repo, acceptance, notes, exclude=files)
+    acceptance_capped = any(n.startswith("acceptance file list capped at") for n in notes[notes_before:])
+    acceptance_hashes = {p: acceptance_hash(repo / p, acceptance_max) for p in acc_list}
     state = {
         "run_id": run_dir.name, "repo": str(repo), "plan": plan_rel, "plan_hash": file_hash(plan),
         "phase": phase, "who": who, "executor": executor, "model": model, "name": name, "mode": mode,
         "files": files, "acceptance": acceptance, "acceptance_hashes": acceptance_hashes,
-        "acceptance_hash_max_bytes": acceptance_max,
+        "acceptance_hash_max_bytes": acceptance_max, "acceptance_capped": acceptance_capped,
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
@@ -1973,11 +2119,14 @@ def finish_run(run_dir, rc, secs=None):
             now = acceptance_hash(repo / p, acceptance_max)
             if now != before:
                 acceptance_changed.append((p, "removed" if now == "missing" else "modified"))
-        # A file the executor ADDED under an acceptance directory (e.g. a conftest.py) changes grading too.
-        known = set(st["acceptance_hashes"])
-        for p in acceptance_files(repo, st.get("acceptance") or [], None, exclude=files):
-            if p not in known:
-                acceptance_changed.append((p, "added"))
+        # A file the executor ADDED under an acceptance directory (e.g. a conftest.py) changes grading too. When the
+        # pre-run list was capped the stored list is only a prefix, so a file past the cap would look "added"; skip
+        # the derivation and compare only the stored files.
+        if not st.get("acceptance_capped"):
+            known = set(st["acceptance_hashes"])
+            for p in acceptance_files(repo, st.get("acceptance") or [], None, exclude=files):
+                if p not in known:
+                    acceptance_changed.append((p, "added"))
         if oversize:
             acceptance_oversize_note = (f"acceptance files over {acceptance_max} bytes compared by size and "
                                         f"mtime: " + ", ".join(oversize))
@@ -2703,6 +2852,122 @@ def mutation_candidates(source, ranges):
             candidate = make(op, target, mutated_node)
             if candidate:
                 found.append((target.lineno, target.col_offset, _MUTATION_RANK[op], candidate))
+    found.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [candidate for _, _, _, candidate in found]
+
+
+# C/C++ mutation (--mutate isolated mode): text operators, no AST. Operator order = candidate sort order.
+C_SOURCE_EXTS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
+C_MUTATION_OPERATORS = ("compare", "boolop", "string", "drop-arg", "delete")
+_C_RANK = {name: i for i, name in enumerate(C_MUTATION_OPERATORS)}
+# Comparison tokens swapped with their pair. Spaced forms avoid <<, ->, templates and >= / <= overlap.
+_C_COMPARE_SWAP = [(" <= ", " < "), (" >= ", " > "), (" < ", " <= "), (" > ", " >= "), ("==", "!="), ("!=", "==")]
+_C_BOOLOP_SWAP = [("&&", "||"), ("||", "&&")]
+_C_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_C_DELETE_SKIP = re.compile(r"^(?:return|break|continue|goto|case|default)\b")
+_C_CALL = re.compile(r"([A-Za-z_]\w*)\(")
+_C_CALL_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "catch"}
+
+
+def _c_match_paren(code, open_idx):
+    """Index of the ) matching the ( at open_idx within code (same line), or -1 if it does not close here."""
+    depth = 0
+    for i in range(open_idx, len(code)):
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def c_mutation_candidates(source, ranges):
+    """Pure text mutation of C/C++ code on lines within `ranges`: one candidate per occurrence per operator.
+
+    Returns dicts {"line", "operator", "original", "mutated", "source"} (source = the full mutated file text),
+    sorted by (line, operator order in C_MUTATION_OPERATORS, column). Blank lines and lines whose stripped text
+    starts with #, //, /* or * are skipped; the code part is the text before the first //."""
+    lines = source.split("\n")
+
+    def in_range(line):
+        return any(lo <= line <= hi for lo, hi in ranges)
+
+    def full(lineno, new_line):
+        return "\n".join(lines[:lineno - 1] + [new_line] + lines[lineno:])
+
+    found = []
+    for lineno in range(1, len(lines) + 1):
+        if not in_range(lineno):
+            continue
+        raw = lines[lineno - 1]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            continue
+        code = raw.split("//", 1)[0]
+        comment = raw[len(code):]
+        orig = stripped
+
+        def add(op, col, mutated_code):
+            new_line = mutated_code + comment
+            found.append((lineno, _C_RANK[op], col, {
+                "line": lineno, "operator": op, "original": orig,
+                "mutated": new_line.strip(), "source": full(lineno, new_line)}))
+
+        # compare
+        for tok, rep in _C_COMPARE_SWAP:
+            start = 0
+            while True:
+                i = code.find(tok, start)
+                if i < 0:
+                    break
+                add("compare", i, code[:i] + rep + code[i + len(tok):])
+                start = i + len(tok)
+        # boolop
+        for tok, rep in _C_BOOLOP_SWAP:
+            start = 0
+            while True:
+                i = code.find(tok, start)
+                if i < 0:
+                    break
+                add("boolop", i, code[:i] + rep + code[i + len(tok):])
+                start = i + len(tok)
+        # string: the first non-empty "..." literal emptied
+        for m in _C_STRING.finditer(code):
+            if m.group(0) != '""':
+                add("string", m.start(), code[:m.start()] + '""' + code[m.end():])
+                break
+        # drop-arg: scanning left to right (into nested calls too), the first name( (not a keyword) that closes
+        # on this line with >= 2 top-level arguments loses its last argument; a call with fewer is passed over.
+        for m in _C_CALL.finditer(code):
+            if m.group(1) in _C_CALL_KEYWORDS:
+                continue
+            open_idx = m.end() - 1
+            close_idx = _c_match_paren(code, open_idx)
+            if close_idx < 0:
+                continue
+            inside = code[open_idx + 1:close_idx]
+            depth = 0
+            commas = []
+            for j, ch in enumerate(inside):
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    commas.append(j)
+            if commas:
+                mutated = code[:open_idx + 1] + inside[:commas[-1]] + code[close_idx:]
+                add("drop-arg", m.start(), mutated)
+                break
+        # delete: a statement line whose code part (before //, stripped) ends with ; and is not a control jump
+        code_stripped = code.strip()
+        if code_stripped.endswith(";") and not _C_DELETE_SKIP.match(code_stripped):
+            found.append((lineno, _C_RANK["delete"], 0, {
+                "line": lineno, "operator": "delete", "original": orig,
+                "mutated": "", "source": full(lineno, "")}))
+
     found.sort(key=lambda item: (item[0], item[1], item[2]))
     return [candidate for _, _, _, candidate in found]
 
@@ -3532,9 +3797,10 @@ def cmd_review_record(args):
 
 
 def _parse_id_reasons(spec):
-    """`F2=reason; F5=reason` -> [(id, reason)]; a bare `F2` yields an empty reason."""
+    """`F2=reason; F5=reason` -> [(id, reason)]; a bare `F2` yields an empty reason; a `;` or `,` inside a reason
+    only splits when the text after it starts another `F<n>[.<m>]` entry."""
     out = []
-    for part in (spec or "").split(";"):
+    for part in re.split(r"[;,](?=\s*F\d+(?:\.\d+)?\s*(?:=|[;,]|$))", spec or ""):
         part = part.strip()
         if not part:
             continue
@@ -5048,8 +5314,13 @@ def cmd_map(args, conf):
     m = parse_map(text)
     pids = phase_ids(text)
     root = runs_root(repo)
-    status_of = lambda node: (map_phase_status(root, repo, plan_rel, pids[node["id"]])
-                              if node["id"] in pids else "no phase")
+    def status_of(node):
+        if node["id"] not in pids:
+            return "no phase"
+        status = map_phase_status(root, repo, plan_rel, pids[node["id"]])
+        if status == "not started" and parse_executor(extract_phase(text, pids[node["id"]])) == "planner":
+            return "planner (no run)"
+        return status
     if args.mermaid:
         placed_s, placed_w = set(), set()
 
@@ -5447,6 +5718,13 @@ def cmd_stats(args):
     if not runs:
         print("no recorded runs" + (" in the cross-repo index" if args.all else " in this repo"))
         return 0
+    if args.plan_given:
+        want = os.path.relpath(args.plan, repo) if os.path.isabs(args.plan) else args.plan
+        want = os.path.normpath(want)
+        runs = [r for r in runs if r.get("plan") and os.path.normpath(str(r["plan"])) == want]
+        if not runs:
+            print(f"no recorded runs for plan {args.plan}")
+            return 0
     since = parse_day(args.since, "--since") if args.since is not None else None
     until = parse_day(args.until, "--until") if args.until is not None else None
     if since or until:
@@ -5485,7 +5763,9 @@ def cmd_stats(args):
         for field, bucket in (("frontier_tokens", "front_tok"), ("executor_cost", "cost")):
             if isinstance(r.get(field), (int, float)):
                 g[bucket].append(r[field])
-    scope_label = "across the cross-repo index" if args.all else f"in {repo.name}"
+    scope_label = "across the cross-repo index" if args.all else f"in {repo_name(repo)}"
+    if args.plan_given:
+        scope_label += f" (plan {args.plan})"
     print(f"delegated runs {scope_label}: {len(runs)} (phases attempted: {len(first)})")
     print(f"{'executor / model':44s} {'runs':>4s} {'PASS':>4s} {'FAIL':>4s} {'1st-pass':>8s} "
           f"{'mean min':>8s} {'front tok':>9s} {'cost $':>8s}  fail causes")
@@ -5745,10 +6025,12 @@ def cmd_card(args):
         rev_lines.append(f"  {name} ({rtier}, {rev.get('verdict')}, {n} findings)")
     rev_block = ["reviews:"] + rev_lines if rev_lines else ["reviews: none"]
     changed = (meta.get("changed") or []) + (meta.get("created") or [])
+    generated = set(meta.get("generated") or [])
     flags, seen = [], set()
     for item in ([f"{fpath} (floored)"] if floor else []) \
             + [f"{p} (out of scope)" for p in oos] \
-            + [f"{p} (test file changed)" for p in changed if isinstance(p, str) and TEST_PATH.search(p)] \
+            + [f"{p} (test file changed)" for p in changed
+               if isinstance(p, str) and TEST_PATH.search(p) and p not in generated] \
             + [f"{p} (acceptance file changed)" for p in meta.get("acceptance_files_changed") or []]:
         if item not in seen:
             seen.add(item); flags.append(item)
@@ -5788,11 +6070,23 @@ def cmd_restore(args):
     meta_path = run_dir / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else \
         json.loads((run_dir / "state.json").read_text())
+    newest = 0
+    for f in (meta.get("changed") or []) + (meta.get("created") or []):
+        try:
+            if os.path.isfile(repo / f):
+                newest = max(newest, os.stat(repo / f).st_mtime)
+        except OSError:
+            continue
+    target = max(time.time(), newest + 1)
     for f in meta.get("backed_up", []):
         try:
             (repo / f).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(run_dir / "backup" / f, repo / f)
             print(f"restored {f}")
+            try:
+                os.utime(repo / f, (target, target))
+            except OSError as exc:
+                print(f"note: mtime of {f} not updated: {exc.strerror or exc}")
         except OSError as exc:
             print(f"NOT restored {f}: {exc.strerror or exc}")
     created = [p for p in meta.get("created", []) if (repo / p).exists()]
@@ -5810,13 +6104,351 @@ def cmd_restore(args):
     return 0
 
 
+def _mutant_left_out(repo, f):
+    """A path the isolated copy would leave out: a .git or .claude part, or a directory below the root that
+    holds CMakeCache.txt (the root itself is handled separately as an in-source build)."""
+    parts = Path(f).parts
+    lowered = [p.casefold() for p in parts]
+    if ".git" in lowered or ".claude" in lowered:
+        return True
+    cur = repo
+    for part in parts[:-1]:
+        cur = cur / part
+        try:
+            if (cur / "CMakeCache.txt").exists():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _load_mutants(path_str, repo):
+    """Parse and validate a --mutants file. Any structural fault, a bad path or a missing file dies (exit 2)
+    before any copy is made. Returns the list of mutant dicts in file order."""
+    try:
+        data = json.loads(Path(path_str).read_text())
+    except (OSError, ValueError, RecursionError) as exc:
+        die(f"--mutants: cannot read {path_str} as a JSON list ({exc.__class__.__name__})", code=2)
+    if not isinstance(data, list):
+        die("--mutants: the file must be a JSON list of mutants", code=2)
+    realrepo = os.path.realpath(str(repo))
+    for i, m in enumerate(data):
+        if not isinstance(m, dict):
+            die(f"--mutants[{i}]: each mutant must be a JSON object", code=2)
+        for key in ("id", "file", "old", "new"):
+            if not isinstance(m.get(key), str):
+                die(f"--mutants[{i}]: {key} must be a string", code=2)
+        if not m["old"]:
+            die(f"--mutants[{i}]: old must be a non-empty string", code=2)
+        if "occ" in m and (not isinstance(m["occ"], int) or isinstance(m["occ"], bool) or m["occ"] < 1):
+            die(f"--mutants[{i}]: occ must be an integer >= 1", code=2)
+        for key in ("check", "what"):
+            if key in m and not isinstance(m[key], str):
+                die(f"--mutants[{i}]: {key} must be a string", code=2)
+        for key in ("id", "file", "old", "new", "check", "what"):
+            v = m.get(key)
+            if isinstance(v, str):
+                if "\x00" in v:
+                    die(f"--mutants[{i}]: {key} contains a NUL byte", code=2)
+                try:
+                    v.encode("utf-8")
+                except UnicodeEncodeError:
+                    die(f"--mutants[{i}]: {key} is not valid UTF-8 (a lone surrogate)", code=2)
+        f = m["file"]
+        if os.path.isabs(f) or ".." in Path(f).parts:
+            die(f"--mutants[{i}]: file must be a repo-relative path without '..': {f}", code=2)
+        if _mutant_left_out(repo, f):
+            die(f"--mutants[{i}]: file is in a path the isolated copy leaves out (.git, .claude or a CMake build "
+                f"tree): {f}", code=2)
+        if os.path.realpath(str(repo / f)) != os.path.join(realrepo, *Path(f).parts):
+            die(f"--mutants[{i}]: file resolves through a symlink to outside the checkout: {f}", code=2)
+        try:
+            found = (repo / f).is_file()
+        except OSError:
+            found = False
+        if not found:
+            die(f"--mutants[{i}]: file not found in the checkout: {f}", code=2)
+    return data
+
+
+def _write_meta_mutation(meta_path, run_dir, mutation, fallback_meta):
+    """Re-read meta.json, set only its `mutation` key, and write it atomically (a temp file in the run directory
+    then os.replace), so a verdict or review recorded while the mutation ran is kept. Another command may be
+    between truncating and writing meta.json (write_text): an empty or unparsable file is read again every 0.1 s
+    for up to 3 s, and if it is still unreadable the meta loaded at the start is used; never an empty dict."""
+    deadline = time.time() + 3
+    current = None
+    while True:
+        try:
+            text = meta_path.read_text()
+        except OSError:
+            text = ""
+        if text.strip():
+            try:
+                current = json.loads(text)
+            except ValueError:
+                current = None
+        if current is not None:
+            break
+        if time.time() >= deadline:
+            current = dict(fallback_meta)
+            break
+        time.sleep(0.1)
+    current["mutation"] = mutation
+    fd, tmp = tempfile.mkstemp(dir=str(run_dir), prefix=".meta-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(current, indent=1))
+        os.replace(tmp, str(meta_path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout):
+    """Grade C/C++ (and listed) mutants in a throwaway copy of the checkout: the live files and the run lock are
+    untouched, so the verifier and reviewer can work meanwhile. --mutants grades planner-listed mutants; otherwise
+    C/C++ text operators on the run's changed lines plus Python AST mutants, sampled with the seed."""
+    if (repo / "CMakeCache.txt").exists():
+        die("--mutate cannot isolate an in-source CMake build (CMakeCache.txt at the repository root); configure "
+            "it out of source (cmake -B build)", code=2)
+    listed = args.mutants is not None
+    build_cmd = args.build
+    total = 0
+
+    if listed:
+        mutants = _load_mutants(args.mutants, repo)[:args.max]
+        candidates = None
+    else:
+        candidates = []
+        mutate_base = run_diff_base(repo, meta)
+        for f in review_files(repo, meta):
+            ext = os.path.splitext(f)[1].lower()
+            is_cpp = ext in C_SOURCE_EXTS
+            is_py = f.endswith(".py")
+            if (not is_cpp and not is_py) or TEST_PATH.search(f):
+                continue
+            if _mutant_left_out(repo, f):
+                continue
+            try:
+                text = (repo / f).read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            ranges = diff_hunks(change_diff(repo, [f], cap=None, base=mutate_base)).get(f, [])
+            gen = c_mutation_candidates(text, ranges) if is_cpp else mutation_candidates(text, ranges)
+            for c in gen:
+                c["path"] = f
+                candidates.append(c)
+        total = len(candidates)
+        if not candidates:
+            print(f"MUTATION {run_id}: no mutable Python lines in the change")
+            _write_meta_mutation(meta_path, run_dir, {"seed": args.seed, "max": args.max, "mode": "isolated",
+                                 "candidates": 0, "sampled": [], "killed": 0, "survived": 0, "stillborn": 0,
+                                 "skipped": []}, meta)
+            return 0
+        k = min(args.max, total)
+        candidates = [candidates[i] for i in sorted(random.Random(args.seed).sample(range(total), k))]
+
+    def ignore(d, names):
+        skip = set()
+        for n in names:
+            if n in (".git", ".claude"):
+                skip.add(n)
+            elif os.path.isdir(os.path.join(d, n)) and os.path.exists(os.path.join(d, n, "CMakeCache.txt")):
+                skip.add(n)
+        return skip
+
+    def bump(p):
+        t = time.time() + 2
+        try:
+            os.utime(p, (t, t))
+        except OSError:
+            pass
+
+    def on_term(signum, frame):
+        raise KeyboardInterrupt
+
+    tmp_parent = tempfile.mkdtemp(prefix="concord-mutate-")
+    work = Path(tmp_parent) / "checkout"
+    realwork = None
+    print(f"note: mutating an isolated copy of the checkout ({work}); the live files are not touched")
+    old_term = signal.signal(signal.SIGTERM, on_term)
+    old_hup = signal.signal(signal.SIGHUP, on_term)
+    killed = survived = stillborn = 0
+    results, skipped = [], []
+    clock = {"last_end": time.time()}
+
+    def checked(cmd):
+        rc = run_check(cmd, work, check_timeout)[0]
+        clock["last_end"] = time.time()
+        return rc
+
+    def wait_next_second():
+        # Leave the whole second the previous command in the copy ended in, so the build dates its output in a
+        # later second than the previous build's (make compares mtimes to the second).
+        while int(time.time()) <= int(clock["last_end"]):
+            time.sleep(0.05)
+
+    def grade(check_cmds):
+        """stillborn (build fails), else killed / timeout / survived from the check commands."""
+        if build_cmd and checked(build_cmd) != 0:
+            return "stillborn"
+        nonzero = [rc for rc in (checked(c) for c in check_cmds) if rc != 0]
+        if not nonzero:
+            return "survived"
+        return "timeout" if all(rc == 124 for rc in nonzero) else "killed"
+
+    def tally(result):
+        nonlocal killed, survived, stillborn
+        if result == "survived":
+            survived += 1
+        elif result == "stillborn":
+            stillborn += 1
+        else:
+            killed += 1
+
+    try:
+        try:
+            shutil.copytree(str(repo), str(work), symlinks=True, ignore=ignore)
+        except shutil.Error as exc:
+            errs = exc.args[0] if exc.args else []
+            first = errs[0] if errs else exc
+            die(f"cannot copy the checkout for isolation: {first}", code=2)
+        except OSError as exc:
+            die(f"cannot copy the checkout for isolation: {exc}", code=2)
+        realwork = os.path.realpath(str(work))
+        clock["last_end"] = time.time()
+
+        # Setup on the unmutated copy: the baseline must be green here or grading is meaningless.
+        setup_cmds = list(acceptance)
+        if build_cmd:
+            setup_cmds.append(build_cmd)
+        if listed:
+            seen = set()
+            for m in mutants:
+                c = m.get("check")
+                if c and c not in seen:
+                    seen.add(c)
+                    setup_cmds.append(c)
+        for cmd in setup_cmds:
+            rc = checked(cmd)
+            if rc != 0:
+                die(f"the unmutated copy fails {cmd} (exit {rc})", code=2)
+
+        originals = {}
+
+        def apply_and_grade(f, mutated_bytes, check_cmds):
+            """Write the mutant to the copy, grade, then restore the original bytes and hash-check (exit 3)."""
+            target = work / f
+            if os.path.realpath(str(target)) != os.path.join(realwork, *Path(f).parts):
+                die(f"--mutate: {f} resolves outside the isolated copy", code=2)
+            if f not in originals:
+                originals[f] = target.read_bytes()
+            orig_sha = hashlib.sha256(originals[f]).hexdigest()
+            wait_next_second()
+            try:
+                target.write_bytes(mutated_bytes)
+                bump(target)
+                return grade(check_cmds)
+            finally:
+                try:
+                    target.write_bytes(originals[f])
+                    bump(target)
+                except OSError:
+                    pass
+                if file_hash(target) != orig_sha:
+                    die(f"{f} in the isolated copy was not restored to its original bytes", code=3)
+
+        if listed:
+            for m in mutants:
+                f = m["file"]
+                if f not in originals:
+                    originals[f] = (work / f).read_bytes()
+                orig_bytes = originals[f]
+                old_b, new_b = m["old"].encode("utf-8"), m["new"].encode("utf-8")
+                positions, start = [], 0
+                while True:
+                    idx = orig_bytes.find(old_b, start)
+                    if idx < 0:
+                        break
+                    positions.append(idx)
+                    start = idx + len(old_b)
+                n, occ = len(positions), m.get("occ")
+                if n == 0:
+                    skipped.append({"id": m["id"], "reason": "old text not found"})
+                    continue
+                if occ is None and n > 1:
+                    skipped.append({"id": m["id"], "reason": f"old text occurs {n} times (give occ)"})
+                    continue
+                if occ is not None and n < occ:
+                    skipped.append({"id": m["id"], "reason": f"occ {occ} but the text occurs {n} times"})
+                    continue
+                at = positions[(occ or 1) - 1]
+                line = orig_bytes[:at].count(b"\n") + 1
+                mutated_bytes = orig_bytes[:at] + new_b + orig_bytes[at + len(old_b):]
+                check_cmds = [m["check"]] if m.get("check") else acceptance
+                result = apply_and_grade(f, mutated_bytes, check_cmds)
+                tally(result)
+                results.append({"id": m["id"], "path": f, "line": line,
+                                "what": m.get("what", ""), "result": result})
+        else:
+            for cand in candidates:
+                result = apply_and_grade(cand["path"], cand["source"].encode("utf-8"), acceptance)
+                tally(result)
+                results.append({"path": cand["path"], "line": cand["line"], "operator": cand["operator"],
+                                "original": cand["original"], "mutated": cand["mutated"], "result": result})
+    except KeyboardInterrupt:
+        print(f"MUTATION {run_id}: interrupted; the isolated copy was removed")
+        return 130
+    finally:
+        shutil.rmtree(tmp_parent, ignore_errors=True)
+        signal.signal(signal.SIGTERM, old_term)
+        signal.signal(signal.SIGHUP, old_hup)
+
+    if listed:
+        run_count = killed + survived + stillborn
+        header = (f"MUTATION {run_id}: {run_count} mutants (listed in {args.mutants}), "
+                  f"killed {killed}, survived {survived}, stillborn {stillborn}")
+        if skipped:
+            header += f", skipped {len(skipped)}"
+        print(header)
+    else:
+        print(f"MUTATION {run_id}: {len(candidates)} mutants (sampled from {total}, seed {args.seed}), "
+              f"killed {killed}, survived {survived}, stillborn {stillborn}")
+    if not build_cmd:
+        print("note: without --build a mutant that does not compile counts as killed, not stillborn")
+    for r in results:
+        if r["result"] not in ("survived", "stillborn"):
+            continue
+        tag = "SURVIVED" if r["result"] == "survived" else "STILLBORN"
+        if listed:
+            print(f"{tag} {r['path']}:L{r['line']}: {r['id']}: {r['what']}")
+        else:
+            print(f"{tag} {r['path']}:L{r['line']}: {r['operator']}: {r['original']} -> {r['mutated']}")
+    for s in skipped:
+        print(f"SKIP {s['id']}: {s['reason']}")
+
+    mutation = {"seed": args.seed, "max": args.max, "mode": "isolated", "killed": killed,
+                "survived": survived, "stillborn": stillborn, "skipped": skipped, "sampled": results}
+    mutation["candidates"] = (killed + survived + stillborn) if listed else total
+    if listed:
+        mutation["listed"] = args.mutants
+    _write_meta_mutation(meta_path, run_dir, mutation, meta)
+    return 0
+
+
 def cmd_mutate(args, conf):
     """Seeded, bounded mutation testing of a reported run's changed Python lines (--mutate RUN [--max N] [--seed S]).
 
     Mutates the CURRENT file text (the run's post-run snapshot is not checked), runs the run's acceptance
     commands against each mutant, and restores every file byte-identically (hash-checked). Survivors are
-    information, not a failure. The per-checkout run lock is held for the whole command."""
-    print("note: mutating the current files, not the run's post-run snapshot")
+    information, not a failure. The per-checkout run lock is held for the whole command.
+
+    With --mutants, or when the run changed a C/C++ source, mutation runs in an isolated copy of the checkout
+    (no run lock, live files untouched); otherwise the live Python mode below runs unchanged."""
     if "/" in (args.mutate or "") or (args.mutate or "").startswith("."):
         die(f"--mutate takes a run id or 'last', not a path: {args.mutate}", code=2)
     if args.max < 1:
@@ -5845,6 +6477,13 @@ def cmd_mutate(args, conf):
         except (OSError, ValueError):
             pass
 
+    cpp_changed = any(os.path.splitext(f)[1].lower() in C_SOURCE_EXTS and not TEST_PATH.search(f)
+                      and not _mutant_left_out(repo, f)
+                      for f in review_files(repo, meta))
+    if args.mutants is not None or cpp_changed:
+        return mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout)
+
+    print("note: mutating the current files, not the run's post-run snapshot")
     backup_dir = run_dir / "mutation-backup"
     originals, hashes = {}, {}
 
@@ -6023,7 +6662,7 @@ def cmd_check(conf):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("words", nargs="*", help="[MODEL WORDS ...] PHASE   (with --lint: [MODEL WORDS ...])")
-    parser.add_argument("--plan", default="PLAN.md", help="plan path, relative to the repo root")
+    parser.add_argument("--plan", default=None, help="plan path, relative to the repo root")
     parser.add_argument("--via", choices=EXECUTORS, help="force this harness for the run")
     parser.add_argument("--model", help="explicit model ID for this run")
     parser.add_argument("--mode", choices=["full", "edit"], default="full",
@@ -6118,11 +6757,20 @@ def main():
                              "lock (out of scope)")
     parser.add_argument("--max", type=int, default=20, help="with --mutate: sample at most N mutants (default 20)")
     parser.add_argument("--seed", type=int, default=0, help="with --mutate: RNG seed for the sample (default 0)")
+    parser.add_argument("--mutants", metavar="FILE", help="with --mutate: a JSON list of planner-written mutants "
+                        "{id, file, old, new, occ?, check?, what?} to grade in an isolated copy")
+    parser.add_argument("--build", metavar="CMD", help="with --mutate (isolated): build command; a mutant whose "
+                        "build fails is stillborn")
     args = parser.parse_intermixed_args()   # allows: kimi --via dsh 2
     for name in ("reviewer", "label"):     # plugin agents are named concord:<agent>; record the bare name
         value = getattr(args, name, None)
         if isinstance(value, str) and value.lower().startswith("concord:"):
             setattr(args, name, value[len("concord:"):])
+    args.plan_given = args.plan is not None
+    if args.plan is None:
+        args.plan = "PLAN.md"
+    if args.repo and not os.path.isdir(args.repo):
+        die(f"--repo takes a directory (the checkout path), not a name: {args.repo}")
     conf = load_conf()
     if args.resolve:
         return cmd_resolve(args.resolve)

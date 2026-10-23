@@ -73,6 +73,7 @@ Acceptance:
 - `python3 -c "import module; assert not hasattr(module, 'requests')"`  (structural check, when Decisions is not "none")
 - `pytest tests/test_existing.py -q` (characterization)   <- a command that already passes before the change MUST
   carry this marker, or the dispatcher refuses to start (exit 6); never put prose with backticks under Acceptance
+- `git diff --quiet HEAD -- include/` (characterization: no change outside Files; never test -z "$(git diff ...)", which the worktree guard refuses)
 Out of scope: <tempting changes the executor must not make>
 
 ## Phase 3 - <refactor name> (no behaviour change) (P3 <- S1)

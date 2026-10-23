@@ -46,7 +46,7 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 ./install.sh --dry-run   # shows every copy, keep and backup; writes nothing
-./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its sixteen suites
+./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its seventeen suites
 ```
 
 Then, in Claude Code, add the plugin that carries the commands and agents:
@@ -90,7 +90,7 @@ Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown m
 | `concord/PLAN_TEMPLATE.md` | `~/.claude/concord/` | the plan format |
 | `concord/REVIEW.md` | `~/.claude/concord/` | review checklists: generic, Python, C++, Kotlin, Swift, security, ML, tests |
 | `concord/*.conf` | `~/.claude/concord/` (kept if present) | model registry and billing routes, harness settings, worktree links |
-| `concord/tests/` | `~/.claude/concord/tests/` | sixteen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
+| `concord/tests/` | `~/.claude/concord/tests/` | seventeen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
 | `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` and the implementer, reviewer and verifier agents; also four hook rules (`install.sh --repo`), the rules file and a settings snippet to merge by hand |
 | `scripts/demo.sh`, `examples/` | nowhere | the credential-free demo and its plan |
 | `tests/` | nowhere | the repository's own checks: layout, budgets, install, docs, demo |
