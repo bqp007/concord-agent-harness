@@ -45,20 +45,22 @@ In its first ten days of daily use it recorded 293 verdicts; 82% of the phases g
 
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
-./install.sh --dry-run   # shows every copy, keep and backup; writes nothing
-./install.sh             # installs the dispatcher into ~/.claude/concord, then runs its nineteen suites
+bash install.sh --dry-run   # shows every link, copy, keep and backup; writes nothing
+bash install.sh             # the default: links the commands and agents into ~/.claude, installs the dispatcher, then runs its twenty suites
 ```
 
-Then, in Claude Code, add the plugin that carries the commands and agents:
+The default install symlinks the commands and agents into `~/.claude` and edits your live setup: it writes the Concord rules into `~/.claude/CLAUDE.md` between `<!-- concord:begin -->` and `<!-- concord:end -->`, and adds any missing keys to `~/.claude/settings.json`. It backs up each file it changes first and leaves everything outside the markers untouched.
+
+For the plugin marketplace layout instead, `bash install.sh --plugin` installs the dispatcher and prints the commands to run in Claude Code:
 
 ```text
 /plugin marketplace add bqp007/concord-agent-harness
 /plugin install concord@concord
 ```
 
-To update later, run `git pull && ./install.sh` in the clone, then `claude plugin marketplace update concord` and `claude plugin update concord@concord`, and restart Claude Code.
+To update, run `git pull` then `bash install.sh` in the clone, and restart Claude Code.
 
-Requirements (bash, git, Python 3.9+, Claude Code, OpenCode for the cheap executors), executor configuration and other harnesses such as Codex: [docs/SETUP.md](docs/SETUP.md). `install.sh` never edits `~/.claude/CLAUDE.md` or `~/.claude/settings.json`; it tells you what to merge by hand.
+Prose style lives in `~/.claude/concord/style.conf` (`prose = terse`, the default, or a sentence of your own). Requirements (bash, git, Python 3.9+, Claude Code, OpenCode for the cheap executors), executor configuration and other harnesses such as Codex: [docs/SETUP.md](docs/SETUP.md).
 
 ## Try it without credentials
 
@@ -90,8 +92,8 @@ Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown m
 | `concord/PLAN_TEMPLATE.md` | `~/.claude/concord/` | the plan format |
 | `concord/REVIEW.md` | `~/.claude/concord/` | review checklists: generic, Python, C++, Kotlin, Swift, security, ML, tests |
 | `concord/*.conf` | `~/.claude/concord/` (kept if present) | model registry and billing routes, harness settings, worktree links |
-| `concord/tests/` | `~/.claude/concord/tests/` | nineteen regression suites; `run_all.sh` runs them in parallel with a fake HOME |
-| `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` and the implementer and reviewer agents; also four hook rules (`install.sh --repo`), the rules file and a settings snippet to merge by hand |
+| `concord/tests/` | `~/.claude/concord/tests/` | twenty regression suites; `run_all.sh` runs them in parallel with a fake HOME |
+| `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` and the implementer and reviewer agents; also four hook rules (`install.sh --repo`), and the CLAUDE.md rules block and settings keys the installer writes |
 | `scripts/demo.sh`, `examples/` | nowhere | the credential-free demo and its plan |
 | `tests/` | nowhere | the repository's own checks: layout, budgets, install, docs, demo |
 | `docs/` | nowhere | setup, the workflow, the comparison, figures |

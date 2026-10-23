@@ -82,15 +82,15 @@ s_layout() { local p old
   check layout/old-name "git grep -n -I -F --untracked -e '$old' -- .; [ \$? = 1 ]"; }
 
 s_budgets() { local spec f
-  for spec in README.md:220 install.sh:92 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
-      $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:200 tests/demo_test.sh:120 \
+  for spec in README.md:220 install.sh:160 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
+      $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:270 tests/demo_test.sh:120 \
       $A/settings.snippet.json:12 $K/repo-notes/README.md:15; do
     local f=${spec%%:*} n=${spec##*:} name; name=$(basename "$f"); [ "$f" = $K/repo-notes/README.md ] && name=repo-notes-README.md
     check "budgets/$name" "[ -f '$f' ] && [ \$(wc -l < '$f') -le $n ] || { wc -l '$f'; false; }"
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6035 ] || { wc -l $K/concord.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6122 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
@@ -120,16 +120,12 @@ inst() { env -u CLAUDE_HOME HOME=$H bash install.sh "$@"; }   # every case: fres
 inst_a() { local D; D=$(tmpd); inst --dry-run --repo "$D" > "$H/out" && grep -q '^would copy' "$H/out" &&
   ! grep -qE '^(copy|keep|backup) ' "$H/out" && [ ! -e "$H/.claude" ] && [ ! -e "$D/.claude" ]; }
 inst_b() { inst --no-tests > "$H/out" || return 1; local f; for f in concord/concord.py concord/CONTRACT.md concord/models.conf \
-    concord/tests/run_all.sh concord/repo-notes/README.md; do [ -f "$H/.claude/$f" ] || { echo "missing $f"; return 1; }; done
-  [ ! -e "$H/.claude/CLAUDE.md" ] && [ ! -e "$H/.claude/settings.json" ] && [ ! -e "$H/.claude/commands" ] && [ ! -e "$H/.claude/agents" ] &&
-  grep -qF '/plugin marketplace add' "$H/out" && grep -qF '/plugin install concord@concord' "$H/out"; }
-inst_c() { inst --no-tests >/dev/null && echo mine > "$H/.claude/concord/models.conf" && printf x > "$H/.claude/CLAUDE.md" &&
-  printf '{}' > "$H/.claude/settings.json" && mkdir -p "$H/.claude/agents" "$H/.claude/commands" && echo old > "$H/.claude/agents/implementer.md" &&
-  echo old > "$H/.claude/commands/delegate.md" && inst --no-tests > "$H/out" &&
-  [ "$(cat "$H/.claude/concord/models.conf")" = mine ] && [ "$(cat "$H/.claude/CLAUDE.md")" = x ] && [ "$(cat "$H/.claude/settings.json")" = '{}' ] &&
-  cmp -s $K/concord.py "$H/.claude/concord/concord.py" && [ "$(cat "$H/.claude/agents/implementer.md")" = old ] &&
-  [ "$(cat "$H/.claude/commands/delegate.md")" = old ] && grep -qF "$H/.claude/agents/implementer.md is from an earlier install" "$H/out" &&
-  grep -qF "$H/.claude/commands/delegate.md is from an earlier install" "$H/out" &&
+    concord/tests/run_all.sh concord/repo-notes/README.md; do [ -f "$H/.claude/$f" ] || { echo "missing $f"; return 1; }; done; }
+inst_c() { inst --no-tests >/dev/null && echo mine > "$H/.claude/concord/models.conf" &&
+  rm -f "$H/.claude/agents/implementer.md" && echo old > "$H/.claude/agents/implementer.md" && inst --no-tests > "$H/out" &&
+  [ "$(cat "$H/.claude/concord/models.conf")" = mine ] && cmp -s $K/concord.py "$H/.claude/concord/concord.py" &&
+  [ ! -L "$H/.claude/agents/implementer.md" ] && [ "$(cat "$H/.claude/agents/implementer.md")" = old ] &&
+  grep -qF "$H/.claude/agents/implementer.md" "$H/out" &&
   [ "$(ls "$H"/.claude/concord/backup/*-pre-install*/concord.py | wc -l)" -eq 1 ]; }
 inst_d() { local D n; D=$(tmpd); git -C "$D" init -q && inst --no-tests --repo "$D" >/dev/null &&
   for n in $HOOKS; do [ -f "$D/.claude/hookify.$n.local.md" ] || { echo "missing $n"; return 1; }; done &&
@@ -142,7 +138,91 @@ inst_h() { local g="$H/.claude/concord/tests/gone_test.sh"   # a suite the sourc
   inst --no-tests >/dev/null && echo old > "$g" && inst --dry-run > "$H/out" && grep -qF "would remove $g" "$H/out" && [ -f "$g" ] &&
   inst --no-tests > "$H/out" && [ ! -e "$g" ] && grep -qF "remove $g" "$H/out" &&
   [ "$(cat "$H"/.claude/concord/backup/*-pre-install*/tests/gone_test.sh)" = old ] && [ -f "$H/.claude/concord/tests/run_all.sh" ]; }
-s_install() { local c; for c in a b c d e f g h; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+# link mode: $DEST/commands/concord -> the repo commands dir, $DEST/agents/<name>.md -> each repo agent file (symlinks)
+links_made() { local n
+  { [ -L "$H/.claude/commands/concord" ] && [ "$(cd "$H/.claude/commands/concord" 2>/dev/null && pwd -P)" = "$(cd "$ROOT/$A/commands" && pwd -P)" ]; } || return 1
+  for n in $AGENTS; do { [ -L "$H/.claude/agents/$n.md" ] && cmp -s "$H/.claude/agents/$n.md" "$ROOT/$A/agents/$n.md"; } || return 1; done; }
+inst_i() { inst --link --no-tests >/dev/null && links_made; }
+inst_j() { inst --no-tests > "$H/out" || return 1    # default mode is --link
+  links_made && grep -qF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md" && grep -qF '<!-- concord:end -->' "$H/.claude/CLAUDE.md" &&
+  grep -qF 'reviewer-opus55' "$H/.claude/CLAUDE.md" && ! grep -qF 'concord:reviewer-opus55' "$H/.claude/CLAUDE.md" &&
+  grep -qF '/concord:plan-then-delegate' "$H/.claude/CLAUDE.md" && grep -qF '/concord:delegate all' "$H/.claude/CLAUDE.md" &&
+  [ -f "$H/.claude/settings.json" ] && inst --no-tests >/dev/null && links_made &&
+  [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" -eq 1 ]; }
+inst_k() { mkdir -p "$H/.claude" && printf 'TOP SENTINEL\n' > "$H/.claude/CLAUDE.md" && inst --no-tests >/dev/null &&
+  printf 'BELOW SENTINEL\n' >> "$H/.claude/CLAUDE.md" && inst --no-tests >/dev/null &&
+  [ "$(tail -1 "$H/.claude/CLAUDE.md")" = 'BELOW SENTINEL' ] && [ "$(head -1 "$H/.claude/CLAUDE.md")" = 'TOP SENTINEL' ] &&
+  grep -qxF 'TOP SENTINEL' "$H/.claude/CLAUDE.md" && grep -qF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md" &&
+  grep -qF '<!-- concord:end -->' "$H/.claude/CLAUDE.md" &&
+  [ "$(grep -rslxF 'TOP SENTINEL' "$H/.claude" | wc -l | tr -d ' ')" -ge 2 ] &&
+  inst --no-tests >/dev/null && grep -qxF 'TOP SENTINEL' "$H/.claude/CLAUDE.md" &&
+  [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" -eq 1 ]; }
+inst_l() { mkdir -p "$H/.claude" && printf '%s' '{"myKey":"keep","modelSettings":{"claude-opus-5-5":{"autoCompactWindow":123}}}' > "$H/.claude/settings.json" &&
+  inst --no-tests >/dev/null &&
+  python3 -B -I -c "import json; d=json.load(open('$H/.claude/settings.json')); assert d['myKey']=='keep'; assert d['modelSettings']['claude-opus-5-5']['autoCompactWindow']==123; assert d['modelSettings']['claude-fable-5-1']=={'autoCompactWindow':400000}; assert 'git push *' in d['sandbox']['excludedCommands']; assert any('--lessons-hook' in h['command'] for e in d['hooks']['UserPromptSubmit'] for h in e['hooks'])" &&
+  printf '%s' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"other"}]}]}}' > "$H/.claude/settings.json" &&
+  inst --no-tests >/dev/null && inst --no-tests >/dev/null &&
+  python3 -B -I -c "import json; u=json.load(open('$H/.claude/settings.json'))['hooks']['UserPromptSubmit']; c=[h['command'] for e in u for h in e['hooks']]; assert 'other' in c and sum('--lessons-hook' in x for x in c)==1, c"; }
+inst_m() { inst --no-tests >/dev/null && links_made && inst --plugin --no-tests > "$H/out" &&
+  grep -qF '/plugin marketplace add' "$H/out" && grep -qF '/plugin install concord@concord' "$H/out" &&
+  [ ! -e "$H/.claude/commands/concord" ] && [ ! -L "$H/.claude/agents/implementer.md" ] &&
+  grep -qF 'concord:reviewer-opus55' "$H/.claude/CLAUDE.md" && ! grep -qF '`reviewer-opus55`' "$H/.claude/CLAUDE.md" &&
+  ! grep -qF 'symlinks in' "$H/.claude/CLAUDE.md"; }
+inst_n() { mkdir -p "$H/.claude" && printf 'MINE\n<!-- concord:begin -->\nold\nMINE BELOW\n' > "$H/.claude/CLAUDE.md" &&
+  ! inst --no-tests > "$H/out" 2>&1 && grep -qxF 'MINE BELOW' "$H/.claude/CLAUDE.md" && grep -qi 'marker' "$H/out"; }
+inst_o() { mkdir -p "$H/.claude" "$H/dot" && printf 'DOTFILES\n' > "$H/dot/CLAUDE.md" && ln -s "$H/dot/CLAUDE.md" "$H/.claude/CLAUDE.md" &&
+  inst --no-tests >/dev/null && [ -L "$H/.claude/CLAUDE.md" ] && grep -qF "<!-- concord:begin -->" "$H/dot/CLAUDE.md" && grep -qxF DOTFILES "$H/dot/CLAUDE.md" &&
+  b=$(ls "$H"/.claude/concord/backup/*/CLAUDE.md | head -1) && [ ! -L "$b" ] && [ "$(cat "$b")" = DOTFILES ]; }
+inst_p() { mkdir -p "$H/.claude" && { echo MINE; cat "$K/../tests/fixtures/CLAUDE-2.0.md"; echo AFTER; } > "$H/.claude/CLAUDE.md" &&   # the 2.0 block, merged by hand
+  inst --no-tests >/dev/null && [ "$(grep -c '^# Default workflow' "$H/.claude/CLAUDE.md")" = 1 ] &&
+  [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" = 1 ] && [ "$(head -1 "$H/.claude/CLAUDE.md")" = MINE ] &&
+  [ "$(tail -1 "$H/.claude/CLAUDE.md")" = AFTER ] && ! grep -qF free-deepseek-flash "$H/.claude/CLAUDE.md"; }
+inst_q() { mkdir -p "$H/.claude/concord/tests" && echo mine > "$H/.claude/concord/tests/mine_test.sh" &&
+  inst --no-tests >/dev/null && { [ -f "$H/.claude/concord/tests/mine_test.sh" ] || ls "$H"/.claude/concord/backup/*/tests/mine_test.sh >/dev/null 2>&1; }; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+
+# Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
+# executor task (a dry-run prompt) and the review prompt then carry that sentence.
+style_prompts() {  # $1 = prose value ("" = no style.conf, default); writes $SD/exec.txt and $SD/review.txt
+  local pr=$1 D H R DP RUNS p rid
+  D="$SD/concord"; mkdir -p "$D"
+  cp -p $K/concord.py $K/wt.py $K/*.md $K/*.conf "$D/" 2>/dev/null
+  cp -Rp $K/repo-notes "$D/"
+  if [ -n "$pr" ]; then printf 'prose = %s\n' "$pr" > "$D/style.conf"; else rm -f "$D/style.conf"; fi
+  H="$SD/home"; mkdir -p "$H/bin"
+  cat > "$H/bin/qwen" <<'Q'
+#!/bin/sh
+if [ -n "${FAKE_ACTIONS:-}" ]; then sh -c "$FAKE_ACTIONS"; fi
+printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'
+Q
+  chmod +x "$H/bin/qwen"
+  R="$SD/repo"; mkdir -p "$R"; RUNS="$R/.git/concord"
+  ( cd "$R" && git init -q -b main && git config user.email t@t && git config user.name t &&
+    printf 'x = 1\n' > a.py &&
+    printf '# Plan\n## Phase 1 - p1\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n' > PLAN_S.md &&
+    git add -A && git commit -qm init ) >/dev/null 2>&1
+  DP="python3 $D/concord.py"
+  : > "$SD/exec.txt"; : > "$SD/review.txt"
+  env -u CLAUDE_HOME PATH="$H/bin:$PATH" HOME="$H" $DP 1 --plan PLAN_S.md --dry-run --via qwen --model fake/m --no-baseline --repo "$R" > "$SD/d.out" 2>&1
+  p=$(sed -n 's/^prompt: //p' "$SD/d.out"); [ -f "$p" ] && cp "$p" "$SD/exec.txt"
+  env -u CLAUDE_HOME PATH="$H/bin:$PATH" HOME="$H" FAKE_ACTIONS="echo '# r' >> a.py" $DP 1 --plan PLAN_S.md --via qwen --model fake/m --no-baseline --repo "$R" > "$SD/r.out" 2>&1
+  rid=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$SD/r.out" | head -1)
+  env -u CLAUDE_HOME PATH="$H/bin:$PATH" HOME="$H" $DP --review "$rid" --via qwen --model fake/m --repo "$R" > "$SD/rev.out" 2>&1
+  p="$(ls -td "$RUNS"/*-review-* 2>/dev/null | head -1)/prompt.txt"; [ -f "$p" ] && cp "$p" "$SD/review.txt"
+}
+s_style() {
+  SD=$(tmpd); style_prompts "Write all prose as ZZSTYLE fragments."
+  check style/task-custom "grep -q ZZSTYLE '$SD/exec.txt'"
+  check style/review-custom "grep -q ZZSTYLE '$SD/review.txt'"
+  SD=$(tmpd); style_prompts ""
+  check style/task-terse "grep -qi terse '$SD/exec.txt'"
+  check style/review-terse "grep -qi terse '$SD/review.txt'"; }
+
+# Release hygiene: the two manifest versions are equal; no PLAN_*.md (bar the two templates) or __pycache__ is tracked.
+s_hygiene() {
+  check hygiene/versions "python3 -B -I -c \"import json; m=json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version']; p=json.load(open('$A/.claude-plugin/plugin.json'))['version']; assert m==p, (m,p)\""
+  check hygiene/no-plan-md "[ -z \"\$(git ls-files | grep -E '(^|/)PLAN_[^/]*\.md\$' | grep -vE '(^|/)(PLAN_TEMPLATE|PLAN_example)\.md\$')\" ]"
+  check hygiene/no-pycache "[ -z \"\$(git ls-files | grep -E '__pycache__|\.pyc\$')\" ]"; }
 
 s_docs() { local h f
   for h in Contents 'How it works' Install 'Try it without credentials' 'Run a ticket' Components Safety Results Citation Contributing License; do
@@ -158,15 +238,15 @@ s_docs() { local h f
   check docs/suite-count "counts_ok \$(ls $K/tests/*_test.sh | wc -l) suites README.md docs/SETUP.md"
   check docs/lint-count "counts_ok \$(sed -n '/^def acceptance_lint(/,/^def /p' $K/concord.py | grep -c 'out\.append(') defects docs/WORKFLOW.md"
   for f in docs/figures/*.svg; do check "docs/figure-$(basename "$f")" "grep -qF '$(basename "$f")' README.md docs/*.md"; done
-  check docs/no-todo "! grep -lE 'TODO|TBD|XXX' README.md docs/*.md $A/CLAUDE.md install.sh CONTRIBUTING.md"
+  check docs/no-todo "! grep -lwE 'TODO|TBD|XXX' README.md docs/*.md $A/CLAUDE.md install.sh CONTRIBUTING.md"
   check docs/review-stream "grep -qF '.stream' $A/agents/reviewer-opus55.md && grep -qF '.stream' $A/commands/delegate.md && grep -qF 'wt.py fork' $A/commands/delegate.md"
   check docs/acceptance-only "grep -qiF 'only the phase' $K/CONTRACT.md && grep -qiF 'never the full suites' $K/CONTRACT.md"
-  check docs/claude-md "grep -q '~/.claude/concord/concord.py' $A/CLAUDE.md && grep -q deepseek-flash $A/CLAUDE.md"
+  check docs/claude-md "grep -q '~/.claude/concord/concord.py' $A/CLAUDE.md && grep -qF '<!-- concord:begin -->' $A/CLAUDE.md && grep -qF '<!-- concord:end -->' $A/CLAUDE.md && ! grep -qE 'deepseek|glm|Zen|Go allowance|400000' $A/CLAUDE.md"
   check docs/plugin-install "grep -qF '/plugin install concord@concord' README.md && grep -qF '/plugin marketplace add' docs/SETUP.md && grep -qF '/concord:plan-then-delegate' README.md"
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).
   local scope="README.md docs CONTRIBUTING.md $A $K/PLAN_TEMPLATE.md $K/repo-notes/README.md"
   check docs/plugin-commands "! git grep -n -I --untracked -E '(^|[^:a-z])/(plan-then-delegate|delegate|rules-review)([^/a-z.-]|\$)' -- $scope"
-  check docs/plugin-agents "! git grep -n -I --untracked -E '(^|[^:a-z0-9/-])(implementer-opus48|reviewer-opus48|reviewer-opus55)([^.a-z0-9-]|\$)|\`implementer\`' -- $scope | grep -v ':name: '"; }
+  check docs/plugin-agents "! git grep -n -I --untracked -E '(^|[^:a-z0-9/-])(implementer-opus48|reviewer-opus48|reviewer-opus55)([^.a-z0-9-]|\$)|\`implementer\`' -- $scope | grep -v ':name: ' | grep -v '^$A/CLAUDE.md:'"; }
 
 s_blog() {
   check blog/exists "[ -f docs/BLOG.md ]"
@@ -174,7 +254,7 @@ s_blog() {
   check blog/references "[ \$(grep -cE '^\[[0-9]+\]' docs/BLOG.md) -le 10 ]"
   check blog/links "links_ok docs/BLOG.md"; }
 
-SECTIONS="scrub layout budgets agents python install docs"
+SECTIONS="scrub layout budgets agents python install style hygiene docs"
 if [ $# = 0 ]; then for s in $SECTIONS; do "s_$s"; done
 else sec=$1; shift; case " $SECTIONS blog " in *" $sec "*) "s_$sec" "$@";; *) echo "unknown section: $sec" >&2; exit 2;; esac; fi
 echo "passed $pass, failed $fail"

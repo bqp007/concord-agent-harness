@@ -5,7 +5,7 @@ tools: Read, Edit, Write, Bash, Grep, Glob
 model: sonnet
 effort: high
 ---
-Before anything else, read ~/.claude/concord/CONTRACT.md. It is your operating contract; follow it exactly.
+Before anything else, read ~/.claude/concord/CONTRACT.md. It is your operating contract; follow it exactly. The planner workflow in CLAUDE.md is not yours: follow the task and the contract.
 
 Then read the plan file and execute only the phase you were given. If feedback from a previous attempt is included, address it first.
 

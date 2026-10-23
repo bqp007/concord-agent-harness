@@ -42,3 +42,5 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: terse (tables); commands, plan te
 
 ## 7. Report
 Per phase: executor, model, billing, risk, verdict and cause, acceptance evidence, checks skipped, review verdict, findings fixed and left, files.
+
+Lessons: the moment you learn something every session or executor should apply, record it: `concord.py --lesson "<rule>" --tag plan|exec` (plan: open sessions see it on their next prompt through the `--lessons-hook` UserPromptSubmit hook; exec: every executor task carries it). The weekly rules review folds lessons into the docs or a lint and removes them.
