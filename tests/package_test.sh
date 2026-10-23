@@ -14,7 +14,7 @@ tmpd() { mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX"; }
 check() { local name=$1; shift; local out
   if out=$(cd "$ROOT" && eval "$*" 2>&1); then echo "check $name: ok"; pass=$((pass+1))
   else echo "check $name: FAIL $(echo "$out" | tail -1 | cut -c1-120)"; fail=$((fail+1)); fi; }
-AGENTS="implementer implementer-opus48 reviewer-opus48 reviewer-opus55 verifier"
+AGENTS="implementer implementer-opus48 reviewer-opus55 verifier"
 COMMANDS="plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
 SUITES="acclint delegate delta guards papers pr_review protocol slim testquality worktree"
@@ -90,9 +90,9 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6829 ] || { wc -l $K/concord.py; false; }"
-  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 441 ] || { wc -l $K/wt.py; false; }"
-  check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 30 ] || { grep -c '=' $K/models.conf; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6908 ] || { wc -l $K/concord.py; false; }"
+  check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 460 ] || { wc -l $K/wt.py; false; }"
+  check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 16 ]"
   check budgets/static_checks "grep -q '^static_checks = yes' $K/executors.conf"
   check budgets/track_ignored "grep -q '^track_ignored = yes' $K/executors.conf"; }
@@ -100,9 +100,8 @@ s_budgets() { local spec f
 s_agents() { local a
   for a in $AGENTS; do check "agents/$a.md" "grep -q '^name: $a\$' $A/agents/$a.md"; done
   for a in implementer implementer-opus48; do check "agents/contract-$a.md" "grep -q '~/.claude/concord/CONTRACT.md' $A/agents/$a.md"; done
-  check agents/model-reviewer-opus48.md "grep -q '^model: claude-opus-4-8\$' $A/agents/reviewer-opus48.md"
   check agents/model-reviewer-opus55.md "grep -q '^model: claude-opus-5-5\$' $A/agents/reviewer-opus55.md"
-  for a in agents/implementer-opus48 agents/reviewer-opus48 agents/reviewer-opus55 commands/plan-then-delegate commands/delegate commands/rules-review; do
+  for a in agents/implementer-opus48 agents/reviewer-opus55 commands/plan-then-delegate commands/delegate commands/rules-review; do
     check "agents/terse-$(basename $a).md" "grep -q terse $A/$a.md"; done
   check agents/concord.py "grep -qF 'Write all prose tersely: exact, no hedging, no praise.' $K/concord.py"
   check agents/CONTRACT.md "grep -qF 'terse (fragments, abbreviations, no filler)' $K/CONTRACT.md"; }
@@ -113,8 +112,8 @@ s_python() {
   check python/resolve-glm "python3 -B -I $K/concord.py --resolve glm >/dev/null"
   check python/resolve-kimi "python3 -B -I $K/concord.py --resolve kimi-k3 >/dev/null"
   check python/wt-help "python3 -B -I $K/wt.py --help >/dev/null"
-  check python/plugin-names "python3 -B -I $K/concord.py --help | grep -q 'concord:reviewer-opus48'"
-  check python/plugin-hints "[ \$(grep -c 'subagent_type concord:reviewer-opus48 (medium) or concord:reviewer-opus55 (high)' $K/concord.py) = 2 ]"
+  check python/plugin-names "python3 -B -I $K/concord.py --help | grep -q 'concord:reviewer-opus55'"
+  check python/plugin-hints "[ \$(grep -c 'subagent_type concord:reviewer-opus55 with prompt' $K/concord.py) = 2 ]"
   check python/settings "python3 -B -I -c \"import json; d=json.load(open('$A/settings.snippet.json')); m=d['modelSettings']; assert m['claude-opus-5-5']=={'autoCompactWindow':400000} and m['claude-fable-5-1']=={'autoCompactWindow':400000}; assert 'git push *' in d['sandbox']['excludedCommands']\""; }
 
 inst() { env -u CLAUDE_HOME HOME=$H bash install.sh "$@"; }   # every case: fresh H, CLAUDE_HOME unset

@@ -422,8 +422,8 @@ order(){ awk -v x="$1" '/^MAP LINT/{m=NR} /^PROMOTE/{if(!p)p=NR; q=NR} index($0,
 lint 1 PLAN_G.md; grep '^PROMOTE' "$T/out.txt" > "$T/got.txt"
 cmp -s "$T/want.txt" "$T/got.txt" && ok "G.1 exact PROMOTE lines: classes seen twice without a rule, case-insensitive, tickets once" || { bad "G.1"; diff "$T/want.txt" "$T/got.txt"; }
 order "DRY RUN LINT" && ok "G.2 PROMOTE after MAP LINT, before DRY RUN LINT" || { bad "G.2"; cut -c1-90 "$T/out.txt"; }
-$DP --lint 2 --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1
-order "LINT SKIPPED" && ok "G.3 PROMOTE also before LINT SKIPPED (Claude executor)" || { bad "G.3"; cut -c1-90 "$T/out.txt"; }
+lint 2 PLAN_G.md
+order "DRY RUN LINT" && ok "G.3 a Claude-executor phase: the same PROMOTE lines, then a model lint" || { bad "G.3"; cut -c1-90 "$T/out.txt"; }
 nogaps
 fi
 

@@ -16,7 +16,7 @@ The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 ./install.sh --dry-run            # shows every copy, keep and backup; writes nothing
-./install.sh                      # installs the dispatcher, then runs Concord's seventeen test suites from the installed copy
+./install.sh                      # installs the dispatcher, then runs Concord's eighteen test suites from the installed copy
 ./install.sh --repo ~/src/myrepo  # also drops the hook rules into that repository's .claude/
 ```
 
@@ -42,7 +42,7 @@ Restart Claude Code once after installing: new agent files load only at session 
 - `concord/models.conf` maps plain names to a harness and a model id: `deepseek-flash` (default), `glm`, `kimi`, `qwen` and `minimax` on the OpenCode Go allowance; `zen-*` on OpenCode credits. `sonnet`, `haiku` and `opus` always mean the Claude Code `concord:implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
 - Reasoning effort for OpenCode models is the `#high` suffix on the model id.
 - The native `qwen`, `pi`, `dsh` and `kimi` harness adapters ship but are untested in this release; OpenCode is the reference harness.
-- Review tiers are fixed in `concord.py` (`TIER_RANK`, `REVIEWER_RANK`): low = a cheap `--review` run, medium = the `concord:reviewer-opus48` agent, high = `concord:reviewer-opus55`; the dispatcher drops the `concord:` prefix before it compares. To retarget a tier, change the agent file's `model:` line and the `REVIEWER_RANK` entry together; `concord/tests/guards_test.sh` pins the names.
+- Review tiers are fixed in `concord.py` (`TIER_RANK`, `REVIEWER_RANK`): low = a cheap `--review` run, medium and high = the `concord:reviewer-opus55` agent; the dispatcher drops the `concord:` prefix before it compares. To retarget a tier, change the agent file's `model:` line and the `REVIEWER_RANK` entry together; `concord/tests/guards_test.sh` pins the names.
 
 ## Other harnesses
 
@@ -69,7 +69,7 @@ Reports, ledgers, red runs, scope enforcement on OpenCode, attempt caps and tier
 ```bash
 bash tests/package_test.sh                 # the repository's contract (about a minute; installs into temporary HOMEs)
 bash tests/demo_test.sh                    # the credential-free demo, end to end
-bash concord/tests/run_all.sh              # the dispatcher's seventeen suites against this checkout
+bash concord/tests/run_all.sh              # the dispatcher's eighteen suites against this checkout
 bash ~/.claude/concord/tests/run_all.sh   # the same suites against the installed copy
 ```
 

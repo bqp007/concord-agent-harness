@@ -141,7 +141,7 @@ MAX_EXECUTOR_ATTEMPTS = 3
 TIER_RANK = {"low": 1, "medium": 2, "high": 3}
 TIER_NAME = {1: "low", 2: "medium", 3: "high"}
 REVIEWER_RANK = {"reviewer-opus48": 2, "reviewer-opus55": 3}
-TIER_REVIEWER = {"low": "a flash review (concord.py --review)", "medium": "concord:reviewer-opus48",
+TIER_REVIEWER = {"low": "a flash review (concord.py --review)", "medium": "concord:reviewer-opus55",
                  "high": "concord:reviewer-opus55"}
 RISK_FLOOR_LINE = re.compile(r"^\s*(?:[-*]\s+)?risk floor\s+(\w+)\s*:\s*(.*)$", re.I)  # repo-notes floor line
 # Provider refusals in the executor log: (log text, report label, what to do). Not executor failures:
@@ -151,6 +151,9 @@ PROVIDER_REFUSALS = (
      "the model provider refused the content (a content filter); retrying will not help: give this material to a Claude subagent"),
     ("usage limit exceeded", "PROVIDER LIMIT",
      "the subscription allowance is used up; stop and ask before any zen-* run (Zen bills credits)"),
+    ("Free usage limit reached", "PROVIDER LIMIT",
+     "the Zen free tier's daily limit is used up; rerun on the Go alias (free-deepseek-flash -> deepseek-flash, "
+     "free-glm-flash -> glm-flash)"),
 )
 
 
@@ -421,6 +424,8 @@ def billing(executor, model):
     if executor == "opencode":
         if model.startswith("opencode-go/"):
             return "OpenCode Go subscription allowance"
+        if model.startswith("opencode/") and model.split("#", 1)[0].endswith("-free"):
+            return "OpenCode Zen free tier (no credits)"
         return "OpenCode Zen credits" if model.startswith("opencode/") else "provider key configured in OpenCode"
     return f"{executor}'s own login/key"
 
@@ -631,14 +636,6 @@ def parse_executor(phase_text):
     return clean_executor_name(value)
 
 
-def claude_executor(name):
-    """True when the phase's Executor names a Claude model (lint would only repeat the planner): sonnet, haiku,
-    opus, fable, a concord:implementer* agent, or anything CLAUDE_MODEL matches."""
-    n = norm(name)
-    return bool(n) and (n.startswith("concordimplementer") or n.startswith("implementer")
-                        or "fable" in n or bool(CLAUDE_MODEL.search(name)))
-
-
 def parse_files(phase_text):
     inline, body = field_block(phase_text, "Files")
     strip_notes = lambda s: re.sub(r"\([^)]*\)", " ", s)
@@ -665,6 +662,12 @@ def parse_backticked(phase_text, name):
     for line in ([inline] if inline else []) + body:
         out += re.findall(r"`([^`]+)`", line)
     return out
+
+
+def interface_signatures(phase_text):
+    """The Interfaces: spans shaped like a signature (an identifier, optionally . or :: qualified, then `(`)."""
+    return [span for span in parse_backticked(phase_text, "Interfaces")
+            if re.search(r"[A-Za-z_][\w.:]*\(", span)]
 
 
 MARKED = re.compile(r"\(characterization\b[^)]*\)", re.I)
@@ -1672,14 +1675,28 @@ def release_lock(root, run_id=None):
 
 # ---------- run lifecycle ----------
 
+def read_plan(repo, value):
+    """The plan file and its text, or exit 2 with the reason: not found, unreadable, or not UTF-8."""
+    plan = Path(value)
+    if not plan.is_absolute():
+        plan = repo / plan
+    if not os.path.isfile(plan):
+        die(f"plan not found: {plan}")
+    try:
+        data = plan.read_bytes()
+    except OSError as exc:
+        die(f"plan not readable: {plan} ({exc.strerror})")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"plan is not UTF-8 text: {plan}")
+    return plan, os.path.relpath(plan, repo), text
+
+
 def load_plan_phase(args, phase):
     repo = repo_root(args.repo or os.getcwd())
-    plan = Path(args.plan)
-    plan = plan if plan.is_absolute() else repo / plan
-    if not plan.is_file():
-        die(f"plan not found: {plan}")
-    plan_rel = os.path.relpath(plan, repo)
-    phase_text = extract_phase(plan.read_text(), phase)
+    plan, plan_rel, text = read_plan(repo, args.plan)
+    phase_text = extract_phase(text, phase)
     return repo, plan, plan_rel, phase_text
 
 
@@ -1958,7 +1975,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
-        "budget": parse_budget(phase_text), "interfaces": parse_backticked(phase_text, "Interfaces"),
+        "budget": parse_budget(phase_text), "interfaces": interface_signatures(phase_text),
         "characterize": char_cmds, "check_timeout": timeout_s,
         "track_ignored": track_ignored, "head_before": git(repo, "rev-parse", "HEAD").strip(),
         "branch_before": branch_of(repo), "staged_before": staged(repo), "git_internals": git_internals(repo),
@@ -2553,7 +2570,7 @@ def cmd_run(args, target, phase, conf):
         print(f"risk: {parse_word(phase_text, 'Risk', ('low', 'medium', 'high'), 'medium')}   "
               f"baseline: {parse_word(phase_text, 'Baseline', ('fail', 'pass', 'skip'), 'fail')}   "
               f"budget: {parse_budget(phase_text) or '-'}   "
-              f"interfaces: {len(parse_backticked(phase_text, 'Interfaces'))}   "
+              f"interfaces: {len(interface_signatures(phase_text))}   "
               f"characterize: {parse_backticked(phase_text, 'Characterize') or '-'}")
         print(f"repo notes: {'yes (' + str(NOTES_DIR / (repo.name + '.md')) + ')' if repo_notes(repo) else 'none'}")
         if not files:
@@ -3733,8 +3750,8 @@ def cmd_review_packet(args):
     packet = run_dir / f"review-packet-{n}.md"
     packet.write_text(f"{REVIEW_TASK}\n---\n\n{task}")
     print(f"PACKET {packet}\nrun {run_dir.name}, checklists {', '.join(names)}, files {', '.join(files)}, "
-          f"{len(packet.read_text()):,} chars\nnext: Agent subagent_type concord:reviewer-opus48 (medium) or concord:reviewer-opus55 (high) "
-          f"with prompt \"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record "
+          f"{len(packet.read_text()):,} chars\nnext: Agent subagent_type concord:reviewer-opus55 with prompt "
+          f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record "
           f"{run_dir.name} --reviewer <name> --file <its output saved to a file>")
     return 0
 
@@ -4599,7 +4616,7 @@ def write_pr_packet(root, n, slug, base, head, tier, files, excluded, names, tas
     packet.write_text(f"{REVIEW_TASK}\n---\n\n{task}")
     print(f"PACKET {packet}\nrun {run_dir.name}, head {head[:8]}, tier {tier}, checklists {', '.join(names)}, "
           f"files {', '.join(files)}, {len(packet.read_text()):,} chars")
-    print(f"next: Agent subagent_type concord:reviewer-opus48 (medium) or concord:reviewer-opus55 (high) with prompt "
+    print(f"next: Agent subagent_type concord:reviewer-opus55 with prompt "
           f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record {run_dir.name} "
           f"--reviewer <name> --file <its output saved to a file>")
     return 0
@@ -5227,15 +5244,11 @@ def cmd_lint(args, phase, target, conf):
         print(f"ACCEPTANCE LINT: {f}")
     for f in context_lint(phase_text):
         print(f"CONTEXT LINT: {f}")
-    for f in map_lint(plan.read_text()):
+    for f in map_lint(read_plan(repo, plan)[2]):
         print(f"MAP LINT: {f}")
     gap_checklist, promote_lines = repo_gaps(repo)
     for line in promote_lines:
         print(line)
-    phase_executor = parse_executor(phase_text)
-    if claude_executor(phase_executor):       # a Claude implementer: a cheap second reading would only repeat us
-        print(f"LINT SKIPPED: executor {phase_executor} is a Claude model")
-        return 0
     target = target or settings.get("lint") or settings.get("default") or ""
     if not target:
         die("no lint model: name one, or set `lint =` / `default =` in models.conf")
@@ -5305,12 +5318,7 @@ def _mermaid_label(node, status=None):
 def cmd_map(args, conf):
     """Zero-token: the plan's Intent/Structure/Work map with per-work-item status (or a Mermaid mindmap)."""
     repo = repo_root(args.repo or os.getcwd())
-    plan = Path(args.map)
-    plan = plan if plan.is_absolute() else repo / plan
-    if not plan.is_file():
-        die(f"plan not found: {plan}")
-    plan_rel = os.path.relpath(plan, repo)
-    text = plan.read_text()
+    plan, plan_rel, text = read_plan(repo, args.map)
     m = parse_map(text)
     pids = phase_ids(text)
     root = runs_root(repo)
@@ -5919,11 +5927,13 @@ def latest_run(root, want="any"):
 def find_run(root, run_id, want="any"):
     """Resolve a run id; "last" = latest_run(root, want). Exits when nothing fits. The ledger directory is
     not a run (C22)."""
-    if run_id == "ledger":
+    if run_id.casefold() == "ledger":     # LEDGER names the same folder on a case-insensitive filesystem
         die("ledger is not a run (it is the review ledger directory)")
     if run_id != "last":
+        if not run_id or run_id in (".", "..") or "/" in run_id or os.sep in run_id:
+            die(f"no such run: {run_id}")
         run_dir = root / run_id
-        if not run_dir.is_dir():
+        if not os.path.isdir(run_dir):
             die(f"no such run: {run_id}")
         return run_dir
     run_dir = latest_run(root, want)
@@ -6449,8 +6459,6 @@ def cmd_mutate(args, conf):
 
     With --mutants, or when the run changed a C/C++ source, mutation runs in an isolated copy of the checkout
     (no run lock, live files untouched); otherwise the live Python mode below runs unchanged."""
-    if "/" in (args.mutate or "") or (args.mutate or "").startswith("."):
-        die(f"--mutate takes a run id or 'last', not a path: {args.mutate}", code=2)
     if args.max < 1:
         die("--max must be >= 1", code=2)
     repo = repo_root(args.repo or os.getcwd())
@@ -6642,6 +6650,75 @@ def cmd_list(conf):
     return 0
 
 
+def _rel_files(root):
+    """{path relative to root: absolute path} of the regular files under root; os.walk only, so a name the OS
+    refuses to look up is skipped instead of raising (Path.rglob raises OSError on Python 3.9)."""
+    files = {}
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            p = os.path.join(dirpath, name)
+            if os.path.isfile(p):
+                files[os.path.relpath(p, root)] = p
+    return files
+
+
+def _same_bytes(a, b):
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def release_lines():
+    """--check lines: the installed plugin and dispatcher against their marketplace source, or the record that
+    could not be read. Never raises: any unreadable, malformed or wrongly shaped record is 'not checked'."""
+    prefix = f"{'release':9s} "
+    P = Path.home() / ".claude" / "plugins"
+    try:
+        entry = json.loads((P / "installed_plugins.json").read_text())["plugins"]["concord@concord"][0]
+        install_path, version = entry["installPath"], entry["version"]
+        if not isinstance(install_path, str):
+            raise ValueError(install_path)
+    except Exception:
+        return [prefix + f"not checked: no concord@concord in {P}/installed_plugins.json"]
+    try:
+        market = json.loads((P / "known_marketplaces.json").read_text())["concord"]["installLocation"]
+        M = Path(market)
+    except Exception:
+        return [prefix + f"not checked: no concord marketplace in {P}/known_marketplaces.json"]
+    manifest = M / ".claude-plugin" / "marketplace.json"
+    try:
+        item = next(p for p in json.loads(manifest.read_text())["plugins"] if p.get("name") == "concord")
+        source = M / item["source"]
+    except Exception:
+        return [prefix + f"not checked: no concord plugin in {manifest}"]
+    out = []
+    if not os.path.isdir(source):
+        out.append(prefix + f"not checked: no plugin source at {source}")
+    elif not os.path.isdir(install_path):
+        out.append(prefix + f"not checked: no installed plugin at {install_path}")
+    else:
+        mine, theirs = _rel_files(source), _rel_files(install_path)
+        differs = sorted(r for r in set(mine) | set(theirs)
+                         if r not in mine or r not in theirs or not _same_bytes(mine[r], theirs[r]))
+        if differs:
+            out.append(prefix + f"plugin concord@concord {version}: differs from {source} in {len(differs)} file(s): "
+                       f"{', '.join(differs)}; update: claude plugin marketplace update concord && "
+                       "claude plugin update concord@concord")
+        else:
+            out.append(prefix + f"plugin concord@concord {version}: in sync with {source}")
+    D = M / "concord" / "concord.py"
+    if not os.path.isfile(D):
+        out.append(prefix + f"not checked: no dispatcher source at {D}")
+    elif _same_bytes(D, Path(__file__)):
+        out.append(prefix + f"dispatcher: same as {D}")
+    else:
+        out.append(prefix + f"dispatcher: differs from {D}; install both from one checkout "
+                   f"(bash {M}/install.sh, then update the plugin)")
+    return out
+
+
 def cmd_check(conf):
     for name in EXECUTORS:
         binary = resolve_bin(name, conf)
@@ -6656,6 +6733,8 @@ def cmd_check(conf):
             print(f"{name:9s} exit {res.returncode}: {out[0] if out else ''}"[:160])
         except subprocess.TimeoutExpired:
             print(f"{name:9s} timeout")
+    for line in release_lines():
+        print(line)
     return 0
 
 
@@ -6699,7 +6778,7 @@ def main():
                         help="adjudicate ids from any reviewer and record the verdict in one call")
     parser.add_argument("--verdict-result", choices=["PASS", "FAIL"],
                         help="with --close-round: the verdict to record after adjudicating")
-    parser.add_argument("--reviewer", help="with --review-record: reviewer name (e.g. concord:reviewer-opus48)")
+    parser.add_argument("--reviewer", help="with --review-record: reviewer name (e.g. concord:reviewer-opus55)")
     parser.add_argument("--file", help="with --review-record: file holding the reviewer's REVIEW-JSON answer")
     parser.add_argument("--adopted", type=int, help="with --review-adjudicate: findings the verifier adopted")
     parser.add_argument("--incorrect", type=int, help="with --review-adjudicate: findings that were wrong")
