@@ -5744,11 +5744,10 @@ def cmd_resolve(text):
 
 def cmd_models(verify, conf):
     entries, settings = load_models()
-    listed, notes = None, []
+    listed, checked, notes = set(), (), []
     if verify:
         # Both catalogs are public; `opencode models` prints nothing in some builds.
         import urllib.request
-        listed = set()
         for prefix, url, label in (("opencode/", "https://opencode.ai/zen/v1/models", "Zen"),
                                    ("opencode-go/", "https://opencode.ai/inference/go/v1/models", "Go")):
             try:
@@ -5758,6 +5757,7 @@ def cmd_models(verify, conf):
                 items = data.get("data", data) if isinstance(data, dict) else data
                 ids = {prefix + (x.get("id") if isinstance(x, dict) else str(x)) for x in items}
                 listed |= ids
+                checked += (prefix,) if ids else ()      # mark only the lines of a catalog that answered
                 if not ids:
                     notes.append(f"note: {label} catalog returned no models")
             except Exception as exc:  # network or format problem: say so, do not guess
@@ -5766,7 +5766,7 @@ def cmd_models(verify, conf):
           f"ladder: {' > '.join(x.strip() for x in settings.get('ladder', '').split(',') if x.strip()) or '-'}")
     for e in entries:
         mark = ""
-        if listed is not None and e["model"].startswith(("opencode/", "opencode-go/")):
+        if e["model"].startswith(checked):
             cat = "Go" if e["model"].startswith("opencode-go/") else "Zen"
             mark = "  [available]" if e["model"].split("#")[0] in listed else f"  [NOT LISTED in the {cat} catalog]"
         names = e["aliases"][0] + (f" ({', '.join(e['aliases'][1:])})" if len(e["aliases"]) > 1 else "")

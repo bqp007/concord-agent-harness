@@ -171,17 +171,23 @@ EOF
 )
 [ -z "$R2" ] && ok "Zen free names and raw opencode/...-free IDs resolve to OpenCode; beam and the other Go and Zen IDs to pi" \
   || bad "routing:$R2"
-python3 -I - "$T/concord/concord.py" <<'EOF' && ok "--models --verify checks OpenCode and pi lines and finds a model ID with an #effort suffix in the catalog" || bad "models verify"
+python3 -I - "$T/concord/concord.py" <<'EOF' && ok "--models --verify checks OpenCode and pi lines, ignores an #effort suffix and marks no line of a catalog it cannot reach" || bad "models verify"
 import contextlib, importlib.util, io, json, sys, urllib.request
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
 cat = json.dumps({"data": [{"id": "deepseek-v4.1-flash-free"}, {"id": "beam-free"}]}).encode()
-urllib.request.urlopen = lambda req, timeout=0: io.BytesIO(cat)
-out = io.StringIO()
-with contextlib.redirect_stdout(out): d.cmd_models(True, None)
+def models(go_up):
+    def urlopen(req, timeout=0):
+        if not go_up and "/go/" in req.full_url:
+            raise OSError("offline")
+        return io.BytesIO(cat)
+    urllib.request.urlopen, out = urlopen, io.StringIO()
+    with contextlib.redirect_stdout(out): d.cmd_models(True, None)
+    return {l.split()[0]: l for l in out.getvalue().splitlines() if l.strip()}
 names = ("free-deepseek-flash", "beam")      # a Zen free line on OpenCode, a Go line on pi
-lines = {l.split()[0]: l for l in out.getvalue().splitlines() if l.strip()}
-assert all(lines[n].endswith("[available]") for n in names), [lines[n] for n in names]
+up, down = models(True), models(False)
+assert all(up[n].endswith("[available]") for n in names), [up[n] for n in names]
+assert down["free-deepseek-flash"].endswith("[available]") and "[" not in down["beam"], down["beam"]
 EOF
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
