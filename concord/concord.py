@@ -2460,13 +2460,14 @@ def drift_base(repo, base):
 
 
 def run_cover(root, plan_rel, t0, t1):
-    """Seconds of the gap t0..t1 that the longest finished run of this plan covered: the session waited on it."""
+    """Seconds of gap t0..t1 covered by the longest executor run of this plan (a running run counts up to a 30m wall)."""
     best = 0.0
-    for path in root.glob("*/meta.json"):
+    for path in root.glob("*/state.json"):
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
-            m = json.loads(path.read_text())
-            if m.get("plan") == plan_rel:
-                best = max(best, min(m["started"] + m["seconds"], t1) - max(m["started"], t0))
+            st, meta = json.loads(path.read_text()), path.with_name("meta.json")
+            secs = json.loads(meta.read_text())["seconds"] if meta.exists() else parse_wall("30m")
+            if st.get("plan") == plan_rel and st.get("mode") != "session":   # --begin: the session's own work
+                best = max(best, min(st["started"] + secs, t1) - max(st["started"], t0))
     return best
 
 

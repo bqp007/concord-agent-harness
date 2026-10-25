@@ -149,9 +149,11 @@ $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "size 1/1200 lines" && has "every changed file is in Files" \
   && ok "a merge of upstream work moves the drift base: its files and lines do not count" || { bad "upstream merge"; tail -2 "$T/out.txt"; }
 mkdir -p "$E/.git/concord/run-x"; clock 0 1500 "$E"
-python3 -I -c 'import json,sys,time; json.dump({"plan": "PLAN_E.md", "started": time.time() - 1500, "seconds": 1500}, open(sys.argv[1], "w"))' "$E/.git/concord/run-x/meta.json"
+python3 -I -c 'import json,sys,time; d=sys.argv[1]; json.dump({"plan": "PLAN_E.md", "started": time.time() - 1500, "mode": "edit"}, open(d + "/state.json", "w")); json.dump({"seconds": 1500}, open(d + "/meta.json", "w"))' "$E/.git/concord/run-x"
 $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 25/10 min" && ok "a long gap counts where a run of the plan covered it" || { bad "run time"; tail -2 "$T/out.txt"; }
+rm "$E/.git/concord/run-x/meta.json"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
+has "time 20/10 min" && ok "a run still in progress covers the gap up to now" || { bad "running time"; tail -2 "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
