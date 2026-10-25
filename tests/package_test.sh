@@ -92,7 +92,7 @@ s_budgets() { local spec f
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
   check budgets/concord.py "[ \$(wc -l < $K/concord.py) -le 6538 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
-  check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 33 ] || { grep -c '=' $K/models.conf; false; }"
+  check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 17 ]"
   check budgets/static_checks "grep -q '^static_checks = yes' $K/executors.conf"
   check budgets/track_ignored "grep -q '^track_ignored = yes' $K/executors.conf"; }

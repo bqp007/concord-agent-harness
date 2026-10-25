@@ -1309,7 +1309,7 @@ def opencode_dirs():
 
 
 def sandbox_cmd(cmd, repo, run_dir, conf, args):
-    """cmd under sandbox-exec with the OpenCode Seatbelt profile, or cmd unchanged when the off-switch is set or
+    """cmd (OpenCode or pi) under sandbox-exec with the Seatbelt profile, or cmd unchanged when the off-switch is set or
     sandbox-exec cannot apply here (nested Seatbelt) — the harness never hard-breaks where Seatbelt is unavailable.
     The on/off state (with the reason when off) is recorded to run_dir/sandbox.state so the run report and runs.jsonl
     show whether a run was protected; a silent fail-open would hide an unprotected run."""
@@ -1327,7 +1327,7 @@ def sandbox_cmd(cmd, repo, run_dir, conf, args):
     if not conf_flag(conf, "opencode.sandbox", True):
         return record("off (opencode.sandbox = no)")
     if not os.path.isfile(SANDBOX_EXEC) or not PROFILE.is_file():
-        print("note: sandbox-exec or its profile is missing; launching opencode unsandboxed", file=sys.stderr)
+        print(f"note: sandbox-exec or its profile is missing; launching {Path(cmd[0]).name} unsandboxed", file=sys.stderr)
         return record("off (sandbox-exec or profile missing)")
     try:
         probe = subprocess.run([SANDBOX_EXEC, "-p", "(version 1)(allow default)", "/usr/bin/true"],
@@ -1335,7 +1335,7 @@ def sandbox_cmd(cmd, repo, run_dir, conf, args):
     except (OSError, subprocess.SubprocessError):
         probe = None
     if probe is None or probe.returncode != 0:
-        print("note: sandbox-exec cannot apply here (nested sandbox?); launching opencode unsandboxed",
+        print(f"note: sandbox-exec cannot apply here (nested sandbox?); launching {Path(cmd[0]).name} unsandboxed",
               file=sys.stderr)
         return record("off (sandbox-exec cannot apply; nested sandbox?)")
     data, cache, _config = opencode_dirs()      # config dir stays readable (not writable), so it is not templated
@@ -5744,11 +5744,10 @@ def cmd_resolve(text):
 
 def cmd_models(verify, conf):
     entries, settings = load_models()
-    listed, notes = None, []
+    listed, checked, notes = set(), (), []
     if verify:
         # Both catalogs are public; `opencode models` prints nothing in some builds.
         import urllib.request
-        listed = set()
         for prefix, url, label in (("opencode/", "https://opencode.ai/zen/v1/models", "Zen"),
                                    ("opencode-go/", "https://opencode.ai/inference/go/v1/models", "Go")):
             try:
@@ -5758,6 +5757,7 @@ def cmd_models(verify, conf):
                 items = data.get("data", data) if isinstance(data, dict) else data
                 ids = {prefix + (x.get("id") if isinstance(x, dict) else str(x)) for x in items}
                 listed |= ids
+                checked += (prefix,) if ids else ()      # mark only the lines of a catalog that answered
                 if not ids:
                     notes.append(f"note: {label} catalog returned no models")
             except Exception as exc:  # network or format problem: say so, do not guess
@@ -5766,7 +5766,7 @@ def cmd_models(verify, conf):
           f"ladder: {' > '.join(x.strip() for x in settings.get('ladder', '').split(',') if x.strip()) or '-'}")
     for e in entries:
         mark = ""
-        if listed is not None and e["executor"] == "opencode" and e["model"].startswith(("opencode/", "opencode-go/")):
+        if e["model"].startswith(checked):
             cat = "Go" if e["model"].startswith("opencode-go/") else "Zen"
             mark = "  [available]" if e["model"].split("#")[0] in listed else f"  [NOT LISTED in the {cat} catalog]"
         names = e["aliases"][0] + (f" ({', '.join(e['aliases'][1:])})" if len(e["aliases"]) > 1 else "")
