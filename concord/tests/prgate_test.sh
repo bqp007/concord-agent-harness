@@ -142,4 +142,17 @@ case "$R59" in *"reused 1 file(s)"*) has "CURRENT HEAD ${H59:0:8}: REVIEWED at l
   || { bad "3 narrow reuse status"; tail -3 "$T/out.txt"; };;
   *) bad "3 narrow reuse: $(printf '%s' "$R59" | tail -2)";; esac
 
+echo "== 4 low tier keeps only BLOCKER and HIGH; owner/repo#N uses the remote that names it (2026-10-25)"
+printf 'REVIEW-JSON\n{"findings": [{"severity": "MEDIUM", "path": "m.py", "line": 1, "problem": "style", "fix": "rename", "repro": {"input": "x", "expected": "2", "actual": "1"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/medium.txt"
+newpr 60 m.py 'm = 60'; H60=$(hd 60)
+FAKE_JSON="$T/medium.txt" flash 60 fake/m --tier low; st 60
+has "CURRENT HEAD ${H60:0:8}: REVIEWED at low" && ok "4 a MEDIUM at low tier does not hold the gate" || { bad "4 low MEDIUM"; tail -3 "$T/out.txt"; }
+newpr 61 r.py 'r = 61'; H61=$(hd 61)
+git -C "$C" remote set-url origin https://github.com/other/repo.git && git -C "$C" remote add harness https://github.com/me/kit.git \
+  && git -C "$C" config "url.$O.insteadOf" https://github.com/me/kit.git || { echo "setup failed: remotes"; exit 1; }
+$DP --review-pr me/kit#61 --via qwen --model fake/m --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+$DP --pr-status me/kit#61 --repo "$C" > "$T/out.txt" 2>&1
+[ $RC -eq 0 ] && has "CURRENT HEAD ${H61:0:8}: REVIEWED at low" && ok "4 owner/repo#N fetches from the remote that names it, not origin" \
+  || { bad "4 any remote rc=$RC"; tail -3 "$T/out.txt"; }
+
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

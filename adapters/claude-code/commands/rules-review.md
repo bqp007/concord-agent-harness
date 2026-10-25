@@ -1,7 +1,7 @@
 ---
 description: Weekly rules review (about 10 minutes) — keep CLAUDE.md, the delegate docs, REVIEW.md and memory within budget; retire closed tickets and dead rules
 ---
-Weekly rules review. Chat: terse. Propose ONE diff; the owner approves before anything changes.
+Weekly rules review. Chat: lean STE. Propose ONE diff; the owner approves before anything changes.
 
 Yardstick for every verdict: the owner values speed, effectiveness, efficiency and simplicity, and hates bureaucracy and bloat. A rule earns its place only if it makes work faster, cheaper or more correct: parallel runs over chains, delta tests per iteration with one full run at the end, diffusion-style passes (rough everything at once, then refine the largest gaps), and planning tokens spent only where they let executors start at once without re-scanning. Paperwork, ceremony, duplicated checks and rules that only describe themselves → retire or merge. Prefer deleting a rule to adding one.
 

@@ -35,7 +35,7 @@ If the task includes "Repository notes", they are binding facts from the maintai
     directories they name, are hashed before the run: changing or adding one blocks a PASS verdict.
 11. No web access: OpenCode's webfetch is denied; network use through the shell is reported.
 12. Prose in your messages and in the report's free-text fields: the style the task names, by default
-    terse (fragments, abbreviations, no filler). Code, paths, commands, numbers and error text stay exact.
+    lean STE (short active sentences, no filler). Code, paths, commands, numbers and error text stay exact.
 
 ## Report
 End your final message with exactly this block:

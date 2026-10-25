@@ -60,7 +60,7 @@ For the plugin marketplace layout instead, `bash install.sh --plugin` installs t
 
 To update, run `git pull` then `bash install.sh` in the clone, and restart Claude Code.
 
-Prose style lives in `~/.claude/concord/style.conf` (`prose = terse`, the default, or a sentence of your own). Requirements (bash, git, Python 3.9+, Claude Code, OpenCode for the cheap executors), executor configuration and other harnesses such as Codex: [docs/SETUP.md](docs/SETUP.md).
+Prose style lives in `~/.claude/concord/style.conf` (`prose = lean`, the default, selects lean STE, or write a sentence of your own). Plans carry a tier (S, M or L), a drift brake stops a run that outgrows its plan, and a plan verifier prunes each plan first: [docs/WORKFLOW.md](docs/WORKFLOW.md#size-drift-and-verification). Requirements (bash, git, Python 3.9+, Claude Code, OpenCode for the cheap executors), executor configuration and other harnesses such as Codex: [docs/SETUP.md](docs/SETUP.md).
 
 ## Try it without credentials
 

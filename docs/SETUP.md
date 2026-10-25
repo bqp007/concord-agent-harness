@@ -34,7 +34,7 @@ To update, run `git pull` then `bash install.sh`, and restart Claude Code.
 
 What `install.sh` does: copies `concord/` to `~/.claude/concord/` (or `$CLAUDE_HOME/concord/`). Before overwriting an earlier install it copies the old files to `~/.claude/concord/backup/<timestamp>-pre-install/`; backups are never pruned. Suites the new version no longer ships are then removed from `tests/` (the backup keeps them). `models.conf`, `executors.conf`, `worktrees.conf` and `repo-notes/README.md` are kept when they already exist, so your edits survive upgrades. `--no-tests` skips the suites; exit code 2 means a usage error or a missing prerequisite.
 
-Prose style: `~/.claude/concord/style.conf` sets `prose = terse` (the default) or a sentence of your own; the planner, executors and reviewers follow it.
+Prose style: `~/.claude/concord/style.conf` sets `prose = lean` (the default, lean STE: short active sentences with articles, no filler) or a sentence of your own. The values `terse` and `lean`, and an empty value, all select lean STE. The planner, executors and reviewers follow it.
 
 Restart Claude Code once after installing: new agent files load only at session start.
 

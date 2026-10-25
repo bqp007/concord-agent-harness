@@ -98,5 +98,36 @@ B=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ $RC -eq 0 ] && [ -n "$B" ] && ok "--begin --label Concord:Implementer is accepted as implementer" || { bad "plugin label rc=$RC"; tail -2 "$T/out.txt"; }
 [ -z "$B" ] || $DP --abort "$B" --repo "$R" > /dev/null 2>&1
 
+echo "== drift brakes and the plan-verifier gate (2026-10-25)"
+D="$T/d"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > a.py; git add -A && git commit -qm init
+  { printf '# Plan\nTier: M\nSize: ~4 lines\nETA: 10 min\n\n## Open questions\n- Q1 none\n\n'; phase 1 '' 'grep -q 2 a.py'; } > PLAN_D.md ) \
+  || { echo "setup failed"; exit 1; }
+drun(){ FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$D" "$@" > "$T/out.txt" 2>&1; }
+drift(){ $DP --drift --plan PLAN_D.md --repo "$D" > "$T/out.txt" 2>&1; }
+hook(){ printf '{"cwd": "%s"}' "$D" | $DP --drift-hook > "$T/out.txt" 2>&1; }
+clock(){ python3 -I -c 'import json,sys,time; p,r=sys.argv[1:3]; d=json.load(open(p)); d[r].update(elapsed=float(sys.argv[3]), last=time.time()-float(sys.argv[4])); json.dump(d,open(p,"w"))' "$D/.git/concord/drift.json" "$D" "$1" "$2"; }
+drun; RC=$?
+[ $RC -eq 11 ] && has "no plan-verifier APPROVE" && ok "a Tier: plan with no plan-verifier APPROVE is refused (exit 11)" || { bad "no verdict rc=$RC"; tail -2 "$T/out.txt"; }
+printf 'VERDICT: REVISE\n' > "$T/v.txt"; $DP --plan-verdict "$T/v.txt" --plan PLAN_D.md --repo "$D" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 1 ] && has "nothing recorded" && ok "--plan-verdict REVISE records nothing" || bad "REVISE rc=$RC"
+printf '**VERDICT:** APPROVE\n' > "$T/v.txt"; $DP --plan-verdict "$T/v.txt" --plan PLAN_D.md --repo "$D" > /dev/null 2>&1
+perl -pi -e 's/Q1 none/Q1 settled by the owner/' "$D/PLAN_D.md"; drun; RC=$?
+[ $RC -eq 0 ] && ok "APPROVE recorded; an Open questions edit keeps it" || { bad "approved run rc=$RC"; tail -2 "$T/out.txt"; }
+drift; RC=$?; [ $RC -eq 0 ] && has "DRIFT OK" && ok "--drift: OK after the first run" || { bad "drift OK rc=$RC"; tail -2 "$T/out.txt"; }
+clock 780 3600; drift
+has "time 13/10 min (1.30x)" && has "DRIFT WARN" && ok "time warns at 1.2x; an idle gap of 10 minutes or more does not count" || { bad "time warn"; tail -2 "$T/out.txt"; }
+clock 0 0; drift; printf '# 1\n# 2\n# 3\n# 4\n# 5\n' >> "$D/a.py"; hook
+has '"hookEventName": "PostToolUse"' && has "DRIFT WARN" && has "size 5/4 lines" && ok "the hook prints a level change (size 1.25x)" || { bad "hook warn"; cat "$T/out.txt"; }
+hook; [ ! -s "$T/out.txt" ] && ok "the hook is silent while the level stays" || bad "hook repeat"
+printf '# 6\n# 7\n' >> "$D/a.py"; drun; RC=$?
+[ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "size at 1.5x blocks the next run (exit 10)" || { bad "size block rc=$RC"; tail -2 "$T/out.txt"; }
+drun --user-approved "go on"; RC=$?; drift
+[ $RC -eq 0 ] && has "DRIFT WARN" && ok "--user-approved lifts the block until the measure grows 50% more" || { bad "approved rc=$RC"; tail -2 "$T/out.txt"; }
+printf 'y = 1\n' > "$D/b.py"; drun; RC=$?
+[ $RC -eq 10 ] && has "changed outside Files: b.py" && ok "a changed file outside Files blocks (exit 10)" || { bad "scope rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --lint 1 --via qwen --model fake/m --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1
+has 'PLAN LINT: no `Size:` line' && has 'PLAN LINT: no `ETA:` line' && ok "--lint flags a plan with no Size: or ETA:" || { bad "lint"; tail -3 "$T/out.txt"; }
+
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]

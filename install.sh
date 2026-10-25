@@ -34,7 +34,7 @@ command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.versi
 command -v git >/dev/null 2>&1 || err "git required"
 command -v opencode >/dev/null 2>&1 \
   || echo "warning: opencode not on PATH; OpenCode executors will not run until it is installed" >&2
-AGENTS="implementer implementer-opus48 reviewer-opus55"
+AGENTS="implementer implementer-opus48 reviewer-opus55 reviewer-delta plan-verifier"
 
 BK=""   # one timestamped backup dir per run, created the first time something is backed up
 ensure_bk() { [ -n "$BK" ] && return 0
@@ -92,9 +92,9 @@ src, md, mode = sys.argv[1:4]
 B, E = "<!-- concord:begin -->", "<!-- concord:end -->"
 block = open(src).read().rstrip("\n").split("\n")
 if mode == "plugin":
-    block = [re.sub(r"`(reviewer-opus55|implementer-opus48|implementer)`", r"`concord:\1`", l) for l in block]
+    block = [re.sub(r"`(reviewer-opus55|reviewer-delta|plan-verifier|implementer-opus48|implementer)`", r"`concord:\1`", l) for l in block]
     block = ["- Agent names: the concord plugin provides the agents above as `concord:reviewer-opus55`, "
-             "`concord:implementer-opus48` and `concord:implementer`." if l.startswith("- Agent names:") else l for l in block]
+             "`concord:reviewer-delta`, `concord:plan-verifier`, `concord:implementer-opus48` and `concord:implementer`." if l.startswith("- Agent names:") else l for l in block]
 old = open(md).read().split("\n") if os.path.exists(md) else []
 if old and old[-1] == "":
     old.pop()
@@ -133,11 +133,13 @@ def merge(b, a):
         if k not in b: b[k] = v
         elif isinstance(b[k], dict) and isinstance(v, dict): merge(b[k], v)
 merge(base, snip)
-# The lessons hook joins an existing UserPromptSubmit list once (a plain missing-key merge would skip it).
-hook = snip.get("hooks", {}).get("UserPromptSubmit", [])
-ups = base.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
-if hook and not any("--lessons-hook" in h.get("command", "") for e in ups for h in e.get("hooks", [])):
-    ups.extend(hook)
+# Each snippet hook joins its event's existing list once, matched by its --*-hook flag (a plain missing-key merge
+# would skip it).
+for event, entries in snip.get("hooks", {}).items():
+    have = base.setdefault("hooks", {}).setdefault(event, [])
+    known = " ".join(h.get("command", "") for e in have for h in e.get("hooks", []))
+    have.extend(e for e in entries
+                if not all(w in known for h in e.get("hooks", []) for w in h["command"].split() if w.endswith("-hook")))
 with open(sys.argv[2], "w") as f: json.dump(base, f, indent=2); f.write("\n")
 PY
   echo "update $s"; }
