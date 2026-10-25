@@ -458,7 +458,8 @@ def try_resolve(target, entries):
     if text in EXECUTORS or text == "claude":
         return {"name": text, "executor": text, "model": "", "how": "executor"}
     if "/" in text:
-        via = "pi" if text.startswith(("opencode/", "opencode-go/")) else "opencode"
+        zen_free = re.match(r"opencode/[^#]*-free(#|$)", text)     # Zen answers pi 429 "Free models work in OpenCode"
+        via = "pi" if text.startswith(("opencode/", "opencode-go/")) and not zen_free else "opencode"
         return {"name": text, "executor": via, "model": text, "how": "model id"}
     wanted = tokens(text)
     candidates = []
