@@ -8,8 +8,7 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: terse (tables); commands, plan te
 - Plan: the `PLAN_<ticket>.md` the request names, else the only one at the repo root, as `--plan <file>` on every call; none → offer `/concord:plan-then-delegate`.
 - Model: the request, else `Executor:`, else models.conf `default`, checked with `concord.py --resolve "<name>"`; ask when unknown or ambiguous.
 
-## 2. Run in passes, not as a chain
-- A pass (CLAUDE.md) runs its phases at once; only real dependencies wait (`/concord:plan-then-delegate` step 3).
+## 2. Run in passes, not as a chain (CLAUDE.md, `/concord:plan-then-delegate` step 3)
 - An executor phase gets its own fork: `python3 ~/.claude/concord/wt.py fork <TICKET> <N>`, run and checked there with `--repo <fork>`; after PASS, `wt.py join <TICKET> <N>` applies its changes back and removes the fork. Planner phases run in the ticket's worktree meanwhile; reviews, lints and suites take no lock.
 - `planner` phase: write it, re-run its acceptance; `--begin`/`--end` only when a review needs its run id (no PR).
 - Claude subagent: `--begin <phase> --label <name>`, the subagent (plan path, phase, feedback), `--end <run-id>`.
