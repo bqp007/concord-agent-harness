@@ -103,6 +103,7 @@ $DP --lint 5 --dry-run --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > 
 [ "$(lint)" = "vacuous on empty input: grep -c x f | grep -qx 0" ] && ok "A.4 an inline Acceptance: command is linted" || { bad "A.4 inline Acceptance: not linted"; lint; }
 printf '# Plan: Porting the parser\n## Phase 1 - p1\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n' > "$T/P.md"; $DP --lint 1 --dry-run --via qwen --model fake/m --plan "$T/P.md" --repo "$R" > "$T/out.txt" 2>&1
 lint | grep -q "differential oracle" && ok "A.5 a port plan without a mismatch oracle is linted" || { bad "A.5 port without oracle not linted"; lint; }
+sed 's/^## Phase/### Phase/; s/grep -q 2 a.py/grep -qx "mismatches: 0" a.py/' "$T/P.md" > "$T/P6.md"; $DP --lint 1 --dry-run --via qwen --model fake/m --plan "$T/P6.md" --repo "$R" > "$T/out.txt" 2>&1; ! lint | grep -q "differential oracle" && ok "A.6 a ### port plan with a mismatch oracle is not linted" || { bad "A.6 oracle did not silence the port lint"; lint; }
 fi
 
 if sel B; then echo "== B. clean block, no lines"

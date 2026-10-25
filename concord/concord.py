@@ -5195,8 +5195,9 @@ def cmd_lint(args, phase, target, conf):
     repo, plan, plan_rel, phase_text = load_plan_phase(args, phase)
     for f in acceptance_lint(repo, phase_text, parse_files(phase_text)):
         print(f"ACCEPTANCE LINT: {f}")
-    head, _, rest = plan.read_text(errors="replace").partition("\n## ")     # head: title, Done when, Ship
-    if re.search(r"\b((port|mirror)(s|ed|ing)?|parity)\b", head, re.I) and "mismatch" not in rest.lower():
+    text = plan.read_text(errors="replace")
+    head = PHASE_HEAD.split(text, 1)[0]                                    # title, Done when, Ship
+    if re.search(r"\b((port|mirror)(s|ed|ing)?|parity)\b", head, re.I) and "mismatch" not in text.lower():
         print("ACCEPTANCE LINT: port with no differential oracle (a first phase printing mismatches: 0 vs the reference)")
     target = target or settings.get("lint") or settings.get("default") or ""
     if not target:
