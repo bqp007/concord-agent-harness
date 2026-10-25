@@ -4006,7 +4006,7 @@ def cmd_review_record(args):
         files = review_files(repo, meta)
         if files:                             # no surviving files = no diff to anchor to: keep findings as written
             diff_text = review_diff(repo, run_dir, meta, files, base=run_diff_base(repo, meta))
-    approve_only = (meta.get("tier") == "low" if meta.get("kind") == "pr-review"   # low: only BLOCKER and HIGH kept
+    approve_only = (meta.get("tier") == "low" and not meta.get("since") if meta.get("kind") == "pr-review"
                     else meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"])
     result = process_review(text, meta, root, repo, args.reviewer, run_dir.name, diff_text, approve_only)
     if not result["ok"]:
@@ -4629,7 +4629,7 @@ def cmd_review_pr(args, target, conf):
         ledger = ledger_text(load_ledger(root, f"pr{n}"))
         delta_line = f"Delta review since {str(since)[:8]}: files {', '.join(delta_files)}" if since else ""
         approval = " ".join((args.user_approved or "").split())    # the user's go-ahead: counts at its tier
-        lead = (APPROVE_ONLY + "\n\n") if tier == "low" else ""     # low tier: only BLOCKER and HIGH count
+        lead = (APPROVE_ONLY + "\n\n") if tier == "low" and not since else ""   # a delta keeps MEDIUM
         if args.packet:
             task = lead + pr_task(n, slug, head, base_branch, tier, info, files, excluded, names, rubric, diff,
                                   ledger=ledger, delta=delta_line, notes=notes)
@@ -4664,7 +4664,7 @@ def cmd_review_pr(args, target, conf):
                                        f"(exit {d['rc']}, {d['secs']}s, tier {tier}, checklists {', '.join(names)}, "
                                        f"verdict {d['verdict']}, blockers {d['blockers']}"
                                        f"{', retried' if d.get('retried') else ''})"),
-                entry_extra=entry_extra, approve_only=(tier == "low"),
+                entry_extra=entry_extra, approve_only=(tier == "low" and not since),
                 cover=(blob_shas_at(repo, head, files), min(TIER_RANK[tier], reviewer_rank(res["name"]))))
         if gh_head != head:
             print(f"PR head moved during review: gh reported {gh_head[:8]}, fetched {head[:8]}")
