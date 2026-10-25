@@ -148,7 +148,7 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
 limit = "Free usage limit reached. Free models work in OpenCode"
 assert d.review_refusals(limit, "pi", 1) and d.transport_error("fetch failed", "pi", 1), "bare lines of a failed pi run"
-assert not d.review_refusals("429: " + limit, "pi", 0) and not d.transport_error("503: fetch failed", "pi", 0), "pi answer"
+assert not d.review_refusals(f"429: {limit}\nError: {limit}", "pi", 0) and not d.transport_error("Error: fetch failed", "pi", 0), "pi answer"
 assert d.review_refusals("Error: " + limit) and not d.review_refusals("429: " + limit), "OpenCode: only Error: lines"
 assert d.billing("pi", "github-copilot/gpt-5") == "pi's own login/key", d.billing("pi", "github-copilot/gpt-5")
 assert d.billing("pi", "opencode-go/x") == "OpenCode Go subscription allowance"
