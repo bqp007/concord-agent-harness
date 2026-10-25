@@ -154,6 +154,8 @@ $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 25/10 min" && ok "a long gap counts where a run of the plan covered it" || { bad "run time"; tail -2 "$T/out.txt"; }
 rm "$E/.git/concord/run-x/meta.json"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 20/10 min" && ok "a run still in progress covers the gap up to now" || { bad "running time"; tail -2 "$T/out.txt"; }
+printf 'NOT RUN\n' > "$E/.git/concord/run-x/report.md"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
+has "time 0/10 min" && ok "a refused run (a report, no meta.json) covers no gap" || { bad "refused run"; tail -2 "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
