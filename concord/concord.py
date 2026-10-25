@@ -5768,7 +5768,7 @@ def cmd_models(verify, conf):
         mark = ""
         if listed is not None and e["executor"] == "opencode" and e["model"].startswith(("opencode/", "opencode-go/")):
             cat = "Go" if e["model"].startswith("opencode-go/") else "Zen"
-            mark = "  [available]" if e["model"] in listed else f"  [NOT LISTED in the {cat} catalog]"
+            mark = "  [available]" if e["model"].split("#")[0] in listed else f"  [NOT LISTED in the {cat} catalog]"
         names = e["aliases"][0] + (f" ({', '.join(e['aliases'][1:])})" if len(e["aliases"]) > 1 else "")
         print(f"{names:32s} {e['executor']:9s} {e['model']:32s} {billing(e['executor'], e['model'])}{mark}")
     for note in notes:

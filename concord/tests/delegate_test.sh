@@ -171,5 +171,15 @@ EOF
 )
 [ -z "$R2" ] && ok "Zen free names and raw opencode/...-free IDs resolve to OpenCode; beam and the other Go and Zen IDs to pi" \
   || bad "routing:$R2"
+python3 -I - "$T/concord/concord.py" <<'EOF' && ok "--models --verify finds a model ID with an #effort suffix in the catalog" || bad "models verify suffix"
+import contextlib, importlib.util, io, json, sys, urllib.request
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+urllib.request.urlopen = lambda req, timeout=0: io.BytesIO(json.dumps({"data": [{"id": "deepseek-v4.1-flash-free"}]}).encode())
+out = io.StringIO()
+with contextlib.redirect_stdout(out): d.cmd_models(True, None)
+line = next(l for l in out.getvalue().splitlines() if l.startswith("free-deepseek-flash"))
+assert line.endswith("[available]"), line
+EOF
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
