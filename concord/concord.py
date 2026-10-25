@@ -168,10 +168,17 @@ TRANSPORT_RETRIES = 2
 TRANSPORT_WAIT_S = int(os.environ.get("CONCORD_TRANSPORT_WAIT_S", "15"))
 
 
-def transport_error(text):
-    """True when an `Error:` line of the harness output reports a dropped connection. Only error lines count, so a
-    review that quotes these words from the code under review is not taken for a transport failure."""
-    for line in (text or "").splitlines():
+def harness_errors(text, executor="opencode", rc=1):
+    """The run output with pi's error in OpenCode's `Error:` form. pi prints only its unprefixed error when it fails
+    and only its answer when it passes, so every line of a failed pi run is an error line and a passed one has none."""
+    lines = (text or "").splitlines()
+    return "\n".join(lines if executor != "pi" else [f"Error: {s}" for s in lines] if rc else [])
+
+
+def transport_error(text, executor="opencode", rc=1):
+    """True when an `Error:` line of the harness output (see harness_errors) reports a dropped connection. Only error
+    lines count, so a review that quotes these words from the code under review is not taken for a transport failure."""
+    for line in harness_errors(text, executor, rc).splitlines():
         line = line.strip()
         if line.lower().startswith("error:") and any(n.lower() in line.lower() for n in TRANSPORT_ERRORS):
             return True
@@ -184,10 +191,10 @@ def provider_refusals(text):
     return [(label, advice) for needle, label, advice in PROVIDER_REFUSALS if needle.lower() in low]
 
 
-def review_refusals(text):
-    """provider_refusals over the harness `Error:` lines only, so a review answer that quotes a refusal phrase (from
-    the code under review) is a parse failure, not a refusal (D1)."""
-    return provider_refusals("\n".join(l for l in (text or "").splitlines()
+def review_refusals(text, executor="opencode", rc=1):
+    """provider_refusals over the harness `Error:` lines only (see harness_errors), so a review answer that quotes a
+    refusal phrase (from the code under review) is a parse failure, not a refusal (D1)."""
+    return provider_refusals("\n".join(l for l in harness_errors(text, executor, rc).splitlines()
                                         if l.strip().lower().startswith("error:")))
 
 
@@ -423,7 +430,7 @@ def billing(executor, model):
         return "Claude subscription (implementer subagent)"
     if executor == "planner":
         return "Claude subscription (planning session)"
-    if executor == "opencode":
+    if executor == "opencode" or executor == "pi" and model.startswith(("opencode/", "opencode-go/")):
         if model.startswith("opencode-go/"):
             return "OpenCode Go subscription allowance"
         if model.startswith("opencode/") and model.split("#", 1)[0].endswith("-free"):
@@ -451,7 +458,8 @@ def try_resolve(target, entries):
     if text in EXECUTORS or text == "claude":
         return {"name": text, "executor": text, "model": "", "how": "executor"}
     if "/" in text:
-        return {"name": text, "executor": "opencode", "model": text, "how": "model id"}
+        via = "pi" if text.startswith(("opencode/", "opencode-go/")) else "opencode"
+        return {"name": text, "executor": via, "model": text, "how": "model id"}
     wanted = tokens(text)
     candidates = []
     for e in entries:
@@ -1383,14 +1391,24 @@ def build_command(executor, binary, task, contract, model, mode, wall_text, run_
                "-m", model, combined]
         cmd = sandbox_cmd(cmd, repo, run_dir, conf, args)
     elif executor == "pi":
+        # pi loads no models unless it can write its agent folder, and Seatbelt allows only the run folder: copies
+        (agent := run_dir / "pi-agent").mkdir(exist_ok=True)
+        for name in ("models.json", "models-store.json", "settings.json"):      # never auth.json
+            if (src := Path.home() / ".pi" / "agent" / name).is_file():
+                shutil.copy2(src, agent / name)
+        env.update(PI_OFFLINE="1", PI_CODING_AGENT_DIR=str(agent))
+        keyfile = Path.home() / ".config" / "concord-keys" / "opencode.key"      # the key goes only into the env
+        if keyfile.is_file():
+            env["OPENCODE_API_KEY"] = "".join(keyfile.read_text().split())    # a wrapped paste holds whitespace
         # --no-approve: never execute repo-local .pi/ extension code; --no-context-files: skip AGENTS.md/CLAUDE.md
-        cmd = [binary, "-p", "--no-session", "--no-approve", "--no-context-files",
-               "--append-system-prompt", contract, "--model", model]
+        cmd = [binary, "-p", "--session-dir", str(run_dir / "pi"), "--no-approve", "--no-context-files",
+               "--append-system-prompt", contract, "--model", model.replace("#", ":")]
         if mode == "edit":
             cmd += ["--tools", "read,edit,write"]
         elif mode == "readonly":
             cmd += ["--tools", "read"]
         cmd += ["--", task]
+        cmd = sandbox_cmd(cmd, repo, run_dir, conf, args)
     elif executor == "dsh":
         # Sandbox stays workspace-write; approval prompts are disabled so headless runs never stall.
         env["DSH_PERMISSION_MODE"] = conf.get("dsh.permission", "workspace-write")
@@ -1898,7 +1916,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
         "characterize": char_cmds, "check_timeout": timeout_s,
-        "track_ignored": track_ignored, "head_before": git(repo, "rev-parse", "HEAD").strip(),
+        "pid": os.getpid(), "track_ignored": track_ignored, "head_before": git(repo, "rev-parse", "HEAD").strip(),
         "branch_before": branch_of(repo), "staged_before": staged(repo), "git_internals": git_internals(repo),
         "generated_globs": list(generated_globs(conf)), "static_on": static_on, "static_pre": static_pre,
         "started": time.time(), "outside": outside_files(repo), "pre": snapshot(repo, track_ignored),
@@ -1932,6 +1950,20 @@ def opencode_usage(run_id):
     return {"cost_usd": round(float(cost), 6), "input": int(inp), "output": int(out), "reasoning": int(reasoning),
             "cache_read": int(cache_r), "cache_write": int(cache_w),
             "total": int(inp + out + reasoning + cache_r + cache_w)}
+
+
+def pi_usage(run_dir):
+    """opencode_usage's dict, summed over the usage records in pi's session files (<run>/pi), or None without any."""
+    t, n = dict.fromkeys(("cost_usd", "input", "output", "cache_read", "cache_write"), 0), 0
+    for f in (Path(run_dir) / "pi").glob("*.jsonl"):
+        for line in f.read_text(errors="replace").splitlines():
+            with contextlib.suppress(ValueError, KeyError, TypeError, AttributeError):
+                u = json.loads(line)["message"]["usage"]
+                for k, v in zip(t, (u["cost"]["total"], u["input"], u["output"], u["cacheRead"], u["cacheWrite"])):
+                    t[k] += v
+                n += 1
+    tokens = t["input"] + t["output"] + t["cache_read"] + t["cache_write"]
+    return {**t, "cost_usd": round(t["cost_usd"], 6), "reasoning": 0, "total": tokens} if n else None
 
 
 def tool_calls_from_messages(rows):
@@ -2142,8 +2174,8 @@ def finish_run(run_dir, rc, secs=None):
         if missing and not static_line.startswith("static checks skipped"):
             static_line = (static_line + "; " if static_line else "") + \
                 "no checker installed for some changed files (" + ", ".join(missing) + ")"
-    # Tokens and cost: exact from OpenCode's store, else a heuristic read of the harness output.
-    usage = opencode_usage(st["run_id"]) if st.get("executor") == "opencode" else None
+    # Tokens and cost: exact from OpenCode's store or pi's session files, else a heuristic read of the harness output.
+    usage = opencode_usage(st["run_id"]) if st.get("executor") == "opencode" else pi_usage(run_dir)
     # Tool calls and denied webfetch hosts, from the same store (OpenCode runs only).
     tool_calls = opencode_tool_calls(st["run_id"]) if st.get("executor") == "opencode" else None
     # fresh tokens (input + cache writes + output + reasoning); cache reads are stored separately so the figure is
@@ -2246,10 +2278,11 @@ def finish_run(run_dir, rc, secs=None):
     if usage:
         lines.append(usage_line(usage, st.get("model", ""), tool_calls["tool_calls"] if tool_calls else None))
     sandbox_state = None
-    if st.get("executor") == "opencode":
+    if st.get("executor") in ("opencode", "pi"):
         sb_path = run_dir / "sandbox.state"
         sandbox_state = sb_path.read_text().strip() if sb_path.exists() else "unknown"
         lines.append(f"sandbox: {sandbox_state}")
+    if st.get("executor") == "opencode":
         lines.append("network: webfetch denied; shell network not mediated")
         if tool_calls and tool_calls["webfetch_attempts"]:
             lines.append("WEBFETCH ATTEMPTED (denied): " + ", ".join(tool_calls["webfetch_attempts"]))
@@ -2343,7 +2376,7 @@ def pick_executor(args, target, phase, conf, entries):
     res = resolve_target(target, entries)
     executor, model = res["executor"], res["model"]
     if args.via and args.via != executor:
-        keep = res["how"] == "model id" or (args.via == "opencode" and "/" in model)
+        keep = res["how"] == "model id" or (args.via in ("opencode", "pi") and "/" in model)
         executor = args.via
         model = model if keep else conf.get(f"{executor}.model", "")
     if res["how"] == "executor" and executor not in SESSION_EXECUTORS:
@@ -2421,11 +2454,12 @@ def load_drift(root):
     return data if isinstance(data, dict) else {}
 
 
-def save_drift(root, key, value):
+def save_drift(root, key, value, locked=False):
     """Set one key of drift.json (a checkout's entry, or new plan verdicts under "verdicts") under a lock, re-read
     first, so a concurrent writer keeps its key. One entry per existing checkout, the newest 50 verdicts."""
-    with open(root / "drift.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with contextlib.nullcontext() if locked else open(root / "drift.lock", "a") as lock:   # locked: the caller holds it
+        if not locked:
+            fcntl.flock(lock, fcntl.LOCK_EX)
         data = load_drift(root)
         data[key] = {**(data.get("verdicts") or {}), **value} if key == "verdicts" else value
         data = {k: v for k, v in data.items() if k == "verdicts" or Path(k).is_dir()}
@@ -2465,7 +2499,8 @@ def run_cover(root, plan_rel, t0, t1):
     for path in root.glob("*/state.json"):
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             st, meta, report = json.loads(path.read_text()), path.with_name("meta.json"), path.with_name("report.md")
-            secs = json.loads(meta.read_text())["seconds"] if meta.exists() else 0 if report.exists() else parse_wall("30m")
+            secs = (json.loads(meta.read_text())["seconds"] if meta.exists() else 0 if report.exists()
+                    else parse_wall("30m") if pid_alive(st["pid"]) else 0)      # a killed run covers nothing
             if st.get("plan") == plan_rel and st.get("mode") != "session":   # --begin: the session's own work
                 best = max(best, min(st["started"] + secs, t1) - max(st["started"], t0))
     return best
@@ -2479,47 +2514,49 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
     if not re.search(r"^Tier:", text, re.M):
         return None, "", None
     root = runs_root(repo)
-    data = load_drift(root)
-    if (data.get(str(repo)) or {}).get("plan") != plan_rel:     # a fork: the ticket checkout's entry gates it
-        repo = Path(next((k for k, e in data.items() if e.get("plan") == plan_rel), repo))
-    entry, now = data.get(str(repo)), time.time()
-    if not entry or entry.get("plan") != plan_rel:
-        if not register:
-            return None, "", None
-        base = git(repo, "rev-parse", "HEAD").strip()
-        entry = data[str(repo)] = {"plan": plan_rel, "base": base, "elapsed": 0.0, "last": now,
-                                   "pre": drift_measure(repo, base, plan_rel)}
-    gap = now - entry["last"]
-    entry["elapsed"] += gap if 0 < gap < DRIFT_IDLE else run_cover(root, plan_rel, entry["last"], now)
-    entry["last"] = now
-    pre = entry.get("pre") or {}
-    measure = drift_measure(repo, drift_base(repo, entry["base"]), plan_rel)
-    changed = {n: max(v - pre.get(n, 0), 0) for n, v in measure.items() if n not in pre or v != pre[n]}
-    files = [f for h in PHASE_HEAD.finditer(text) if phase_key(h.group(2)) is not None   # every heading level
-             for f in parse_files(extract_phase(text, h.group(2)))]
-    outside = sorted(n for n in changed if not in_scope(n, files))
-    have = {"time": entry["elapsed"] / 60, "size": sum(changed.values())}
-    want = {"time": plan_number(text, "ETA"), "size": plan_number(text, "Size")}
+    with open(root / "drift.lock", "a") as lock:      # held from the load to the save: a concurrent approval survives
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load_drift(root)
+        if (data.get(str(repo)) or {}).get("plan") != plan_rel:     # a fork: the ticket checkout's entry gates it
+            repo = Path(next((k for k, e in data.items() if e.get("plan") == plan_rel), repo))
+        entry, now = data.get(str(repo)), time.time()
+        if not entry or entry.get("plan") != plan_rel:
+            if not register:
+                return None, "", None
+            base = git(repo, "rev-parse", "HEAD").strip()
+            entry = data[str(repo)] = {"plan": plan_rel, "base": base, "elapsed": 0.0, "last": now,
+                                       "pre": drift_measure(repo, base, plan_rel)}
+        gap = now - entry["last"]
+        entry["elapsed"] += gap if 0 < gap < DRIFT_IDLE else run_cover(root, plan_rel, entry["last"], now)
+        entry["last"] = now
+        pre = entry.get("pre") or {}
+        measure = drift_measure(repo, drift_base(repo, entry["base"]), plan_rel)
+        changed = {n: max(v - pre.get(n, 0), 0) for n, v in measure.items() if n not in pre or v != pre[n]}
+        files = [f for h in PHASE_HEAD.finditer(text) if phase_key(h.group(2)) is not None   # every heading level
+                 for f in parse_files(extract_phase(text, h.group(2)))]
+        outside = sorted(n for n in changed if not in_scope(n, files))
+        have = {"time": entry["elapsed"] / 60, "size": sum(changed.values())}
+        want = {"time": plan_number(text, "ETA"), "size": plan_number(text, "Size")}
 
-    def level_of(ok):
-        if set(outside) - set(ok.get("files", [])) or any(
-                want[k] and have[k] >= DRIFT_BLOCK * want[k] and (k not in ok or have[k] >= 1.5 * ok[k]) for k in have):
-            return "BLOCK"
-        return "WARN" if any(want[k] and have[k] >= DRIFT_WARN * want[k] for k in have) else "OK"
+        def level_of(ok):
+            if set(outside) - set(ok.get("files", [])) or any(
+                    want[k] and have[k] >= DRIFT_BLOCK * want[k] and (k not in ok or have[k] >= 1.5 * ok[k]) for k in have):
+                return "BLOCK"
+            return "WARN" if any(want[k] and have[k] >= DRIFT_WARN * want[k] for k in have) else "OK"
 
-    level = level_of(entry.get("ok") or {})
-    if level == "BLOCK" and approval:
-        entry["ok"] = dict(have, files=outside)
-        level = level_of(entry["ok"])
-    prev, entry["level"] = entry.get("level"), level
-    save_drift(root, str(repo), entry)
-    parts = [f"{k} {have[k]:.0f}/{want[k]} {unit} ({have[k] / want[k]:.2f}x)"
-             for k, unit in (("time", "min"), ("size", "lines")) if want[k]]
-    parts.append(f"changed outside Files: {', '.join(outside)}" if outside else "every changed file is in Files")
-    line = f"DRIFT {level} {plan_rel}: {'; '.join(parts)}"
-    if level == "BLOCK":
-        line += ". Stop, report to the owner and ask; continue only with --user-approved \"<the owner's words>\""
-    return level, line, prev
+        level = level_of(entry.get("ok") or {})
+        if level == "BLOCK" and approval:
+            entry["ok"] = dict(have, files=outside)
+            level = level_of(entry["ok"])
+        prev, entry["level"] = entry.get("level"), level
+        save_drift(root, str(repo), entry, locked=True)
+        parts = [f"{k} {have[k]:.0f}/{want[k]} {unit} ({have[k] / want[k]:.2f}x)"
+                 for k, unit in (("time", "min"), ("size", "lines")) if want[k]]
+        parts.append(f"changed outside Files: {', '.join(outside)}" if outside else "every changed file is in Files")
+        line = f"DRIFT {level} {plan_rel}: {'; '.join(parts)}"
+        if level == "BLOCK":
+            line += ". Stop, report to the owner and ask; continue only with --user-approved \"<the owner's words>\""
+        return level, line, prev
 
 
 def plan_gates(repo, plan_rel, text, approval):
@@ -4106,12 +4143,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     out = ANSI.sub("", (run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
     result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
     if not result["ok"]:
-        refusals = review_refusals(tail(run_dir / "output.log", 60))
+        refusals = review_refusals(tail(run_dir / "output.log", 60), executor, rc)
         if refusals:
             refusal_report(run_dir, result, refusals)
             return 9
     transport_retries = 0
-    while not result["ok"] and rc != 124 and transport_error(out) and transport_retries < TRANSPORT_RETRIES:
+    while not result["ok"] and rc != 124 and transport_error(out, executor, rc) and transport_retries < TRANSPORT_RETRIES:
         transport_retries += 1
         print(f"note: connection dropped during the review; rerunning the same prompt "
               f"({transport_retries}/{TRANSPORT_RETRIES})", file=sys.stderr)
@@ -4121,12 +4158,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
         result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
         if not result["ok"]:
-            refusals = review_refusals(tail(log, 60))
+            refusals = review_refusals(tail(log, 60), executor, rc)
             if refusals:
                 refusal_report(run_dir, result, refusals)
                 return 9
     retried = False
-    if not result["ok"] and rc != 124 and not transport_error(out):
+    if not result["ok"] and rc != 124 and not transport_error(out, executor, rc):
         retried = True
         retry_task = task + (f"\n\nYour previous answer could not be used: {'; '.join(result['errors'])}. "
                              f"Answer again with only the REVIEW-JSON block.")
@@ -4137,7 +4174,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         out = ANSI.sub("", (run_dir / "output-retry.log").read_bytes().decode("utf-8", "replace"))
         result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
         if not result["ok"]:
-            refusals = review_refusals(tail(run_dir / "output-retry.log", 60))
+            refusals = review_refusals(tail(run_dir / "output-retry.log", 60), executor, rc)
             if refusals:
                 refusal_report(run_dir, result, refusals)
                 return 9
@@ -4154,7 +4191,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
                           "verdict": verdict, "blockers": counts["blockers"]}
     # D2: a model review is recorded under the model that ran (its models.conf name when neither --model nor --via
     # changed the model, else the model id).
-    usage = opencode_usage(run_dir.name) if executor == "opencode" else None
+    usage = opencode_usage(run_dir.name) if executor == "opencode" else pi_usage(run_dir)
     entry = {"reviewer": reviewer, "name": res["name"], "model": model, "billing": billing(executor, model),
              "verdict": verdict,
              "blockers": counts["blockers"], "highs": counts["highs"], "mediums": counts["mediums"],
@@ -5458,7 +5495,7 @@ def cmd_lint(args, phase, target, conf):
     if changed or created or deleted:
         print(f"WARNING: lint run touched files: changed={changed} created={created} deleted={deleted}")
     print(body.strip())
-    usage = opencode_usage(run_dir.name) if executor == "opencode" else None
+    usage = opencode_usage(run_dir.name) if executor == "opencode" else pi_usage(run_dir)
     if usage:
         print(usage_line(usage, model))
     return rc

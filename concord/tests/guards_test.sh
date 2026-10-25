@@ -131,6 +131,17 @@ git -C "$D" worktree add -q "$T/df" > /dev/null 2>&1; cp "$D/PLAN_D.md" "$T/df/"
 FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$T/df" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "a run in a fork (another worktree) is gated by the ticket checkout's drift (exit 10)" \
   || { bad "fork rc=$RC"; tail -2 "$T/out.txt"; }
+python3 -I - "$D/.git/concord" "$D" "$T/held" <<'EOF' &
+import fcntl, json, sys, time
+root, key, flag = sys.argv[1:4]
+with open(root + "/drift.lock", "a") as lock:      # another writer (an approval) holds the lock for 1.5 s
+    fcntl.flock(lock, fcntl.LOCK_EX); open(flag, "w").close(); time.sleep(1.5)
+    d = json.load(open(root + "/drift.json")); d[key]["ok"] = {"time": 99.0, "files": ["held.py"]}
+    json.dump(d, open(root + "/drift.json", "w"))
+EOF
+HP=$!; for i in $(seq 100); do [ -e "$T/held" ] && break; sleep 0.05; done; hook; wait $HP
+python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))[sys.argv[2]].get("ok", {}).get("files") != ["held.py"])' "$D/.git/concord/drift.json" "$D" \
+  && ok "a hook tick during another writer's drift.lock keeps that writer's approval" || { bad "approval lost to a hook tick"; cat "$T/out.txt"; }
 $DP --lint 1 --via qwen --model fake/m --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1
 has 'PLAN LINT: no `Size:` line' && has 'PLAN LINT: no `ETA:` line' && ok "--lint flags a plan with no Size: or ETA:" || { bad "lint"; tail -3 "$T/out.txt"; }
 
@@ -149,11 +160,15 @@ $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "size 1/1200 lines" && has "every changed file is in Files" \
   && ok "a merge of upstream work moves the drift base: its files and lines do not count" || { bad "upstream merge"; tail -2 "$T/out.txt"; }
 mkdir -p "$E/.git/concord/run-x"; clock 0 1500 "$E"
-python3 -I -c 'import json,sys,time; d=sys.argv[1]; json.dump({"plan": "PLAN_E.md", "started": time.time() - 1500, "mode": "edit"}, open(d + "/state.json", "w")); json.dump({"seconds": 1500}, open(d + "/meta.json", "w"))' "$E/.git/concord/run-x"
+python3 -I -c 'import json,sys,time; d=sys.argv[1]; json.dump({"plan": "PLAN_E.md", "started": time.time() - 1500, "mode": "edit", "pid": int(sys.argv[2])}, open(d + "/state.json", "w")); json.dump({"seconds": 1500}, open(d + "/meta.json", "w"))' "$E/.git/concord/run-x" $$
 $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 25/10 min" && ok "a long gap counts where a run of the plan covered it" || { bad "run time"; tail -2 "$T/out.txt"; }
 rm "$E/.git/concord/run-x/meta.json"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 20/10 min" && ok "a run still in progress covers the gap up to now" || { bad "running time"; tail -2 "$T/out.txt"; }
+sh -c 'exit 0' & DEAD=$!; wait $DEAD
+python3 -I -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); s["pid"]=int(sys.argv[2]); json.dump(s,open(p,"w"))' "$E/.git/concord/run-x/state.json" "$DEAD"
+clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
+has "time 0/10 min" && ok "a killed run (no report, its process gone) covers no gap" || { bad "killed run"; tail -2 "$T/out.txt"; }
 printf 'NOT RUN\n' > "$E/.git/concord/run-x/report.md"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 0/10 min" && ok "a refused run (a report, no meta.json) covers no gap" || { bad "refused run"; tail -2 "$T/out.txt"; }
 

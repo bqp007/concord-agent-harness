@@ -122,4 +122,40 @@ $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
 line "changed in scope:" "a.py" && ! has "OUTSIDE CHECKOUT CHANGED" && ok "no stored hashes -> no OUTSIDE line (no flood of '(new)' entries)" \
   || { bad "old-state run ($BID): $(grep -o '(new)' "$T/out.txt" | wc -l | tr -d ' ') '(new)' entries"; grep '^OUTSIDE' "$T/out.txt" | cut -c1-160; }
 
+echo "== pi adapter (kit-pi): key file, offline, own agent folder, session in the run, :thinking suffix, cost"
+mkdir -p "$HOME/.config/concord-keys" "$HOME/.pi/agent"; printf 'test-key-\n   123 \n' > "$HOME/.config/concord-keys/opencode.key"    # a wrapped paste
+for f in models.json models-store.json settings.json; do printf '{}\n' > "$HOME/.pi/agent/$f"; done
+cat > "$T/bin/pi" <<'PI'
+#!/bin/sh
+d=""; prev=""; for a in "$@"; do [ "$prev" = "--session-dir" ] && d="$a"; prev="$a"; done
+mkdir -p "$d" && printf '%s\n' "$@" > "$d/argv.txt"
+{ [ "$OPENCODE_API_KEY" = test-key-123 ] && echo key-ok; echo "offline=$PI_OFFLINE"; [ -f "$PI_CODING_AGENT_DIR/models.json" ] && [ -f "$PI_CODING_AGENT_DIR/models-store.json" ] && [ -f "$PI_CODING_AGENT_DIR/settings.json" ] && echo agent-ok; } > "$d/env.txt"
+printf '{"type":"message","message":{"role":"assistant","usage":{"input":100,"output":20,"cacheRead":5,"cacheWrite":0,"totalTokens":125,"cost":{"input":0.01,"output":0.0023,"cacheRead":0,"cacheWrite":0,"total":0.0123}}}}\n' > "$d/s.jsonl"
+sh -c "${FAKE_ACTIONS:-true}"
+PI
+chmod +x "$T/bin/pi"
+newrepo; FAKE_ACTIONS="echo 'y = 9' >> a.py" $DP 1 --plan PLAN_T.md --via pi --model opencode-go/x#high --no-baseline --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+X="$R/.git/concord/$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)"; S="$X/pi"
+grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && grep -qxF -- "$S" "$S/argv.txt" && ! grep -qx -- "--no-session" "$S/argv.txt" \
+  && ok "pi gets --model provider/id:high and --session-dir <run>/pi" || { bad "pi argv rc=$RC"; cat "$S/argv.txt" 2>/dev/null | head -20; tail -3 "$T/out.txt"; }
+[ "$(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)" = "key-ok offline=1 agent-ok " ] && ! grep -rqF test-key-123 "$X" \
+  && ok "pi gets the key file's key, PI_OFFLINE=1 and its own agent folder with models.json; the run folder never holds the key" \
+  || { bad "pi env: $(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)"; grep -rlF test-key-123 "$X"; }
+grep -qF '$0.0123' "$X/report.md" "$T/out.txt" 2>/dev/null && ok "the report shows the pi session's cost" || { bad "pi cost"; grep -iE 'cost|token' "$X/report.md" | head -3; }
+python3 -I - "$T/concord/concord.py" <<'EOF' && ok "a failed pi run's bare lines are errors, a passed pi run's answer never is; OpenCode counts only Error: lines; pi billing labels" || bad "pi error lines or billing"
+import importlib.util, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+limit = "Free usage limit reached. Free models work in OpenCode"
+assert d.review_refusals(limit, "pi", 1) and d.transport_error("fetch failed", "pi", 1), "bare lines of a failed pi run"
+assert not d.review_refusals(f"429: {limit}\nError: {limit}", "pi", 0) and not d.transport_error("Error: fetch failed", "pi", 0), "pi answer"
+assert d.review_refusals("Error: " + limit) and not d.review_refusals("429: " + limit), "OpenCode: only Error: lines"
+assert d.billing("pi", "github-copilot/gpt-5") == "pi's own login/key", d.billing("pi", "github-copilot/gpt-5")
+assert d.billing("pi", "opencode-go/x") == "OpenCode Go subscription allowance"
+EOF
+FAKE_ACTIONS="echo 'Free usage limit reached. Free models work in OpenCode' >&2; exit 1" \
+  $DP --review "$(basename "$X")" --via pi --model opencode-go/x --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 9 ] && has "PROVIDER LIMIT" && ok "a pi review that fails with a bare provider limit is a refusal (exit 9, nothing recorded)" \
+  || { bad "pi review refusal rc=$RC"; tail -4 "$T/out.txt"; }
+
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
