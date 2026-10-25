@@ -168,12 +168,19 @@ TRANSPORT_RETRIES = 2
 TRANSPORT_WAIT_S = int(os.environ.get("CONCORD_TRANSPORT_WAIT_S", "15"))
 
 
-def transport_error(text):
-    """True when an error line of the harness output (OpenCode's `Error:`, pi's `503: ...`) reports a dropped connection.
-    Only error lines count, so a review that quotes these words from the code under review is no transport failure."""
-    for line in (text or "").splitlines():
+def harness_errors(text, executor="opencode", rc=1):
+    """The run output with pi's error in OpenCode's `Error:` form. pi prints only its unprefixed error when it fails
+    and only its answer when it passes, so every line of a failed pi run is an error line and a passed one has none."""
+    lines = (text or "").splitlines()
+    return "\n".join(lines if executor != "pi" else [f"Error: {s}" for s in lines] if rc else [])
+
+
+def transport_error(text, executor="opencode", rc=1):
+    """True when an `Error:` line of the harness output (see harness_errors) reports a dropped connection. Only error
+    lines count, so a review that quotes these words from the code under review is not taken for a transport failure."""
+    for line in harness_errors(text, executor, rc).splitlines():
         line = line.strip()
-        if re.match(r"(?i)(error:|\d{3}: )", line) and any(n.lower() in line.lower() for n in TRANSPORT_ERRORS):
+        if line.lower().startswith("error:") and any(n.lower() in line.lower() for n in TRANSPORT_ERRORS):
             return True
     return False
 
@@ -184,11 +191,11 @@ def provider_refusals(text):
     return [(label, advice) for needle, label, advice in PROVIDER_REFUSALS if needle.lower() in low]
 
 
-def review_refusals(text):
-    """provider_refusals over the harness error lines only (OpenCode's `Error:`, pi's bare `429: {...}`), so a review
-    answer that quotes a refusal phrase (from the code under review) is a parse failure, not a refusal (D1)."""
-    return provider_refusals("\n".join(l for l in (text or "").splitlines()
-                                        if re.match(r"(?i)(error:|\d{3}: )", l.strip())))
+def review_refusals(text, executor="opencode", rc=1):
+    """provider_refusals over the harness `Error:` lines only (see harness_errors), so a review answer that quotes a
+    refusal phrase (from the code under review) is a parse failure, not a refusal (D1)."""
+    return provider_refusals("\n".join(l for l in harness_errors(text, executor, rc).splitlines()
+                                        if l.strip().lower().startswith("error:")))
 
 
 def executor_blocked(log_text):
@@ -4136,12 +4143,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     out = ANSI.sub("", (run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
     result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
     if not result["ok"]:
-        refusals = review_refusals(tail(run_dir / "output.log", 60))
+        refusals = review_refusals(tail(run_dir / "output.log", 60), executor, rc)
         if refusals:
             refusal_report(run_dir, result, refusals)
             return 9
     transport_retries = 0
-    while not result["ok"] and rc != 124 and transport_error(out) and transport_retries < TRANSPORT_RETRIES:
+    while not result["ok"] and rc != 124 and transport_error(out, executor, rc) and transport_retries < TRANSPORT_RETRIES:
         transport_retries += 1
         print(f"note: connection dropped during the review; rerunning the same prompt "
               f"({transport_retries}/{TRANSPORT_RETRIES})", file=sys.stderr)
@@ -4151,12 +4158,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
         result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
         if not result["ok"]:
-            refusals = review_refusals(tail(log, 60))
+            refusals = review_refusals(tail(log, 60), executor, rc)
             if refusals:
                 refusal_report(run_dir, result, refusals)
                 return 9
     retried = False
-    if not result["ok"] and rc != 124 and not transport_error(out):
+    if not result["ok"] and rc != 124 and not transport_error(out, executor, rc):
         retried = True
         retry_task = task + (f"\n\nYour previous answer could not be used: {'; '.join(result['errors'])}. "
                              f"Answer again with only the REVIEW-JSON block.")
@@ -4167,7 +4174,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         out = ANSI.sub("", (run_dir / "output-retry.log").read_bytes().decode("utf-8", "replace"))
         result = process_review(out, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only)
         if not result["ok"]:
-            refusals = review_refusals(tail(run_dir / "output-retry.log", 60))
+            refusals = review_refusals(tail(run_dir / "output-retry.log", 60), executor, rc)
             if refusals:
                 refusal_report(run_dir, result, refusals)
                 return 9

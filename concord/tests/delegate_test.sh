@@ -142,15 +142,20 @@ grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && grep -qxF -- "$S" "$
   && ok "pi gets the key file's key, PI_OFFLINE=1 and its own agent folder with models.json; the run folder never holds the key" \
   || { bad "pi env: $(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)"; grep -rlF test-key-123 "$X"; }
 grep -qF '$0.0123' "$X/report.md" "$T/out.txt" 2>/dev/null && ok "the report shows the pi session's cost" || { bad "pi cost"; grep -iE 'cost|token' "$X/report.md" | head -3; }
-python3 -I - "$T/concord/concord.py" <<'EOF' && ok "pi's bare 429 and 503 lines count as refusal and transport errors; pi's own provider keeps its billing label" || bad "pi error lines or billing"
+python3 -I - "$T/concord/concord.py" <<'EOF' && ok "a failed pi run's bare lines are errors, a passed pi run's answer never is; OpenCode counts only Error: lines; pi billing labels" || bad "pi error lines or billing"
 import importlib.util, sys
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
-assert d.review_refusals('429: {"type":"FreeUsageLimitError","message":"Free usage limit reached."}'), "429 refusal"
-assert d.transport_error("503: upstream ECONNRESET"), "503 transport"
-assert not d.review_refusals('A quoted "429: Free usage limit reached" in the answer'), "quoted refusal"
+limit = "Free usage limit reached. Free models work in OpenCode"
+assert d.review_refusals(limit, "pi", 1) and d.transport_error("fetch failed", "pi", 1), "bare lines of a failed pi run"
+assert not d.review_refusals("429: " + limit, "pi", 0) and not d.transport_error("503: fetch failed", "pi", 0), "pi answer"
+assert d.review_refusals("Error: " + limit) and not d.review_refusals("429: " + limit), "OpenCode: only Error: lines"
 assert d.billing("pi", "github-copilot/gpt-5") == "pi's own login/key", d.billing("pi", "github-copilot/gpt-5")
 assert d.billing("pi", "opencode-go/x") == "OpenCode Go subscription allowance"
 EOF
+FAKE_ACTIONS="echo 'Free usage limit reached. Free models work in OpenCode' >&2; exit 1" \
+  $DP --review "$(basename "$X")" --via pi --model opencode-go/x --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 9 ] && has "PROVIDER LIMIT" && ok "a pi review that fails with a bare provider limit is a refusal (exit 9, nothing recorded)" \
+  || { bad "pi review refusal rc=$RC"; tail -4 "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
