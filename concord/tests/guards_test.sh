@@ -124,8 +124,13 @@ printf '# 6\n# 7\n' >> "$D/a.py"; drun; RC=$?
 [ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "size at 1.5x blocks the next run (exit 10)" || { bad "size block rc=$RC"; tail -2 "$T/out.txt"; }
 drun --user-approved "go on"; RC=$?; drift
 [ $RC -eq 0 ] && has "DRIFT WARN" && ok "--user-approved lifts the block until the measure grows 50% more" || { bad "approved rc=$RC"; tail -2 "$T/out.txt"; }
+grep -rqs "user approved: go on" "$D/.git/concord" && ok "the run records the owner's words that passed a gate" || bad "approval note"
 printf 'y = 1\n' > "$D/b.py"; drun; RC=$?
 [ $RC -eq 10 ] && has "changed outside Files: b.py" && ok "a changed file outside Files blocks (exit 10)" || { bad "scope rc=$RC"; tail -2 "$T/out.txt"; }
+git -C "$D" worktree add -q "$T/df" > /dev/null 2>&1; cp "$D/PLAN_D.md" "$T/df/"
+FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$T/df" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "a run in a fork (another worktree) is gated by the ticket checkout's drift (exit 10)" \
+  || { bad "fork rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --lint 1 --via qwen --model fake/m --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1
 has 'PLAN LINT: no `Size:` line' && has 'PLAN LINT: no `ETA:` line' && ok "--lint flags a plan with no Size: or ETA:" || { bad "lint"; tail -3 "$T/out.txt"; }
 

@@ -2427,10 +2427,7 @@ def save_drift(root, key, value):
     with open(root / "drift.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = load_drift(root)
-        if key == "verdicts":
-            data.setdefault("verdicts", {}).update(value)
-        else:
-            data[key] = value
+        data[key] = {**(data.get("verdicts") or {}), **value} if key == "verdicts" else value
         data = {k: v for k, v in data.items() if k == "verdicts" or Path(k).is_dir()}
         data["verdicts"] = dict(sorted((data.get("verdicts") or {}).items(), key=lambda kv: kv[1])[-50:])
         tmp = root / f"drift.json.{os.getpid()}"
@@ -2482,6 +2479,8 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         return None, "", None
     root = runs_root(repo)
     data = load_drift(root)
+    if (data.get(str(repo)) or {}).get("plan") != plan_rel:     # a fork: the ticket checkout's entry gates it
+        repo = Path(next((k for k, e in data.items() if e.get("plan") == plan_rel), repo))
     entry, now = data.get(str(repo)), time.time()
     if not entry or entry.get("plan") != plan_rel:
         if not register:
@@ -2724,7 +2723,7 @@ def cmd_run(args, target, phase, conf):
     if cap and not approval:
         print(cap)
         return 8
-    cap_note = f"user approved a run beyond the attempt cap: {approval}" if cap else None
+    approval_note = f"user approved{' a run beyond the attempt cap' if cap else ''}: {approval}" if approval else None
     gate = None if args.dry_run else plan_gates(repo, plan_rel, plan.read_text(errors="replace"), approval)
     if gate:
         print(gate[1])
@@ -2737,8 +2736,8 @@ def cmd_run(args, target, phase, conf):
     shown = redact_cmd(cmd, contract, combined, task)
     (run_dir / "cmd.json").write_text(json.dumps(shown, indent=1))
     notes = [plan_note] if plan_note else []
-    if cap_note:
-        notes.append(cap_note)
+    if approval_note:
+        notes.append(approval_note)
     if args.mode == "edit" and executor not in MODE_ENFORCED:
         notes.append(f"edit mode is not enforceable for {executor}; contract only")
     if allow_edit:
@@ -5496,7 +5495,7 @@ def cmd_begin(args, phase, conf):
     if cap and not approval:
         print(cap)
         return 8
-    cap_note = f"user approved a run beyond the attempt cap: {approval}" if cap else None
+    approval_note = f"user approved{' a run beyond the attempt cap' if cap else ''}: {approval}" if approval else None
     gate = plan_gates(repo, plan_rel, plan.read_text(errors="replace"), approval)
     if gate:
         print(gate[1])
@@ -5505,8 +5504,8 @@ def cmd_begin(args, phase, conf):
     acquire_lock(root, run_dir.name, manual=True)
     try:
         notes = [plan_note] if plan_note else []
-        if cap_note:
-            notes.append(cap_note)
+        if approval_note:
+            notes.append(approval_note)
         st = start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, "session", track_ignored,
                          notes, executor=executor, model=label, name=label, conf=conf,
                          do_baseline=not args.no_baseline)
