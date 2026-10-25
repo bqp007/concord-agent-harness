@@ -106,7 +106,7 @@ D="$T/d"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && git config user.e
 drun(){ FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$D" "$@" > "$T/out.txt" 2>&1; }
 drift(){ $DP --drift --plan PLAN_D.md --repo "$D" > "$T/out.txt" 2>&1; }
 hook(){ printf '{"cwd": "%s"}' "$D" | $DP --drift-hook > "$T/out.txt" 2>&1; }
-clock(){ python3 -I -c 'import json,sys,time; p,r=sys.argv[1:3]; d=json.load(open(p)); d[r].update(elapsed=float(sys.argv[3]), last=time.time()-float(sys.argv[4])); json.dump(d,open(p,"w"))' "$D/.git/concord/drift.json" "$D" "$1" "$2"; }
+clock(){ python3 -I -c 'import json,sys,time; p,r=sys.argv[1:3]; d=json.load(open(p)); d[r].update(elapsed=float(sys.argv[3]), last=time.time()-float(sys.argv[4])); json.dump(d,open(p,"w"))' "${3:-$D}/.git/concord/drift.json" "${3:-$D}" "$1" "$2"; }
 drun; RC=$?
 [ $RC -eq 11 ] && has "no plan-verifier APPROVE" && ok "a Tier: plan with no plan-verifier APPROVE is refused (exit 11)" || { bad "no verdict rc=$RC"; tail -2 "$T/out.txt"; }
 printf 'VERDICT: REVISE\n' > "$T/v.txt"; $DP --plan-verdict "$T/v.txt" --plan PLAN_D.md --repo "$D" > "$T/out.txt" 2>&1; RC=$?
@@ -128,6 +128,25 @@ printf 'y = 1\n' > "$D/b.py"; drun; RC=$?
 [ $RC -eq 10 ] && has "changed outside Files: b.py" && ok "a changed file outside Files blocks (exit 10)" || { bad "scope rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --lint 1 --via qwen --model fake/m --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1
 has 'PLAN LINT: no `Size:` line' && has 'PLAN LINT: no `ETA:` line' && ok "--lint flags a plan with no Size: or ETA:" || { bad "lint"; tail -3 "$T/out.txt"; }
+
+E="$T/e"; mkdir -p "$E" && ( cd "$E" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > café.py; git add -A && git commit -qm init
+  printf '# Plan\nTier: L\nSize: ~1,200 lines\nETA: 10 min\n\n### Phase 1 - p\nExecutor: deepseek-flash\nFiles: café.py\nAcceptance:\n- `true`\n' > PLAN_E.md ) \
+  || { echo "setup failed"; exit 1; }
+$DP --plan-verdict "$T/v.txt" --plan PLAN_E.md --repo "$E" > /dev/null 2>&1
+FAKE_ACTIONS=true $DP 1 --plan PLAN_E.md --via qwen --model fake/m --no-baseline --repo "$E" > /dev/null 2>&1
+printf 'y = 2\n' >> "$E/café.py"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
+has "DRIFT OK" && has "size 1/1200 lines" && has "every changed file is in Files" \
+  && ok "### Phase heads, a non-ASCII path and Size: ~1,200 are read right" || { bad "heads, path, size"; tail -2 "$T/out.txt"; }
+( cd "$E" && git commit -qam ticket && git checkout -qb up HEAD~1 && printf 'z = 1\n' > c.py && git add c.py \
+  && git commit -qm upstream && git checkout -q main && git merge -q --no-edit up ) > /dev/null 2>&1
+$DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
+has "size 1/1200 lines" && has "every changed file is in Files" \
+  && ok "a merge of upstream work moves the drift base: its files and lines do not count" || { bad "upstream merge"; tail -2 "$T/out.txt"; }
+mkdir -p "$E/.git/concord/run-x"; clock 0 1500 "$E"
+python3 -I -c 'import json,sys,time; json.dump({"plan": "PLAN_E.md", "started": time.time() - 1500, "seconds": 1500}, open(sys.argv[1], "w"))' "$E/.git/concord/run-x/meta.json"
+$DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
+has "time 25/10 min" && ok "a long gap counts where a run of the plan covered it" || { bad "run time"; tail -2 "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]

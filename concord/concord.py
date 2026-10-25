@@ -59,6 +59,7 @@ import argparse
 import ast
 import contextlib
 import difflib
+import fcntl
 import fnmatch
 import glob
 import hashlib
@@ -2392,13 +2393,13 @@ def cmd_lesson(text, tags):
 # Drift brakes: time against the plan's ETA:, size against Size:, changed files against the
 # union of its Files: lists. Warn at 1.2x, block at 1.5x or at a changed file outside Files.
 DRIFT_WARN, DRIFT_BLOCK = 1.2, 1.5
-DRIFT_IDLE = 600                                       # a gap of 10 minutes or more between checks is idle time
+DRIFT_IDLE = 600                                       # a longer gap between checks counts only where a run covered it
 VERIFY_SKIP = ("## open questions", "## handoff")      # sections written after the plan-verifier approved
 
 
 def plan_number(text, label):
-    m = re.search(rf"^{label}:\s*~?(\d+)", text, re.M)
-    return int(m.group(1)) if m else None
+    m = re.search(rf"^{label}:\s*~?(\d[\d,_]*)", text, re.M)          # `Size: ~1,200 lines` is 1200
+    return int(re.sub(r"[,_]", "", m.group(1))) if m else None
 
 
 def verified_hash(text):
@@ -2420,28 +2421,56 @@ def load_drift(root):
     return data if isinstance(data, dict) else {}
 
 
-def save_drift(root, data):
-    """drift.json keeps one entry per existing checkout and the newest 50 plan verdicts."""
-    data = {k: v for k, v in data.items() if k == "verdicts" or Path(k).is_dir()}
-    data["verdicts"] = dict(sorted((data.get("verdicts") or {}).items(), key=lambda kv: kv[1])[-50:])
-    tmp = root / f"drift.json.{os.getpid()}"
-    tmp.write_text(json.dumps(data))
-    tmp.replace(root / "drift.json")
+def save_drift(root, key, value):
+    """Set one key of drift.json (a checkout's entry, or new plan verdicts under "verdicts") under a lock, re-read
+    first, so a concurrent writer keeps its key. One entry per existing checkout, the newest 50 verdicts."""
+    with open(root / "drift.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load_drift(root)
+        if key == "verdicts":
+            data.setdefault("verdicts", {}).update(value)
+        else:
+            data[key] = value
+        data = {k: v for k, v in data.items() if k == "verdicts" or Path(k).is_dir()}
+        data["verdicts"] = dict(sorted((data.get("verdicts") or {}).items(), key=lambda kv: kv[1])[-50:])
+        tmp = root / f"drift.json.{os.getpid()}"
+        tmp.write_text(json.dumps(data))
+        tmp.replace(root / "drift.json")
 
 
 def drift_measure(repo, base, plan_rel):
     """{path: inserted lines} since `base`: tracked changes and untracked files (not ignored ones), the plan excluded."""
     out = {}
-    for line in run_git(["diff", "--numstat", "--no-renames", base], repo).stdout.splitlines():
-        cols = line.split("\t")
+    for rec in run_git(["diff", "--numstat", "-z", "--no-renames", base], repo).stdout.split("\0"):   # -z: raw paths
+        cols = rec.split("\t")
         if len(cols) == 3:
             out[cols[2]] = int(cols[0]) if cols[0].isdigit() else 0
-    for name in run_git(["ls-files", "--others", "--exclude-standard"], repo).stdout.splitlines():
+    for name in filter(None, run_git(["ls-files", "-z", "--others", "--exclude-standard"], repo).stdout.split("\0")):
         path = Path(repo) / name
         with contextlib.suppress(OSError):
             out[name] = path.read_bytes().count(b"\n") if path.stat().st_size < 1_000_000 else 0
     out.pop(plan_rel, None)
     return out
+
+
+def drift_base(repo, base):
+    """The newest commit since `base` that another local or remote branch has (upstream work pulled in), else `base`."""
+    cur = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    own = run_git(["rev-list", "HEAD", f"^{base}", "--not", f"--exclude={cur}", "--branches", f"--exclude=*/{cur}",
+                   "--remotes"], repo).stdout.split()
+    new = run_git(["rev-list", "--topo-order", "HEAD", f"^{base}"], repo).stdout.split()
+    return next((c for c in new if c not in own), base)
+
+
+def run_cover(root, plan_rel, t0, t1):
+    """Seconds of the gap t0..t1 that the longest finished run of this plan covered: the session waited on it."""
+    best = 0.0
+    for path in root.glob("*/meta.json"):
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            m = json.loads(path.read_text())
+            if m.get("plan") == plan_rel:
+                best = max(best, min(m["started"] + m["seconds"], t1) - max(m["started"], t0))
+    return best
 
 
 def drift_check(repo, plan_rel, text, approval="", register=False):
@@ -2460,13 +2489,14 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         base = git(repo, "rev-parse", "HEAD").strip()
         entry = data[str(repo)] = {"plan": plan_rel, "base": base, "elapsed": 0.0, "last": now,
                                    "pre": drift_measure(repo, base, plan_rel)}
-    if 0 < now - entry["last"] < DRIFT_IDLE:
-        entry["elapsed"] += now - entry["last"]
+    gap = now - entry["last"]
+    entry["elapsed"] += gap if 0 < gap < DRIFT_IDLE else run_cover(root, plan_rel, entry["last"], now)
     entry["last"] = now
     pre = entry.get("pre") or {}
-    changed = {n: max(v - pre.get(n, 0), 0) for n, v in drift_measure(repo, entry["base"], plan_rel).items()
-               if n not in pre or v != pre[n]}
-    files = [f for chunk in re.split(r"(?m)^## Phase ", text)[1:] for f in parse_files(chunk)]
+    measure = drift_measure(repo, drift_base(repo, entry["base"]), plan_rel)
+    changed = {n: max(v - pre.get(n, 0), 0) for n, v in measure.items() if n not in pre or v != pre[n]}
+    files = [f for h in PHASE_HEAD.finditer(text) if phase_key(h.group(2)) is not None   # every heading level
+             for f in parse_files(extract_phase(text, h.group(2)))]
     outside = sorted(n for n in changed if not in_scope(n, files))
     have = {"time": entry["elapsed"] / 60, "size": sum(changed.values())}
     want = {"time": plan_number(text, "ETA"), "size": plan_number(text, "Size")}
@@ -2482,7 +2512,7 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         entry["ok"] = dict(have, files=outside)
         level = level_of(entry["ok"])
     prev, entry["level"] = entry.get("level"), level
-    save_drift(root, data)
+    save_drift(root, str(repo), entry)
     parts = [f"{k} {have[k]:.0f}/{want[k]} {unit} ({have[k] / want[k]:.2f}x)"
              for k, unit in (("time", "min"), ("size", "lines")) if want[k]]
     parts.append(f"changed outside Files: {', '.join(outside)}" if outside else "every changed file is in Files")
@@ -2545,9 +2575,7 @@ def cmd_plan_verdict(args):
     if m.group(1) == "REVISE":
         die(f"plan verdict REVISE for {plan_rel}: nothing recorded; revise the plan and ask the verifier again", code=1)
     root = runs_root(repo)
-    data = load_drift(root)
-    data.setdefault("verdicts", {})[verified_hash(text)] = time.time()
-    save_drift(root, data)
+    save_drift(root, "verdicts", {verified_hash(text): time.time()})
     print(f"plan verdict APPROVE recorded for {plan_rel} ({verified_hash(text)})")
     return 0
 
