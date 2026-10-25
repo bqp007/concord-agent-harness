@@ -158,4 +158,28 @@ FAKE_ACTIONS="echo 'Free usage limit reached. Free models work in OpenCode' >&2;
 [ $RC -eq 9 ] && has "PROVIDER LIMIT" && ok "a pi review that fails with a bare provider limit is a refusal (exit 9, nothing recorded)" \
   || { bad "pi review refusal rc=$RC"; tail -4 "$T/out.txt"; }
 
+echo "== free-model routing: Zen free models answer pi with 429, so they stay on OpenCode; beam runs on pi"
+R2=$(while read -r m e; do $DP --resolve "$m" 2>/dev/null | grep -qF "\"executor\": \"$e\"" || printf ' %s' "$m"; done <<'EOF'
+free-deepseek-flash opencode
+free-glm-flash opencode
+opencode/deepseek-v4.1-flash-free#high opencode
+opencode/beam-free opencode
+beam pi
+opencode-go/beam-free pi
+opencode/glm-5.3 pi
+EOF
+)
+[ -z "$R2" ] && ok "Zen free names and raw opencode/...-free IDs resolve to OpenCode; beam and the other Go and Zen IDs to pi" \
+  || bad "routing:$R2"
+python3 -I - "$T/concord/concord.py" <<'EOF' && ok "--models --verify finds a model ID with an #effort suffix in the catalog" || bad "models verify suffix"
+import contextlib, importlib.util, io, json, sys, urllib.request
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+urllib.request.urlopen = lambda req, timeout=0: io.BytesIO(json.dumps({"data": [{"id": "deepseek-v4.1-flash-free"}]}).encode())
+out = io.StringIO()
+with contextlib.redirect_stdout(out): d.cmd_models(True, None)
+line = next(l for l in out.getvalue().splitlines() if l.startswith("free-deepseek-flash"))
+assert line.endswith("[available]"), line
+EOF
+
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

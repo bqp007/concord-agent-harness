@@ -458,7 +458,8 @@ def try_resolve(target, entries):
     if text in EXECUTORS or text == "claude":
         return {"name": text, "executor": text, "model": "", "how": "executor"}
     if "/" in text:
-        via = "pi" if text.startswith(("opencode/", "opencode-go/")) else "opencode"
+        zen_free = re.match(r"opencode/[^#]*-free(#|$)", text)     # Zen answers pi 429 "Free models work in OpenCode"
+        via = "pi" if text.startswith(("opencode/", "opencode-go/")) and not zen_free else "opencode"
         return {"name": text, "executor": via, "model": text, "how": "model id"}
     wanted = tokens(text)
     candidates = []
@@ -5767,7 +5768,7 @@ def cmd_models(verify, conf):
         mark = ""
         if listed is not None and e["executor"] == "opencode" and e["model"].startswith(("opencode/", "opencode-go/")):
             cat = "Go" if e["model"].startswith("opencode-go/") else "Zen"
-            mark = "  [available]" if e["model"] in listed else f"  [NOT LISTED in the {cat} catalog]"
+            mark = "  [available]" if e["model"].split("#")[0] in listed else f"  [NOT LISTED in the {cat} catalog]"
         names = e["aliases"][0] + (f" ({', '.join(e['aliases'][1:])})" if len(e["aliases"]) > 1 else "")
         print(f"{names:32s} {e['executor']:9s} {e['model']:32s} {billing(e['executor'], e['model'])}{mark}")
     for note in notes:
