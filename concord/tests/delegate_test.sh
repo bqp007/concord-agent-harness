@@ -1,6 +1,7 @@
 #!/bin/bash
-# concord.py regression (19 checks, ~20 s, no network, fake qwen executor): report lines for in-scope, out-of-scope,
+# concord.py regression (29 checks, ~15 s, no network, fake qwen executor): report lines for in-scope, out-of-scope,
 # deleted, staged, plan-modified and git-internal changes; red-run refusal (exit 6); --restore; billing guard (exit 5);
+# the run watchdog (memory cap, free-disk floor; the memory check needs ps, which Claude Code's own sandbox denies);
 # OpenCode permission set (Code Mode, subagents, web search denied; version and project config pinned);
 # OUTSIDE CHECKOUT CHANGED for home config, dispatcher files, the main checkout's rule files and linked folders.
 # Run: bash ~/.claude/concord/tests/delegate_test.sh   (exit 0 = all passed). Tests the dispatcher this file belongs to,
@@ -188,6 +189,46 @@ names = ("free-deepseek-flash", "beam")      # a Zen free line on OpenCode, a Go
 up, down = models(True), models(False)
 assert all(up[n].endswith("[available]") for n in names), [up[n] for n in names]
 assert down["free-deepseek-flash"].endswith("[available]") and "[" not in down["beam"], down["beam"]
+EOF
+
+# Watchdog: memory above mem_cap_mib stops the run's whole process tree, including a child in a process group of its
+# own (OpenCode and pi start shell commands that way); free disk below disk_floor_gib refuses the start or stops the run.
+cp -p "$T/concord/executors.conf" "$T/conf.bak"
+cat > "$T/hog.py" <<'EOF'
+import subprocess, sys, time
+if sys.argv[1:] == ["child"]:
+    held = b"x" * (300 << 20)
+    time.sleep(10)
+else:
+    subprocess.run([sys.executable, __file__, "child"], start_new_session=True)
+EOF
+if ps -A -o pid= > /dev/null 2>&1; then
+  newrepo; printf 'mem_cap_mib = 100\n' >> "$T/concord/executors.conf"; s=$SECONDS
+  run "python3 $T/hog.py"; e=$((SECONDS - s)); sleep 1
+  has "status: RESOURCE" && has "RESOURCE LIMIT: memory" && [ $e -lt 8 ] && ! pgrep -f "$T/hog.py child" > /dev/null \
+    && ok "W.1 memory above the cap stops the run and its detached child (${e}s)" \
+    || { bad "W.1 memory watchdog (${e}s)"; head -5 "$T/out.txt"; }
+  cp -p "$T/conf.bak" "$T/concord/executors.conf"
+else
+  echo "  skip W.1 (ps cannot list processes here)"
+fi
+newrepo; printf 'disk_floor_gib = 1000000\n' >> "$T/concord/executors.conf"; run 'touch ran.txt'
+has "status: RESOURCE" && has "RESOURCE LIMIT: free disk" && has "did not start" && [ ! -e "$R/ran.txt" ] \
+  && ok "W.2 free disk below the floor: the run does not start" || { bad "W.2 disk floor at start"; head -5 "$T/out.txt"; }
+cp -p "$T/conf.bak" "$T/concord/executors.conf"
+python3 -I - "$T/concord/concord.py" "$T" <<'EOF' && ok "W.3 free disk falling below the floor stops a running run" || bad "W.3 disk floor mid-run"
+import collections, importlib.util, os, pathlib, shutil, sys, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+calls = []
+def disk_usage(path):                  # 100 GiB free for the start check and the first poll, then 1 GiB
+    calls.append(path)
+    return collections.namedtuple("Usage", "total used free")(1 << 40, 0, (100 if len(calls) < 3 else 1) << 30)
+shutil.disk_usage = disk_usage
+log = pathlib.Path(sys.argv[2]) / "w3.log"
+t = time.time(); rc, _ = d.run_process(["sleep", "8"], dict(os.environ), sys.argv[2], log, 60)
+assert rc == d.RESOURCE_RC and time.time() - t < 5 and "RESOURCE LIMIT: free disk 1.0 GiB" in log.read_text(), \
+    (rc, time.time() - t, log.read_text())
 EOF
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
