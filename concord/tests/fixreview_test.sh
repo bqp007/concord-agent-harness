@@ -121,8 +121,8 @@ newpr 25 "printf 'x = 6\n' > a.py; printf 'def test_a():\n    assert 2\n' > test
 review 25 FAKE_PATH=tests/test_a.py; stn 25
 has "CURRENT HEAD ${O0:0:8}: FINDINGS OPEN" || { bad "setup: O0 not open"; cat "$T/out.txt"; }
 pushn 25 "printf 'def test_a():\n    assert 3\n' > tests/test_a.py"; delta 25 FAKE_CLEAN=1
-[ $RC -eq 0 ] && ! has "tier lowered" && [ "$(mj "$RD/meta.json" 'm["tier"]')" = "high" ] \
-  && ok "--delta: a test-only fix of an open finding stays at the PR's tier" || { bad "open light rc=$RC"; tail -3 "$T/out.txt"; }
+[ $RC -eq 0 ] && has "tier lowered to low" && [ "$(mj "$RD/meta.json" '(m["tier"], m.get("light", False))')" = "('low', True)" ] \
+  && ok "--delta: a fix of an open finding runs at low; the full review's tier carries (2026-10-25)" || { bad "open light rc=$RC"; tail -3 "$T/out.txt"; }
 newpr 37 "printf 'int a;\n' > m.c"; review 37 FAKE_CLEAN=1
 pushn 37 "printf 'int a;  /* why */\n' > m.c; printf 'int b;\n' > n.c"; delta 37 FAKE_CLEAN=1
 [ $RC -eq 0 ] && ! has "tier lowered" && ! has "Traceback" && [ "$(mj "$RD/meta.json" '(m["tier"], m.get("light", False))')" = "('high', False)" ] \

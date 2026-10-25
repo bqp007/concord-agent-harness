@@ -15,7 +15,7 @@ cat > "$T/bin/qwen" <<'EOF'
 echo ran >> "$T/qwen_calls"; printf '%s\n' "$1" > "$T/last_prompt.txt"
 if [ -n "${FAKE_GARBAGE:-}" ]; then echo 'not a review'; exit 0; fi
 if [ -n "${FAKE_CLEAN:-}" ]; then printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'; exit 0; fi
-printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "%s",' "${FAKE_PATH:-a.py}"
+printf 'REVIEW-JSON\n{"findings": [{"severity": "%s", "path": "%s",' "${FAKE_SEV:-HIGH}" "${FAKE_PATH:-a.py}"
 printf ' "line": 1, "problem": "wrong constant", "fix": "use 2", "repro": {"input": "x", "expected": "2", "actual": "1"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n'
 EOF
 cat > "$T/bin/gh" <<'EOF'
@@ -159,7 +159,11 @@ git -C "$R" config --unset color.diff; git -C "$R" config --unset color.ui
 [ $RC -eq 0 ] && [ "$(mj "$D8/meta.json" '(m["since"], m["delta_files"])')" = "('$P1', ['a.py', 'z.py'])" ] \
   && ok "--delta since the open head: since = P1, both files" || { bad "delta from open base rc=$RC"; tail -3 "$T/out.txt"; }
 ! grep -q "$(printf '\033')" "$D8/prompt.txt" && grep -q "^+z = 3$" "$D8/prompt.txt" && ok "delta prompt has no color codes under color.ui=always" || bad "color codes in the delta prompt"
-stn 8; has "CURRENT HEAD ${P3:0:8}: REVIEWED at high (via delta from ${P1:0:8})" && ok "review finds a HIGH, fix lands, clean delta -> REVIEWED via the open head" || { bad "main flow"; cat "$T/out.txt"; }
+stn 8; has "CURRENT HEAD ${P3:0:8}: REVIEWED at high (via delta from ${P1:0:8}; light fix at low)" && ok "review finds a HIGH, fix lands, clean delta -> REVIEWED via the open head" || { bad "main flow"; cat "$T/out.txt"; }
+newpr 19 "printf 'm = 1\n' > m.py"; review 19 FAKE_SEV=MEDIUM FAKE_PATH=m.py
+pushn 19 "printf 'm = 1  # todo\n' > m.py"; M1=$(headn 19)
+FAKE_SEV=MEDIUM FAKE_PATH=m.py $DP --review-pr 19 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1
+stn 19; has "CURRENT HEAD ${M1:0:8}: FINDINGS OPEN" && ok "a cheap delta keeps a MEDIUM the fix leaves open: the gate stays shut" || { bad "delta MEDIUM"; cat "$T/out.txt"; }
 
 echo "== a delta never clears a full review at the same head"
 # --force-review: a clean delta already covers this head; force the full review this case deliberately re-runs
@@ -219,8 +223,18 @@ pushn 11 "rm k.py; printf 'k = 2\n' > a/k.py"; V2=$(headn 11); stn 11
 has "CURRENT HEAD ${V2:0:8}: UNREVIEWED (head moved; last reviewed ${V0:0:8} (findings open on: a/k.py); changed since: a/k.py; delta review possible)" \
   && ok "fix touches a/k.py: delta review possible from the first (open) review" || { bad "first open fixed"; cat "$T/out.txt"; }
 FAKE_CLEAN=1 $DP --review-pr 11 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; stn 11
-[ $RC -eq 0 ] && has "CURRENT HEAD ${V2:0:8}: REVIEWED at high (via delta from ${V0:0:8})" \
+[ $RC -eq 0 ] && has "CURRENT HEAD ${V2:0:8}: REVIEWED at high (via delta from ${V0:0:8}; light fix at low)" \
   && ok "main flow from the first review: open -> fix -> clean delta -> REVIEWED via the open head" || { bad "first-review main flow rc=$RC"; cat "$T/out.txt"; }
+
+echo "== a delta that fixes open findings runs at low on a cheap model; the full review's tier carries (2026-10-25)"
+newpr 71 "printf 'n = 1\n' > n.py"; U0=$(headn 71)
+review 71 FAKE_PATH=n.py; stn 71
+has "CURRENT HEAD ${U0:0:8}: FINDINGS OPEN" || { bad "setup: U0 not open"; cat "$T/out.txt"; }
+pushn 71 "printf 'n = 2\n' > n.py"; U1=$(headn 71)
+FAKE_CLEAN=1 $DP --review-pr 71 --delta --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+grep -qF "tier lowered to low" "$T/out.txt"; LOW=$?; stn 71
+[ $RC -eq 0 ] && [ $LOW -eq 0 ] && has "CURRENT HEAD ${U1:0:8}: REVIEWED at high" \
+  && ok "open -> fix -> cheap delta at low without a go-ahead -> REVIEWED at high" || { bad "cheap open delta rc=$RC"; cat "$T/out.txt"; }
 
 echo "== merged reviewed lineages, quoted file names, rebuilt head with only open reviews"
 newpr 12 "printf 'x = 2\n' > a.py"; X0=$(headn 12); review 12; rec "$(basename "$RD")" "$FL"

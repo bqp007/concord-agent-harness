@@ -1,5 +1,7 @@
 # Plan: <ticket title>
 
+Tier: <S|M|L>
+Size: ~<N> lines
 Done when: <the result and the command or number showing it>
 Ship: <PR to <branch>, or no PR and why>
 
@@ -38,7 +40,7 @@ Out of scope: <tempting edits>
 ```text
 Phase 1  planner  10 min ──> Phase 2  free-deepseek-flash  20 min
 ```
-ETA: 30 min (critical path), lands at <hh:mm> local
+ETA: <N> min (critical path), lands at <hh:mm> local
 
 ## Handoff (if another session runs it)
 - <settled decisions, what the investigation learned>

@@ -2,7 +2,7 @@
 description: Run plan phases in passes on their executor or a named model, check each result, review once, fix confirmed findings
 argument-hint: [model] <phase | 1,3 | 2-4 | all> [feedback | escalate]
 ---
-Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: terse (tables); commands, plan text, code: full. Flags: `python3 ~/.claude/concord/concord.py --help`.
+Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: lean STE (tables); commands, plan text, code: full. Flags: `python3 ~/.claude/concord/concord.py --help`.
 
 ## 1. Resolve
 - Plan: the `PLAN_<ticket>.md` the request names, else the only one at the repo root, as `--plan <file>` on every call; none → offer `/concord:plan-then-delegate`.
@@ -10,7 +10,7 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: terse (tables); commands, plan te
 
 ## 2. Run in passes, not as a chain (CLAUDE.md, `/concord:plan-then-delegate` step 3)
 - An executor phase gets its own fork: `python3 ~/.claude/concord/wt.py fork <TICKET> <N>`, run and checked there with `--repo <fork>`; after PASS, `wt.py join <TICKET> <N>` applies its changes back and removes the fork. Planner phases run in the ticket's worktree meanwhile; reviews, lints and suites take no lock.
-- `planner` phase: write it, re-run its acceptance; `--begin`/`--end` only when a review needs its run id (no PR).
+- `planner` phase: `--begin <phase>` first (it starts the drift clock and passes the gates), write it, re-run its acceptance, `--end <run-id>`.
 - Claude subagent: `--begin <phase> --label <name>`, the subagent (plan path, phase, feedback), `--end <run-id>`.
 - OpenCode: `concord.py <model> <phase> --plan <F> [--extra=<feedback>]`, background, outside the sandbox; red-run exit 6 (acceptance already green): TEST_DEFECT, or mark it `(characterization)`.
 
@@ -31,7 +31,7 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: terse (tables); commands, plan te
 - After the last pass, at once: every suite (one checking the checkout itself, such as `tests/demo_test.sh`, alone) and one review of the whole diff: the PR gate (§6), else each implementing run's review.
 - Tier = the phase's Risk (default medium), raised for matching non-test files by a repo-notes `Risk floor <tier>: <globs>` line. low: `concord.py --review <run>` (flash), approve-only: only BLOCKER and HIGH are kept. medium, high: `--review <run> --packet`, a fresh `concord:reviewer-opus55` Agent per round given your acceptance results, `--review-record` its answer with `--tokens <the Agent's total_tokens>`. Over the 60,000-character cap: `--files <globs>` per group.
 - Unchanged files cleared at that tier or higher print `COVERED` (`--force-review` overrides).
-- Review a fork (`wt.py fork <TICKET> r`); Monitor `<packet>.stream`, fix each streamed finding in the ticket worktree as it lands (small: here, else its executor, `--extra`); one delta review after the final verdict.
+- Review a fork (`wt.py fork <TICKET> r`); Monitor `<packet>.stream`, fix each streamed finding in the ticket worktree as it lands (small: here, else its executor, `--extra`); one delta review after the final verdict. Every delta review runs on flash, else on the `concord:reviewer-delta` agent, never on Opus.
 
 ## 6. PR gate
 - Review the full diff (`base...head`; stacked: against the parent branch) on its current head at the PR's tier, the riskiest content's: high for shipped product code, verdict, score, threshold or licence paths, exporters, untrusted input, security, release config; medium for reference, data and eval pipelines, behaviour-pinning fixtures; low for tooling, scripts, docs.

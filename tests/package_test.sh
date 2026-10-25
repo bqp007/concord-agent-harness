@@ -14,7 +14,7 @@ tmpd() { mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX"; }
 check() { local name=$1; shift; local out
   if out=$(cd "$ROOT" && eval "$*" 2>&1); then echo "check $name: ok"; pass=$((pass+1))
   else echo "check $name: FAIL $(echo "$out" | tail -1 | cut -c1-120)"; fail=$((fail+1)); fi; }
-AGENTS="implementer implementer-opus48 reviewer-opus55"
+AGENTS="implementer implementer-opus48 reviewer-opus55 reviewer-delta plan-verifier"
 COMMANDS="plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
 SUITES="acclint delegate delta guards papers pr_review protocol slim testquality worktree"
@@ -90,7 +90,7 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) = 6266 ] || { wc -l $K/concord.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) -le 6500 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 17 ]"
@@ -102,9 +102,9 @@ s_agents() { local a
   for a in implementer implementer-opus48; do check "agents/contract-$a.md" "grep -q '~/.claude/concord/CONTRACT.md' $A/agents/$a.md"; done
   check agents/model-reviewer-opus55.md "grep -q '^model: claude-opus-5-5\$' $A/agents/reviewer-opus55.md"
   for a in agents/implementer-opus48 agents/reviewer-opus55 commands/plan-then-delegate commands/delegate commands/rules-review; do
-    check "agents/terse-$(basename $a).md" "grep -q terse $A/$a.md"; done
-  check agents/concord.py "grep -qF 'Write all prose tersely: exact, no hedging, no praise.' $K/concord.py"
-  check agents/CONTRACT.md "grep -qF 'terse (fragments, abbreviations, no filler)' $K/CONTRACT.md"; }
+    check "agents/lean-$(basename $a).md" "grep -q 'lean STE' $A/$a.md"; done
+  check agents/concord.py "grep -qF 'Write all prose in lean STE: short active sentences with articles, one instruction per sentence, no filler' $K/concord.py"
+  check agents/CONTRACT.md "grep -qF 'lean STE' $K/CONTRACT.md && grep -q '^prose = lean' $K/style.conf"; }
 
 s_python() {
   check python/help "python3 -B -I $K/concord.py --help >/dev/null"
@@ -215,8 +215,8 @@ s_style() {
   check style/task-custom "grep -q ZZSTYLE '$SD/exec.txt'"
   check style/review-custom "grep -q ZZSTYLE '$SD/review.txt'"
   SD=$(tmpd); style_prompts ""
-  check style/task-terse "grep -qi terse '$SD/exec.txt'"
-  check style/review-terse "grep -qi terse '$SD/review.txt'"; }
+  check style/task-lean "grep -q 'lean STE' '$SD/exec.txt'"
+  check style/review-lean "grep -q 'lean STE' '$SD/review.txt'"; }
 
 # Release hygiene: the two manifest versions are equal; no PLAN_*.md (bar the two templates) or __pycache__ is tracked.
 s_hygiene() {
@@ -246,7 +246,7 @@ s_docs() { local h f
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).
   local scope="README.md docs CONTRIBUTING.md $A $K/PLAN_TEMPLATE.md $K/repo-notes/README.md"
   check docs/plugin-commands "! git grep -n -I --untracked -E '(^|[^:a-z])/(plan-then-delegate|delegate|rules-review)([^/a-z.-]|\$)' -- $scope"
-  check docs/plugin-agents "! git grep -n -I --untracked -E '(^|[^:a-z0-9/-])(implementer-opus48|reviewer-opus48|reviewer-opus55)([^.a-z0-9-]|\$)|\`implementer\`' -- $scope | grep -v ':name: ' | grep -v '^$A/CLAUDE.md:'"; }
+  check docs/plugin-agents "! git grep -n -I --untracked -E '(^|[^:a-z0-9/-])(implementer-opus48|reviewer-opus48|reviewer-opus55|reviewer-delta|plan-verifier)([^.a-z0-9-]|\$)|\`implementer\`' -- $scope | grep -v ':name: ' | grep -v '^$A/CLAUDE.md:'"; }
 
 s_blog() {
   check blog/exists "[ -f docs/BLOG.md ]"

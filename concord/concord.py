@@ -59,6 +59,7 @@ import argparse
 import ast
 import contextlib
 import difflib
+import fcntl
 import fnmatch
 import glob
 import hashlib
@@ -318,7 +319,7 @@ a reproduction; MEDIUM = breaks only on an unusual but valid input; NOTE = optio
 a reproduction. Findings on test files are only: a test that cannot fail (give the wrong implementation it accepts)
 or a nondeterministic test.
 
-Write all prose tersely: exact, no hedging, no praise.
+Write all prose in lean STE: short active sentences with articles, one instruction per sentence, no filler, hedging or praise. Clarity comes first; brevity never removes context.
 
 Answer with exactly one block and nothing after it:
 
@@ -336,22 +337,23 @@ END-REVIEW-JSON
 """
 
 # The default prose line (pinned by tests); `prose = <sentence>` in style.conf replaces it.
-PROSE_TERSE = "Write all prose tersely: exact, no hedging, no praise."
+PROSE_LEAN = ("Write all prose in lean STE: short active sentences with articles, one instruction per sentence, no "
+              "filler, hedging or praise. Clarity comes first; brevity never removes context.")
 
 
 def prose_line():
-    """The prose instruction: `prose =` from $CLAUDE_HOME/concord/style.conf, else style.conf here; `terse` or unset = the default."""
+    """The prose instruction: `prose =` from $CLAUDE_HOME/concord/style.conf, else style.conf here; `terse`, `lean` or unset = the lean STE default."""
     ch = os.environ.get("CLAUDE_HOME")
     for path in ([Path(ch) / "concord" / "style.conf"] if ch else []) + [STYLE]:
         for left, right in read_kv_lines(path):
             if left == "prose":
-                return PROSE_TERSE if right.strip() in ("", "terse") else right.strip()
-    return PROSE_TERSE
+                return PROSE_LEAN if right.strip() in ("", "terse", "lean") else right.strip()
+    return PROSE_LEAN
 
 
 def styled_review_task():
     """REVIEW_TASK with the prose line swapped for the configured one."""
-    return REVIEW_TASK.replace(PROSE_TERSE, prose_line())
+    return REVIEW_TASK.replace(PROSE_LEAN, prose_line())
 
 
 # Static checks (zero model tokens): findings on the phase's files before and after the run; only NEW ones reported.
@@ -2388,6 +2390,196 @@ def cmd_lesson(text, tags):
     return 0
 
 
+# Drift brakes: time against the plan's ETA:, size against Size:, changed files against the
+# union of its Files: lists. Warn at 1.2x, block at 1.5x or at a changed file outside Files.
+DRIFT_WARN, DRIFT_BLOCK = 1.2, 1.5
+DRIFT_IDLE = 600                                       # a longer gap between checks counts only where a run covered it
+VERIFY_SKIP = ("## open questions", "## handoff")      # sections written after the plan-verifier approved
+
+
+def plan_number(text, label):
+    m = re.search(rf"^{label}:\s*~?(\d[\d,_]*)", text, re.M)          # `Size: ~1,200 lines` is 1200
+    return int(re.sub(r"[,_]", "", m.group(1))) if m else None
+
+
+def verified_hash(text):
+    """Hash of the plan text without the sections that change after the plan-verifier's APPROVE."""
+    keep, skip = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            skip = line.strip().lower().startswith(VERIFY_SKIP)
+        if not skip:
+            keep.append(line)
+    return hashlib.sha256("\n".join(keep).encode()).hexdigest()[:16]
+
+
+def load_drift(root):
+    try:
+        data = json.loads((root / "drift.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_drift(root, key, value):
+    """Set one key of drift.json (a checkout's entry, or new plan verdicts under "verdicts") under a lock, re-read
+    first, so a concurrent writer keeps its key. One entry per existing checkout, the newest 50 verdicts."""
+    with open(root / "drift.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load_drift(root)
+        data[key] = {**(data.get("verdicts") or {}), **value} if key == "verdicts" else value
+        data = {k: v for k, v in data.items() if k == "verdicts" or Path(k).is_dir()}
+        data["verdicts"] = dict(sorted((data.get("verdicts") or {}).items(), key=lambda kv: kv[1])[-50:])
+        tmp = root / f"drift.json.{os.getpid()}"
+        tmp.write_text(json.dumps(data))
+        tmp.replace(root / "drift.json")
+
+
+def drift_measure(repo, base, plan_rel):
+    """{path: inserted lines} since `base`: tracked changes and untracked files (not ignored ones), the plan excluded."""
+    out = {}
+    for rec in run_git(["diff", "--numstat", "-z", "--no-renames", base], repo).stdout.split("\0"):   # -z: raw paths
+        cols = rec.split("\t")
+        if len(cols) == 3:
+            out[cols[2]] = int(cols[0]) if cols[0].isdigit() else 0
+    for name in filter(None, run_git(["ls-files", "-z", "--others", "--exclude-standard"], repo).stdout.split("\0")):
+        path = Path(repo) / name
+        with contextlib.suppress(OSError):
+            out[name] = path.read_bytes().count(b"\n") if path.stat().st_size < 1_000_000 else 0
+    out.pop(plan_rel, None)
+    return out
+
+
+def drift_base(repo, base):
+    """The newest commit since `base` that another local or remote branch has (upstream work pulled in), else `base`."""
+    cur = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    own = run_git(["rev-list", "HEAD", f"^{base}", "--not", f"--exclude={cur}", "--branches", f"--exclude=*/{cur}",
+                   "--remotes"], repo).stdout.split()
+    new = run_git(["rev-list", "--topo-order", "HEAD", f"^{base}"], repo).stdout.split()
+    return next((c for c in new if c not in own), base)
+
+
+def run_cover(root, plan_rel, t0, t1):
+    """Seconds of gap t0..t1 covered by the longest executor run of this plan; an open run (no report) counts up to 30m."""
+    best = 0.0
+    for path in root.glob("*/state.json"):
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            st, meta, report = json.loads(path.read_text()), path.with_name("meta.json"), path.with_name("report.md")
+            secs = json.loads(meta.read_text())["seconds"] if meta.exists() else 0 if report.exists() else parse_wall("30m")
+            if st.get("plan") == plan_rel and st.get("mode") != "session":   # --begin: the session's own work
+                best = max(best, min(st["started"] + secs, t1) - max(st["started"], t0))
+    return best
+
+
+def drift_check(repo, plan_rel, text, approval="", register=False):
+    """(level, line, previous level) of this checkout's plan, and the clock ticks. Silent (level None) for a plan
+    with no Tier: line, or with no record here unless `register`: a gated run is about to start, and its HEAD and
+    uncommitted files become the base. With an approval at BLOCK, the block lifts until a measure grows 50% more
+    or another file outside Files changes."""
+    if not re.search(r"^Tier:", text, re.M):
+        return None, "", None
+    root = runs_root(repo)
+    data = load_drift(root)
+    if (data.get(str(repo)) or {}).get("plan") != plan_rel:     # a fork: the ticket checkout's entry gates it
+        repo = Path(next((k for k, e in data.items() if e.get("plan") == plan_rel), repo))
+    entry, now = data.get(str(repo)), time.time()
+    if not entry or entry.get("plan") != plan_rel:
+        if not register:
+            return None, "", None
+        base = git(repo, "rev-parse", "HEAD").strip()
+        entry = data[str(repo)] = {"plan": plan_rel, "base": base, "elapsed": 0.0, "last": now,
+                                   "pre": drift_measure(repo, base, plan_rel)}
+    gap = now - entry["last"]
+    entry["elapsed"] += gap if 0 < gap < DRIFT_IDLE else run_cover(root, plan_rel, entry["last"], now)
+    entry["last"] = now
+    pre = entry.get("pre") or {}
+    measure = drift_measure(repo, drift_base(repo, entry["base"]), plan_rel)
+    changed = {n: max(v - pre.get(n, 0), 0) for n, v in measure.items() if n not in pre or v != pre[n]}
+    files = [f for h in PHASE_HEAD.finditer(text) if phase_key(h.group(2)) is not None   # every heading level
+             for f in parse_files(extract_phase(text, h.group(2)))]
+    outside = sorted(n for n in changed if not in_scope(n, files))
+    have = {"time": entry["elapsed"] / 60, "size": sum(changed.values())}
+    want = {"time": plan_number(text, "ETA"), "size": plan_number(text, "Size")}
+
+    def level_of(ok):
+        if set(outside) - set(ok.get("files", [])) or any(
+                want[k] and have[k] >= DRIFT_BLOCK * want[k] and (k not in ok or have[k] >= 1.5 * ok[k]) for k in have):
+            return "BLOCK"
+        return "WARN" if any(want[k] and have[k] >= DRIFT_WARN * want[k] for k in have) else "OK"
+
+    level = level_of(entry.get("ok") or {})
+    if level == "BLOCK" and approval:
+        entry["ok"] = dict(have, files=outside)
+        level = level_of(entry["ok"])
+    prev, entry["level"] = entry.get("level"), level
+    save_drift(root, str(repo), entry)
+    parts = [f"{k} {have[k]:.0f}/{want[k]} {unit} ({have[k] / want[k]:.2f}x)"
+             for k, unit in (("time", "min"), ("size", "lines")) if want[k]]
+    parts.append(f"changed outside Files: {', '.join(outside)}" if outside else "every changed file is in Files")
+    line = f"DRIFT {level} {plan_rel}: {'; '.join(parts)}"
+    if level == "BLOCK":
+        line += ". Stop, report to the owner and ask; continue only with --user-approved \"<the owner's words>\""
+    return level, line, prev
+
+
+def plan_gates(repo, plan_rel, text, approval):
+    """(exit code, refusal) before --begin or an executor run: 11 when this plan text has no plan-verifier APPROVE,
+    10 at a DRIFT BLOCK; None otherwise. A plan with no Tier: line (an older template) is not gated."""
+    if not re.search(r"^Tier:", text, re.M):
+        return None
+    if not approval and verified_hash(text) not in (load_drift(runs_root(repo)).get("verdicts") or {}):
+        return 11, ("REFUSED: this plan text has no plan-verifier APPROVE. Run the plan-verifier agent and record its "
+                    "answer with --plan-verdict FILE, or pass --user-approved \"<the owner's words>\"")
+    level, line, _ = drift_check(repo, plan_rel, text, approval, register=True)
+    return (10, f"REFUSED: {line}") if level == "BLOCK" else None
+
+
+def cmd_drift(args):
+    repo = repo_root(args.repo or os.getcwd())
+    _plan, plan_rel, text = read_plan(repo, args.plan)
+    level, line, _ = drift_check(repo, plan_rel, text)
+    print(line or "DRIFT: silent (the plan has no Tier: line, or no gated run in this checkout)")
+    return 10 if level == "BLOCK" else 0
+
+
+def cmd_drift_hook():
+    """PostToolUse hook: tick the drift clock of this checkout's plan; print only when the drift level changes.
+    Never fails the tool call."""
+    try:
+        cwd = str(json.load(sys.stdin).get("cwd") or os.getcwd())
+        res = run_git(["rev-parse", "--show-toplevel"], cwd, timeout=5)
+        if res.returncode != 0:
+            return 0
+        repo = Path(res.stdout.strip())
+        entry = load_drift(runs_root(repo)).get(str(repo))
+        if entry:
+            level, line, prev = drift_check(repo, entry["plan"], (repo / entry["plan"]).read_text(errors="replace"))
+            if level and level != prev:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": line}}))
+    except (Exception, SystemExit):
+        pass
+    return 0
+
+
+def cmd_plan_verdict(args):
+    """Record the plan-verifier's answer for this plan text; only an APPROVE opens --begin and executor runs."""
+    repo = repo_root(args.repo or os.getcwd())
+    _plan, plan_rel, text = read_plan(repo, args.plan)
+    try:
+        answer = Path(args.plan_verdict).read_text(errors="replace")
+    except OSError as exc:
+        die(f"cannot read {args.plan_verdict}: {exc}")
+    m = re.search(r"^\W*VERDICT:\W*(APPROVE|REVISE)\b", answer, re.M)
+    if not m:
+        die(f"no `VERDICT: APPROVE` or `VERDICT: REVISE` line in {args.plan_verdict}")
+    if m.group(1) == "REVISE":
+        die(f"plan verdict REVISE for {plan_rel}: nothing recorded; revise the plan and ask the verifier again", code=1)
+    root = runs_root(repo)
+    save_drift(root, "verdicts", {verified_hash(text): time.time()})
+    print(f"plan verdict APPROVE recorded for {plan_rel} ({verified_hash(text)})")
+    return 0
+
+
 def cmd_lessons_hook():
     """UserPromptSubmit hook: print the [plan] lessons this session has not been shown yet. Never fails the prompt."""
     try:
@@ -2532,7 +2724,11 @@ def cmd_run(args, target, phase, conf):
     if cap and not approval:
         print(cap)
         return 8
-    cap_note = f"user approved a run beyond the attempt cap: {approval}" if cap else None
+    approval_note = f"user approved{' a run beyond the attempt cap' if cap else ''}: {approval}" if approval else None
+    gate = None if args.dry_run else plan_gates(repo, plan_rel, plan.read_text(errors="replace"), approval)
+    if gate:
+        print(gate[1])
+        return gate[0]
     run_dir = new_run_dir(root, name or executor, phase, prefix="dry-" if args.dry_run else "")
     allow_edit = edit_patterns(repo, files) if executor == "opencode" and files else None
     cmd, env, combined = build_command(executor, binary, task, contract, model, args.mode,
@@ -2541,8 +2737,8 @@ def cmd_run(args, target, phase, conf):
     shown = redact_cmd(cmd, contract, combined, task)
     (run_dir / "cmd.json").write_text(json.dumps(shown, indent=1))
     notes = [plan_note] if plan_note else []
-    if cap_note:
-        notes.append(cap_note)
+    if approval_note:
+        notes.append(approval_note)
     if args.mode == "edit" and executor not in MODE_ENFORCED:
         notes.append(f"edit mode is not enforceable for {executor}; contract only")
     if allow_edit:
@@ -3810,7 +4006,8 @@ def cmd_review_record(args):
         files = review_files(repo, meta)
         if files:                             # no surviving files = no diff to anchor to: keep findings as written
             diff_text = review_diff(repo, run_dir, meta, files, base=run_diff_base(repo, meta))
-    approve_only = meta.get("kind") != "pr-review" and meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"]
+    approve_only = (meta.get("tier") == "low" and not meta.get("since") if meta.get("kind") == "pr-review"
+                    else meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"])
     result = process_review(text, meta, root, repo, args.reviewer, run_dir.name, diff_text, approve_only)
     if not result["ok"]:
         print(f"delegate: review not recorded: {'; '.join(result['errors'])}", file=sys.stderr)
@@ -4042,13 +4239,23 @@ def parse_pr(value):
     die(f"cannot parse PR {value!r}: use N, owner/repo#N or a github pull URL")
 
 
-def remote_slug(repo):
-    """owner/repo from the origin remote, or "" when it is not a github URL."""
-    res = run_git(["remote", "get-url", "origin"], repo, timeout=PR_TIMEOUT)
+def remote_slug(repo, name="origin"):
+    """owner/repo from a remote's configured URL (before insteadOf), or "" when it is not a github URL."""
+    res = run_git(["config", "--get", f"remote.{name}.url"], repo, timeout=PR_TIMEOUT)
     if res.returncode != 0:
         return ""
     m = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$", res.stdout.strip())
     return m.group(1) if m else ""
+
+
+def pr_remote(repo, slug):
+    """The remote to fetch PR `slug` from: origin or another remote whose URL names slug; origin when there is no
+    slug or origin is no github URL (a mirror); None when only other github repositories are remotes."""
+    names = run_git(["remote"], repo, timeout=PR_TIMEOUT).stdout.split()
+    for name in ["origin"] + [x for x in names if x != "origin"]:
+        if slug and remote_slug(repo, name).lower() == slug.lower():
+            return name
+    return "origin" if not slug or not remote_slug(repo) else None
 
 
 def gh_pr_view(n, slug, fields, repo):
@@ -4072,20 +4279,20 @@ def gh_pr_view(n, slug, fields, repo):
         die(f"gh pr view {n} returned non-JSON: {res.stdout.strip()[:200]}", code=3)
 
 
-def fetch_pr_refs(repo, n, base_branch, ref, base_ref):
+def fetch_pr_refs(repo, n, base_branch, ref, base_ref, remote="origin"):
     """Fetch the PR head into `ref` and the base branch into `base_ref` (both forced, into temp refs, so the
     review works in single-branch / custom-refspec clones and never touches origin/*); exit 3 when either is gone."""
     for src, dst, why in ((f"pull/{n}/head", ref, "PR head (fork or closed PR?)"),
                           (f"refs/heads/{base_branch}", base_ref, "base branch (deleted?)")):
-        res = run_git(["fetch", "--quiet", "origin", f"+{src}:{dst}"], repo, timeout=PR_TIMEOUT)
+        res = run_git(["fetch", "--quiet", remote, f"+{src}:{dst}"], repo, timeout=PR_TIMEOUT)
         if res.returncode != 0:
-            die(f"git fetch origin {src} failed for PR {n}: {why}: {res.stderr.strip()}", code=3)
+            die(f"git fetch {remote} {src} failed for PR {n}: {why}: {res.stderr.strip()}", code=3)
 
 
-def fetch_quiet(repo, src, dst):
+def fetch_quiet(repo, src, dst, remote="origin"):
     """Fetch one ref into `dst`; False on any failure, including a timeout, and never fatal (--pr-status)."""
     try:
-        res = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "origin", f"+{src}:{dst}"],
+        res = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", remote, f"+{src}:{dst}"],
                              capture_output=True, text=True, timeout=PR_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -4311,21 +4518,21 @@ def cmd_review_pr(args, target, conf):
     if args.delta and (args.files or args.exclude):
         die("--delta cannot be combined with --files/--exclude (a delta covers every file changed since the "
             "reviewed head)", code=2)
-    remote = remote_slug(repo)
-    if slug and remote and slug.lower() != remote.lower():
-        die(f"PR {slug}#{n} belongs to {slug}, but this repository's origin is {remote} "
-            f"(run from a clone of {slug}, or drop the owner/repo part)", code=2)
+    remote = pr_remote(repo, slug)
+    if remote is None:
+        die(f"PR {slug}#{n}: no remote of this repository names {slug}, and origin is {remote_slug(repo)} "
+            f"(add a remote for {slug}, or run from a clone of it)", code=2)
     info = gh_pr_view(n, slug, "baseRefName,headRefOid,title,body", repo)
     base_branch = (info.get("baseRefName") or "").strip()
     gh_head = (info.get("headRefOid") or "").strip()
     if not base_branch or not gh_head:
         die(f"gh pr view {n} returned no baseRefName/headRefOid", code=3)
-    slug = slug or remote
+    slug = slug or remote_slug(repo)
     tier = args.tier
     ref = f"refs/review/pr{n}-{os.getpid()}"
     base = f"refs/review/base{n}-{os.getpid()}"
     try:
-        fetch_pr_refs(repo, n, base_branch, ref, base)
+        fetch_pr_refs(repo, n, base_branch, ref, base, remote)
         head = git(repo, "rev-parse", ref, timeout=PR_TIMEOUT).strip()   # the sha actually fetched, not gh's snapshot
         all_files = diff_names(repo, [f"{base}...{ref}"])
         floor_tier, floor_path, floor_pat = risk_floor(repo, diff_names(repo, [f"{base}...{ref}"], no_renames=True))
@@ -4382,6 +4589,10 @@ def cmd_review_pr(args, target, conf):
                            and not any(_touched(repo, h0, p, {f}, tree_h0) for p in open_files)]
                 if unnamed:
                     print(f"note: no open finding names {', '.join(unnamed)}; batch NOTE fixes in one final commit")
+                if TIER_RANK[tier] > TIER_RANK["low"]:   # owner, 2026-10-25: a delta needs no strong model
+                    print("note: tier lowered to low: a delta that fixes open findings runs on a cheap model, and "
+                          "the full review's tier carries forward")
+                tier, is_light = "low", True
             elif changed and all(f in light for f in changed):   # a reviewed head + a cosmetics-only fix -> low
                 if TIER_RANK[tier] > TIER_RANK["low"]:
                     print(f"note: tier lowered to low: the fix changes only tests, docs or comments "
@@ -4418,9 +4629,10 @@ def cmd_review_pr(args, target, conf):
         ledger = ledger_text(load_ledger(root, f"pr{n}"))
         delta_line = f"Delta review since {str(since)[:8]}: files {', '.join(delta_files)}" if since else ""
         approval = " ".join((args.user_approved or "").split())    # the user's go-ahead: counts at its tier
+        lead = (APPROVE_ONLY + "\n\n") if tier == "low" and not since else ""   # a delta keeps MEDIUM
         if args.packet:
-            task = pr_task(n, slug, head, base_branch, tier, info, files, excluded, names, rubric, diff,
-                           ledger=ledger, delta=delta_line, notes=notes)
+            task = lead + pr_task(n, slug, head, base_branch, tier, info, files, excluded, names, rubric, diff,
+                                  ledger=ledger, delta=delta_line, notes=notes)
             rc = write_pr_packet(root, n, slug, base_branch, head, tier, files, excluded, names, task,
                                  tag=("delta-packet" if since else "packet"), since=since,
                                  delta_files=delta_files, light=is_light, approval=approval, pr_files=all_files)
@@ -4440,8 +4652,8 @@ def cmd_review_pr(args, target, conf):
             entry_extra = {"head": head, "tier": tier}
             if since:
                 entry_extra["since"] = since
-            task = pr_task(n, slug, head, base_branch, tier, info, files, excluded, names, rubric, diff,
-                           ledger=ledger, delta=delta_line, notes=notes)
+            task = lead + pr_task(n, slug, head, base_branch, tier, info, files, excluded, names, rubric, diff,
+                                  ledger=ledger, delta=delta_line, notes=notes)
             rc = run_model_review(
                 args, repo, conf, res, executor, model, binary, task, run_dir, meta, meta_path, names,
                 dry_line=lambda d: (f"DRY RUN PR REVIEW {run_dir.name}: PR {n} ({slug or 'unknown'}) head "
@@ -4452,7 +4664,7 @@ def cmd_review_pr(args, target, conf):
                                        f"(exit {d['rc']}, {d['secs']}s, tier {tier}, checklists {', '.join(names)}, "
                                        f"verdict {d['verdict']}, blockers {d['blockers']}"
                                        f"{', retried' if d.get('retried') else ''})"),
-                entry_extra=entry_extra,
+                entry_extra=entry_extra, approve_only=(tier == "low" and not since),
                 cover=(blob_shas_at(repo, head, files), min(TIER_RANK[tier], reviewer_rank(res["name"]))))
         if gh_head != head:
             print(f"PR head moved during review: gh reported {gh_head[:8]}, fetched {head[:8]}")
@@ -4755,6 +4967,8 @@ def _head_state(root, n, head, depth, seen, repo, heads, trees, intermediate, ca
                                      _tree_paths(repo, h0, trees) if repo is not None else None)
                             for f in ancestor["open_files"]):
                 basis, via = True, h0
+                if meta.get("light") and ancestor["tier"]:   # a fix of open findings ran at low; the tier carries
+                    carried, light = ancestor["tier"], True
         if basis and intermediate:                     # D10: an open head skipped in between reopens the gate
             if _intermediate_open(root, repo, n, h0, head, heads, trees, cache, active):
                 basis, via, light, carried = False, None, False, None
@@ -5091,7 +5305,7 @@ def cmd_pr_status(args):
         return 0
     ref = f"refs/review/status{n}-{os.getpid()}"
     try:
-        fetched = fetch_quiet(repo, f"refs/pull/{n}/head", ref)   # never fatal: a failed fetch is not fetched
+        fetched = fetch_quiet(repo, f"refs/pull/{n}/head", ref, pr_remote(repo, slug) or "origin")   # never fatal: a failed fetch is not fetched
         if fetched:
             res = run_git(["rev-parse", ref], repo, timeout=PR_TIMEOUT)
             if res.returncode != 0 or not res.stdout.strip():
@@ -5199,6 +5413,9 @@ def cmd_lint(args, phase, target, conf):
     head = PHASE_HEAD.split(text, 1)[0]                                    # title, Done when, Ship
     if re.search(r"\b((port|mirror)(s|ed|ing)?|parity)\b", head, re.I) and "mismatch" not in text.lower():
         print("ACCEPTANCE LINT: port with no differential oracle (a first phase printing mismatches: 0 vs the reference)")
+    for label in ("Size", "ETA"):
+        if plan_number(text, label) is None:
+            print(f"PLAN LINT: no `{label}:` line, so --drift cannot measure it")
     target = target or settings.get("lint") or settings.get("default") or ""
     if not target:
         die("no lint model: name one, or set `lint =` / `default =` in models.conf")
@@ -5279,13 +5496,17 @@ def cmd_begin(args, phase, conf):
     if cap and not approval:
         print(cap)
         return 8
-    cap_note = f"user approved a run beyond the attempt cap: {approval}" if cap else None
+    approval_note = f"user approved{' a run beyond the attempt cap' if cap else ''}: {approval}" if approval else None
+    gate = plan_gates(repo, plan_rel, plan.read_text(errors="replace"), approval)
+    if gate:
+        print(gate[1])
+        return gate[0]
     run_dir = new_run_dir(root, label, phase)
     acquire_lock(root, run_dir.name, manual=True)
     try:
         notes = [plan_note] if plan_note else []
-        if cap_note:
-            notes.append(cap_note)
+        if approval_note:
+            notes.append(approval_note)
         st = start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, "session", track_ignored,
                          notes, executor=executor, model=label, name=label, conf=conf,
                          do_baseline=not args.no_baseline)
@@ -6151,6 +6372,12 @@ def main():
     parser.add_argument("--begin", metavar="PHASE", type=phase_arg, help="open a session run (Claude implementer or planner)")
     parser.add_argument("--label", help="with --begin: executor label for the report (default: plan's Executor)")
     parser.add_argument("--end", metavar="RUN_ID", help="close a session run and write its report")
+    parser.add_argument("--drift", action="store_true", help="print the plan's drift: time against ETA:, size "
+                        "against Size:, changed files against Files: (warn at 1.2x, block at 1.5x: exit 10)")
+    parser.add_argument("--drift-hook", action="store_true", help="PostToolUse hook: tick the drift clock; print "
+                        "only when the drift level changes")
+    parser.add_argument("--plan-verdict", metavar="FILE", help="record the plan-verifier's answer (its VERDICT: "
+                        "line) for this plan text; --begin and executor runs need an APPROVE (exit 11)")
     parser.add_argument("--abort", metavar="RUN_ID", help="release a session run's lock without a report")
     parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the phase's outcome")
     parser.add_argument("--note", help="with --verdict: short reason")
@@ -6188,7 +6415,8 @@ def main():
                         help="run the executor even when acceptance already passes before the change; with "
                              "--verdict PASS, record the PASS despite changed acceptance files")
     parser.add_argument("--user-approved", metavar="QUOTE",
-                        help="the user's words allowing a run beyond the attempt cap (exit 8), or with --review-pr "
+                        help="the user's words allowing a run beyond the attempt cap (exit 8), past a DRIFT BLOCK "
+                             "(exit 10) or without a plan-verifier APPROVE (exit 11), or with --review-pr "
                              "the go-ahead that lets that review count at its --tier; recorded in the run")
     parser.add_argument("--resolve", metavar="MODEL", help="print how a model name resolves, then exit")
     parser.add_argument("--models", action="store_true", help="print the model registry")
@@ -6214,12 +6442,18 @@ def main():
     args.plan_given = args.plan is not None
     if args.lessons_hook:
         return cmd_lessons_hook()
+    if args.drift_hook:
+        return cmd_drift_hook()
     if args.lesson:
         return cmd_lesson(args.lesson, args.tag)
     if args.plan is None:
         args.plan = "PLAN.md"
     if args.repo and not os.path.isdir(args.repo):
         die(f"--repo takes a directory (the checkout path), not a name: {args.repo}")
+    if args.drift:
+        return cmd_drift(args)
+    if args.plan_verdict:
+        return cmd_plan_verdict(args)
     conf = load_conf()
     if args.resolve:
         return cmd_resolve(args.resolve)

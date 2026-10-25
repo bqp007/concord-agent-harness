@@ -27,6 +27,14 @@
 6. After the last pass, one full revision: every suite and one independent review of the whole diff at its risk tier, at the pull-request gate when the ticket ships by PR. Confirmed BLOCKER, HIGH and MEDIUM findings are fixed and re-reviewed once as a delta; after two rounds you decide.
 7. You commit and merge.
 
+## Size, drift and verification
+
+A plan names its tier: S is 60 lines or fewer in 3 files or fewer and needs no plan; M is a short plan; L is the full plan. The `Size:` and `ETA:` lines of a plan set the budget of the run.
+
+The drift brake compares the run with that budget. `concord.py --drift` warns at 1.2× and blocks at 1.5× of the plan's `ETA:` or `Size:`, and it blocks when a changed file lies outside every `Files:` list. A block makes `--begin` and the executor runs exit 10. Stop, report and ask; `--user-approved` lifts the block until the measure grows 50% more. The `--drift-hook` PostToolUse hook prints a line only when the state changes.
+
+Before you see a plan, a verifier agent (`concord:plan-verifier`) prunes it, for at most 3 rounds. The planner records the answer with `--plan-verdict`; `--begin` and executor runs exit 11 for a plan with no approval. Delta reviews of a fix run on flash, else on the `concord:reviewer-delta` agent (Haiku), never on Opus.
+
 ## Evidence, not claims
 
 Before each executor run `concord.py` snapshots the tree, backs up in-scope files and hashes the plan and acceptance; it refuses to start when acceptance already passes (the red run) and reports from snapshots, never from the executor's account. Only EXECUTOR failures count as attempts (three, then you decide): 7 of 35 failures in the first ten days. Causes, refusals and exit codes: [README](../README.md#run-a-ticket).
