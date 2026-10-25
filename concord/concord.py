@@ -169,11 +169,11 @@ TRANSPORT_WAIT_S = int(os.environ.get("CONCORD_TRANSPORT_WAIT_S", "15"))
 
 
 def transport_error(text):
-    """True when an `Error:` line of the harness output reports a dropped connection. Only error lines count, so a
-    review that quotes these words from the code under review is not taken for a transport failure."""
+    """True when an error line of the harness output (OpenCode's `Error:`, pi's `503: ...`) reports a dropped connection.
+    Only error lines count, so a review that quotes these words from the code under review is no transport failure."""
     for line in (text or "").splitlines():
         line = line.strip()
-        if line.lower().startswith("error:") and any(n.lower() in line.lower() for n in TRANSPORT_ERRORS):
+        if re.match(r"(?i)(error:|\d{3}: )", line) and any(n.lower() in line.lower() for n in TRANSPORT_ERRORS):
             return True
     return False
 
@@ -185,10 +185,10 @@ def provider_refusals(text):
 
 
 def review_refusals(text):
-    """provider_refusals over the harness `Error:` lines only, so a review answer that quotes a refusal phrase (from
-    the code under review) is a parse failure, not a refusal (D1)."""
+    """provider_refusals over the harness error lines only (OpenCode's `Error:`, pi's bare `429: {...}`), so a review
+    answer that quotes a refusal phrase (from the code under review) is a parse failure, not a refusal (D1)."""
     return provider_refusals("\n".join(l for l in (text or "").splitlines()
-                                        if l.strip().lower().startswith("error:")))
+                                        if re.match(r"(?i)(error:|\d{3}: )", l.strip())))
 
 
 def executor_blocked(log_text):
@@ -423,7 +423,7 @@ def billing(executor, model):
         return "Claude subscription (implementer subagent)"
     if executor == "planner":
         return "Claude subscription (planning session)"
-    if executor in ("opencode", "pi"):
+    if executor == "opencode" or executor == "pi" and model.startswith(("opencode/", "opencode-go/")):
         if model.startswith("opencode-go/"):
             return "OpenCode Go subscription allowance"
         if model.startswith("opencode/") and model.split("#", 1)[0].endswith("-free"):
@@ -1392,7 +1392,7 @@ def build_command(executor, binary, task, contract, model, mode, wall_text, run_
         env.update(PI_OFFLINE="1", PI_CODING_AGENT_DIR=str(agent))
         keyfile = Path.home() / ".config" / "concord-keys" / "opencode.key"      # the key goes only into the env
         if keyfile.is_file():
-            env["OPENCODE_API_KEY"] = keyfile.read_text().strip()
+            env["OPENCODE_API_KEY"] = "".join(keyfile.read_text().split())    # a wrapped paste holds whitespace
         # --no-approve: never execute repo-local .pi/ extension code; --no-context-files: skip AGENTS.md/CLAUDE.md
         cmd = [binary, "-p", "--session-dir", str(run_dir / "pi"), "--no-approve", "--no-context-files",
                "--append-system-prompt", contract, "--model", model.replace("#", ":")]

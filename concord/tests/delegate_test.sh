@@ -123,7 +123,7 @@ line "changed in scope:" "a.py" && ! has "OUTSIDE CHECKOUT CHANGED" && ok "no st
   || { bad "old-state run ($BID): $(grep -o '(new)' "$T/out.txt" | wc -l | tr -d ' ') '(new)' entries"; grep '^OUTSIDE' "$T/out.txt" | cut -c1-160; }
 
 echo "== pi adapter (kit-pi): key file, offline, own agent folder, session in the run, :thinking suffix, cost"
-mkdir -p "$HOME/.config/concord-keys" "$HOME/.pi/agent"; printf 'test-key-123\n' > "$HOME/.config/concord-keys/opencode.key"
+mkdir -p "$HOME/.config/concord-keys" "$HOME/.pi/agent"; printf 'test-key-\n   123 \n' > "$HOME/.config/concord-keys/opencode.key"    # a wrapped paste
 for f in models.json models-store.json settings.json; do printf '{}\n' > "$HOME/.pi/agent/$f"; done
 cat > "$T/bin/pi" <<'PI'
 #!/bin/sh
@@ -142,5 +142,15 @@ grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && grep -qxF -- "$S" "$
   && ok "pi gets the key file's key, PI_OFFLINE=1 and its own agent folder with models.json; the run folder never holds the key" \
   || { bad "pi env: $(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)"; grep -rlF test-key-123 "$X"; }
 grep -qF '$0.0123' "$X/report.md" "$T/out.txt" 2>/dev/null && ok "the report shows the pi session's cost" || { bad "pi cost"; grep -iE 'cost|token' "$X/report.md" | head -3; }
+python3 -I - "$T/concord/concord.py" <<'EOF' && ok "pi's bare 429 and 503 lines count as refusal and transport errors; pi's own provider keeps its billing label" || bad "pi error lines or billing"
+import importlib.util, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+assert d.review_refusals('429: {"type":"FreeUsageLimitError","message":"Free usage limit reached."}'), "429 refusal"
+assert d.transport_error("503: upstream ECONNRESET"), "503 transport"
+assert not d.review_refusals('A quoted "429: Free usage limit reached" in the answer'), "quoted refusal"
+assert d.billing("pi", "github-copilot/gpt-5") == "pi's own login/key", d.billing("pi", "github-copilot/gpt-5")
+assert d.billing("pi", "opencode-go/x") == "OpenCode Go subscription allowance"
+EOF
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]
