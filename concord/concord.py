@@ -50,7 +50,7 @@ and records its verdict with --verdict.
 Before the executor starts, the acceptance commands run once on the untouched tree (red run): a
 phase whose acceptance already passes is not run (exit 6), because its tests do not test it.
 Exit codes: 2 usage/plan/lock, 3 session executor, 4 unknown model, 5 billing guard, 6 baseline,
-7 PASS refused (acceptance files changed), 8 attempt cap, 124 timeout.
+7 PASS refused (acceptance files changed), 8 attempt cap, 124 timeout, 125 resource limit (run watchdog).
 Run artifacts live in <git-common-dir>/concord/<run-id>/ (outside the working tree).
 Repository notes for executors: ~/.claude/concord/repo-notes/<repo-dir-name>.md (binding facts,
 kept short; prepended to every task for that repository).
@@ -131,6 +131,9 @@ GUARDS_NOTE = ("guards: the contract and bash deny rules are advisory; Files: sc
 # Git metadata an executor must never touch (hooks run as the user on the next commit).
 GIT_INTERNAL_FILES = ("config", "info/exclude", "info/attributes")
 CHECK_TIMEOUT_S = 300          # per baseline / characterization command (executors.conf: check_timeout)
+MEM_CAP_MIB = 8192             # run watchdog: memory of the run's process tree and free disk on its volume
+DISK_FLOOR_GIB = 5             # (executors.conf: mem_cap_mib, disk_floor_gib; 0 turns a check off)
+RESOURCE_RC = 125              # run_process: the watchdog stopped the run, or free disk was too low to start it
 CAUSES = ("EXECUTOR", "PLAN_GAP", "TEST_DEFECT", "FLAKY", "PROVIDER", "BLOCKED")
 STATUS_LINE = re.compile(r"^[\s*_\x60>#-]*STATUS:[\s*_\x60]*(PASS|FAIL|BLOCKED)\b(?![\s*_\x60]*\|)", re.M)
 QUESTIONS_LINE = re.compile(r"^[\s*_\x60>#-]*QUESTIONS:[\s*_\x60]*(.*)$")
@@ -1433,26 +1436,61 @@ def redact_cmd(cmd, contract, combined, task):
     return [f"<{len(a)} chars, see prompt.txt>" if a in (contract, combined, task) else a for a in cmd]
 
 
+def run_tree(root):
+    """{pid: (pgid, rss KiB)} of root's process group and all its descendants (OpenCode and pi start shell commands
+    in process groups of their own); None when ps cannot list processes (Claude Code's own sandbox denies it)."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
+                             timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    rows = {int(r[0]): tuple(map(int, r[1:])) for r in map(str.split, out.splitlines()) if len(r) == 4}
+    tree = {p for p, (_, g, _) in rows.items() if root in (p, g)}
+    while grown := {p for p, (pp, _, _) in rows.items() if pp in tree} - tree:
+        tree |= grown
+    return {p: rows[p][1:] for p in tree}
+
+
 def run_process(cmd, env, cwd, log_path, timeout_s, on_start=None):
     # PWD must match cwd: OpenCode takes its project directory from PWD, so an inherited PWD (the caller's
     # directory) made in-repo absolute paths "external" and pointed relative searches at the wrong tree.
     env = {**env, "PWD": str(cwd)}
-    start = time.time()
+    conf = load_conf()
+    cap, floor = float(conf.get("mem_cap_mib") or MEM_CAP_MIB), float(conf.get("disk_floor_gib") or DISK_FLOOR_GIB)
+    def low_disk():
+        free = shutil.disk_usage(cwd).free / 2**30
+        return f"free disk {free:.1f} GiB is below the floor of {floor:g} GiB" if free < floor else ""
+
+    start, why = time.time(), low_disk()
+    if why:
+        Path(log_path).write_text(f"RESOURCE LIMIT: {why}; the run did not start (free disk, re-run; not an attempt)\n")
+        return RESOURCE_RC, 0.0
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=log, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
         if on_start:
             on_start(proc.pid)
-        try:
-            rc = proc.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
+        rc = None
+        while rc is None:
             try:
-                proc.wait(timeout=30)
+                rc = proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-            rc = 124
+                tree = run_tree(proc.pid) if cap else {}
+                if tree is None:
+                    log.write(b"\nconcord: memory watchdog off for this run: ps cannot list processes here\n")
+                    cap, tree = 0, {}
+                mib = sum(rss for _, rss in tree.values()) / 1024
+                why = f"memory {mib:,.0f} MiB is above the cap of {cap:,.0f} MiB" if cap and mib > cap else low_disk()
+                if why or time.time() - start > timeout_s:
+                    for sig in (signal.SIGTERM, signal.SIGKILL):     # every group of the tree; 30 s to exit on TERM
+                        for group in ({proc.pid} | {g for g, _ in tree.values()}) - {0, 1, os.getpgrp()}:
+                            with contextlib.suppress(ProcessLookupError, PermissionError):
+                                os.killpg(group, sig)
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            proc.wait(timeout=30)
+                    rc = RESOURCE_RC if why else 124
+        if why:
+            log.write(f"\nRESOURCE LIMIT: {why}; the run was stopped (FAIL EXECUTOR, or PLAN_GAP if it needs more)\n".encode())
     return rc, time.time() - start
 
 
@@ -2201,10 +2239,10 @@ def finish_run(run_dir, rc, secs=None):
                          f"diff at {run_dir / 'characterize.diff'}")
 
     # Post-run acceptance: the same commands on the changed tree, after the snapshot above, so their artifacts
-    # are not blamed on the executor. A run killed by the wall limit (rc 124) counts as aborted and is skipped.
+    # are not blamed on the executor. A run stopped by the wall limit or the watchdog (rc 124, 125) is skipped.
     acceptance_after_rc = []
     acceptance_after_line = ""
-    if conf_flag(load_conf(), "acceptance_after", True) and st.get("acceptance") and rc != 124:
+    if conf_flag(load_conf(), "acceptance_after", True) and st.get("acceptance") and rc not in (124, RESOURCE_RC):
         results = []
         for c in st["acceptance"]:
             r, out = run_check(c, repo, st.get("check_timeout", CHECK_TIMEOUT_S))
@@ -2227,7 +2265,7 @@ def finish_run(run_dir, rc, secs=None):
     if rc is None:
         status = "MANUAL (session run; verify yourself)"
     else:
-        status = "TIMEOUT" if rc == 124 else ("OK" if rc == 0 else f"EXIT {rc}")
+        status = {124: "TIMEOUT", RESOURCE_RC: "RESOURCE"}.get(rc) or ("OK" if rc == 0 else f"EXIT {rc}")
     lines = [f"DELEGATE RESULT {st['run_id']}", f"executor: {st['who']}",
              f"status: {status}   mode: {st['mode']}   duration: {int(secs // 60)}m{int(secs % 60):02d}s   "
              f"plan: {st['plan']}   phase: {st['phase']}"]
@@ -2327,6 +2365,8 @@ def finish_run(run_dir, rc, secs=None):
         question = executor_blocked(ANSI.sub("", log_path.read_bytes().decode("utf-8", "replace")))
         if question is not None:
             lines.insert(1, f"EXECUTOR BLOCKED: {question} (answer it in the phase's Decisions, record FAIL --cause BLOCKED: not an attempt; a second BLOCKED on this phase is a PLAN_GAP)")
+        if rc == RESOURCE_RC:                 # the watchdog's RESOURCE LIMIT line ends the log
+            lines.insert(1, tail(log_path, 1))
     # Only a failed run can be a provider refusal, and the refusal ends the log: read its tail, not the source
     # text the executor printed earlier.
     failed = rc != 0 or any(r != 0 for r in acceptance_after_rc)
@@ -4149,7 +4189,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
             refusal_report(run_dir, result, refusals)
             return 9
     transport_retries = 0
-    while not result["ok"] and rc != 124 and transport_error(out, executor, rc) and transport_retries < TRANSPORT_RETRIES:
+    while not result["ok"] and rc not in (124, RESOURCE_RC) and transport_error(out, executor, rc) and transport_retries < TRANSPORT_RETRIES:
         transport_retries += 1
         print(f"note: connection dropped during the review; rerunning the same prompt "
               f"({transport_retries}/{TRANSPORT_RETRIES})", file=sys.stderr)
@@ -4164,7 +4204,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
                 refusal_report(run_dir, result, refusals)
                 return 9
     retried = False
-    if not result["ok"] and rc != 124 and not transport_error(out, executor, rc):
+    if not result["ok"] and rc not in (124, RESOURCE_RC) and not transport_error(out, executor, rc):
         retried = True
         retry_task = task + (f"\n\nYour previous answer could not be used: {'; '.join(result['errors'])}. "
                              f"Answer again with only the REVIEW-JSON block.")
