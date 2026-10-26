@@ -5289,9 +5289,8 @@ def delta_changes(repo, h0, head):
 
 def fix_block_text(repo, root, h0, head, changed):
     """The fix diff (h0..head) of every changed file with the touched functions as context (`-W`, driven by the
-    function-context gitattributes). A file whose `-W` diff is over FUNC_CONTEXT_CAP falls back to `-U10` plus a
-    marker line. When the joined total is over REVIEW_DIFF_CAP, one plain diff over all files (no context) replaces it.
-    A deleted file shows its header only (`-D`): its content was reviewed before."""
+    function-context gitattributes). A `-W` diff over FUNC_CONTEXT_CAP falls back to `-U10` plus a marker line. Over
+    REVIEW_DIFF_CAP in total, one `-U0` diff of all files replaces it. A deleted file is its header only (`-D`)."""
     attrs = str(Path(root) / "function-context.gitattributes")
     Path(attrs).write_text(FUNC_CONTEXT_ATTRS)
 
