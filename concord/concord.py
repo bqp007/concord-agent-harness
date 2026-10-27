@@ -2559,7 +2559,12 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = load_drift(root)
         if (data.get(str(repo)) or {}).get("plan") != plan_rel:     # a fork: the ticket checkout's entry gates it
-            repo = Path(next((k for k, e in data.items() if e.get("plan") == plan_rel), repo))
+            keys = [k for k, e in data.items() if k != "verdicts" and e.get("plan") == plan_rel]
+            live = [k for k in keys if Path(k).is_dir()]
+            if live:
+                repo = Path(live[0])
+            elif keys:      # a joined and removed fork: the ticket checkout takes over its entry
+                data[str(repo)] = data.pop(keys[0])
         entry, now = data.get(str(repo)), time.time()
         if not entry or entry.get("plan") != plan_rel:
             if not register:

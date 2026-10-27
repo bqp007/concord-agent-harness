@@ -172,5 +172,17 @@ has "time 0/10 min" && ok "a killed run (no report, its process gone) covers no 
 printf 'NOT RUN\n' > "$E/.git/concord/run-x/report.md"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 0/10 min" && ok "a refused run (a report, no meta.json) covers no gap" || { bad "refused run"; tail -2 "$T/out.txt"; }
 
+F="$T/f"; mkdir -p "$F" && ( cd "$F" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > a.py; git add -A && git commit -qm init
+  { printf '# Plan\nTier: M\nSize: ~40 lines\nETA: 10 min\n\n'; phase 1 '' 'true'; } > PLAN_F.md ) || { echo "setup failed"; exit 1; }
+$DP --plan-verdict "$T/v.txt" --plan PLAN_F.md --repo "$F" > /dev/null 2>&1
+git -C "$F" worktree add -q "$T/ff" > /dev/null 2>&1; cp "$F/PLAN_F.md" "$T/ff/"
+FAKE_ACTIONS=true $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$T/ff" > /dev/null 2>&1
+printf 'y = 2\n' >> "$F/a.py"; git -C "$F" worktree remove --force "$T/ff"      # wt.py join: patch applied, fork removed
+$DP --drift --plan PLAN_F.md --repo "$F" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && has "DRIFT OK" && has "size 1/40 lines" \
+  && python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(sys.argv[2] not in d or sys.argv[3] in d)' "$F/.git/concord/drift.json" "$F" "$T/ff" \
+  && ok "after a fork is joined and removed, the ticket checkout takes over the fork's drift entry" || { bad "joined fork rc=$RC"; tail -2 "$T/out.txt"; }
+
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
