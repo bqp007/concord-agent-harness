@@ -183,11 +183,14 @@ $DP --drift --plan PLAN_F.md --repo "$F" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "DRIFT OK" && has "size 1/40 lines" \
   && python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(sys.argv[2] not in d or sys.argv[3] in d)' "$F/.git/concord/drift.json" "$F" "$T/ff" \
   && ok "after a fork is joined and removed, the ticket checkout takes over the fork's drift entry" || { bad "joined fork rc=$RC"; tail -2 "$T/out.txt"; }
-python3 -I -c 'import json,sys; p,f=sys.argv[1:3]; d=json.load(open(p)); d[f+"_gone"]=dict(d[f]); d[f]["plan"]="PLAN_A.md"; json.dump(d,open(p,"w"))' "$F/.git/concord/drift.json" "$F"
+python3 -I -c 'import json,sys; p,f=sys.argv[1:3]; d=json.load(open(p)); d[f+"_gone"]=dict(d[f], elapsed=300.0); d[f]["plan"]="PLAN_A.md"; json.dump(d,open(p,"w"))' "$F/.git/concord/drift.json" "$F"
 $DP --drift --plan PLAN_F.md --repo "$F" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "DRIFT: silent" \
   && python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))[sys.argv[2]]["plan"] != "PLAN_A.md")' "$F/.git/concord/drift.json" "$F" \
   && ok "a removed fork's entry never replaces the checkout's own entry for another plan" || { bad "own entry kept rc=$RC"; tail -2 "$T/out.txt"; }
+FAKE_ACTIONS=true $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$F" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1]))[sys.argv[2]]; sys.exit(e["plan"] != "PLAN_F.md" or e["elapsed"] < 300)' "$F/.git/concord/drift.json" "$F" \
+  && ok "a gated run of the fork's plan takes over the removed fork's entry (its time carries over)" || { bad "gated takeover rc=$RC"; tail -2 "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
