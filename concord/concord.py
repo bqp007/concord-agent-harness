@@ -2563,7 +2563,7 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
             live = [k for k in keys if Path(k).is_dir()]
             if live:
                 repo = Path(live[0])
-            elif keys:      # a joined and removed fork: the ticket checkout takes over its entry
+            elif keys and str(repo) not in data:      # a joined and removed fork: the ticket checkout takes over its entry
                 data[str(repo)] = data.pop(keys[0])
         entry, now = data.get(str(repo)), time.time()
         if not entry or entry.get("plan") != plan_rel:
