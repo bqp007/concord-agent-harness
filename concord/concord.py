@@ -1643,13 +1643,27 @@ def lock_alive(h):
     return False
 
 
+def glob_root(entry):
+    """The literal directories before a Files entry's first glob part ('' at the top), or None for a plain path."""
+    parts = entry.split("/")
+    return next(("/".join(parts[:i]) for i, part in enumerate(parts) if re.search(r"[*?\[]", part)), None)
+
+
+def files_overlap(p, q):
+    """True when two Files entries can name one file: equal, in_scope either way, or a glob whose literal
+    directories hold the other entry or sit inside it (files that do not exist yet count, so it errs to overlap)."""
+    if p == q or in_scope(p, [q]) or in_scope(q, [p]):
+        return True
+    rp, rq = glob_root(p), glob_root(q)
+    if rp is None and rq is None:
+        return False
+    a, b = p if rp is None else rp, q if rq is None else rq
+    return a == "" or b == "" or a == b or in_scope(a, [b]) or in_scope(b, [a])
+
+
 def lock_overlap(files, theirs):
-    """The first entry of another run's Files that this run also lists: an equal path, or in_scope either way."""
-    for q in theirs:
-        for p in files:
-            if p == q or in_scope(p, [q]) or in_scope(q, [p]):
-                return q
-    return None
+    """The first entry of another run's Files that can name a file this run lists (files_overlap)."""
+    return next((q for q in theirs for p in files if files_overlap(p, q)), None)
 
 
 def check_held(lock):
@@ -2216,6 +2230,11 @@ def finish_run(run_dir, rc, secs=None):
     record_found_notes(repo, st.get("plan"), run_dir / "output.log")
 
     changed, created, deleted = compare(pre, post, repo)
+    # The Files of a run that held the lock beside this one: its changes are that run's work, not this run's, so
+    # they leave DELETED, the diff size, diff_lines and OUT OF SCOPE alike.
+    concurrent = lock_shared(run_dir.parent, st["run_id"])
+    changed, created, deleted = ([p for p in group if in_scope(p, files) or not in_scope(p, concurrent)]
+                                 for group in (changed, created, deleted))
     # Acceptance files (the tests that grade the phase): an implementer must not edit them. Runs whose state
     # predates this feature have no hashes; skip the comparison rather than report every file as new.
     acceptance_changed = []          # list of (path, "modified"|"removed")
@@ -2243,9 +2262,7 @@ def finish_run(run_dir, rc, secs=None):
     touched = changed + created
     stats = numstat(repo, [p for p in changed if post.get(p, ["??"])[0] not in ("??", "!!")])
     scope_in = [p for p in touched if in_scope(p, files)]
-    # The Files of a run that held the lock beside this one: their edits are that run's work, not out of scope.
-    concurrent = lock_shared(run_dir.parent, st["run_id"])
-    scope_out = [p for p in touched if not in_scope(p, files) and not in_scope(p, concurrent)]
+    scope_out = [p for p in touched if not in_scope(p, files)]
     source_oos, generated = split_out_of_scope(scope_out, post, tuple(st.get("generated_globs") or GENERATED_GLOBS))
     staged_new = sorted(set(staged(repo)) - set(st.get("staged_before") or []))
     internals_before, internals_after = st.get("git_internals") or {}, git_internals(repo)
@@ -2864,26 +2881,30 @@ def est_stats(name, index):
 
 
 def est_after(phase_text):
-    """[(phase number, reason)] from `After: 1 (reason), 3`; the reason is "" without parentheses, and a comma
-    inside the parentheses does not split the field."""
+    """([(phase number, reason)], [items naming no phase]) from `After: 1 (reason), Phase 3 and 4 (reason)`: an
+    optional Phase or P before each number, `and` between numbers; a comma inside the parentheses does not split
+    the field, and the reason covers every phase of its item."""
     inline, body = field_block(phase_text, "After")
-    out, depth, item = [], 0, ""
+    out, bad, depth, item = [], [], 0, ""
     for ch in " ".join([inline] + body) + ",":
         depth += ch == "("
         depth -= ch == ")"
         if ch == "," and depth <= 0:
-            m = re.match(r"\s*(\d+(?:\.\d+)*)\s*(?:\((.*)\))?", item)
-            if m and phase_key(m.group(1)) is not None:
-                out.append((phase_key(m.group(1)), (m.group(2) or "").strip()))
+            head, _, why = item.partition("(")
+            nums = [phase_key(x) for x in re.findall(r"(?<![\w.])(?:phases?\s*|p)?(\d+(?:\.\d+)*)", head, re.I)]
+            out += [(x, why.rsplit(")", 1)[0].strip()) for x in nums if x is not None]
+            if not any(x is not None for x in nums) and item.strip().lower() not in ("", "none", "-"):
+                bad.append(item.strip())
             depth, item = 0, ""
         else:
             item += ch
-    return out
+    return out, bad
 
 
 def est_shared(files_a, files_b):
-    """Paths that both Files lists cover (equal, a directory holding the other, or a glob)."""
-    return sorted({f for f in files_a if in_scope(f, files_b)} | {g for g in files_b if in_scope(g, files_a)})
+    """Entries of either Files list that can name a file of the other (files_overlap: globs included)."""
+    return sorted({f for f in files_a if any(files_overlap(f, g) for g in files_b)}
+                  | {g for g in files_b if any(files_overlap(f, g) for f in files_a)})
 
 
 def cmd_estimate(args):
@@ -2910,9 +2931,10 @@ def cmd_estimate(args):
                 if has_ledger else f"{key}: no ledger, EST_DEFAULT_S {EST_DEFAULT_S} s, EST_REF_LINES "
                                    f"{EST_REF_LINES} lines")
         print(f"Phase {n}  {name}  ~{size if size else '?'} lines  {minutes} min  ({note})")
+        waits, unknown = est_after(phase_text)
+        lints += [f"Phase {n} After: {item!r} names no phase; that wait is ignored" for item in unknown]
         phases.append({"n": n, "name": name, "key": key, "size": size, "lines": med_lines, "minutes": minutes,
-                       "waits": est_after(phase_text), "files": parse_files(phase_text), "start": None,
-                       "finish": None})
+                       "waits": waits, "files": parse_files(phase_text), "start": None, "finish": None})
         if not has_ledger and key not in no_ledger:
             no_ledger.append(key)
         if size is None:
@@ -4936,15 +4958,6 @@ def cmd_review_pr(args, target, conf):
     gh_head = (info.get("headRefOid") or "").strip()
     if not base_branch or not gh_head:
         die(f"gh pr view {n} returned no baseRefName/headRefOid", code=3)
-    if not args.delta:
-        # A round is one head with a full review; partial reviews of the same head finish that round.
-        rounds = [h for h, v in pr_reviews_by_head(root, n).items() if v.get("full")]
-        if (len(rounds) >= PR_FULL_REVIEW_CAP and gh_head not in rounds
-                and not " ".join((args.user_approved or "").split())):
-            print(f"REFUSED: PR {n} already had {len(rounds)} full review rounds (the cap is {PR_FULL_REVIEW_CAP}); "
-                  "fix the BLOCKER and HIGH findings and check them with --delta, or pass --user-approved "
-                  "\"<the owner's words>\"")
-            return 8
     slug = slug or remote_slug(repo)
     tier = args.tier
     ref = f"refs/review/pr{n}-{os.getpid()}"
@@ -5036,6 +5049,16 @@ def cmd_review_pr(args, target, conf):
                 files = data
                 parts = pr_diff(repo, base, ref, files)
                 diff = "".join(parts[f] for f in files)
+            # A round is one head with a review that ran (a COVERED reuse ran none); more reviews of a head
+            # already reviewed finish its round.
+            rounds = [h for h, v in pr_reviews_by_head(root, n).items()
+                      if any(not rev.get("reused") for _meta, rev in v.get("full") or [])]
+            if (len(rounds) >= PR_FULL_REVIEW_CAP and head not in rounds
+                    and not " ".join((args.user_approved or "").split())):
+                print(f"REFUSED: PR {n} already had {len(rounds)} full review rounds (the cap is "
+                      f"{PR_FULL_REVIEW_CAP}); fix the BLOCKER and HIGH findings and check them with --delta, or "
+                      "pass --user-approved \"<the owner's words>\"")
+                return 8
         if not since and len(diff) > REVIEW_DIFF_CAP:  # a full PR over the cap: refuse, no model call
             pr_cap_exit(files, parts, len(diff))
         names = pick_checklists(files, args.checklist)
@@ -6077,6 +6100,29 @@ def test_line_deltas(repo, base, plan_rel):
     return {p: v for p, v in out.items() if TEST_PATH.search(p)}
 
 
+def report_prs(repo, root, base):
+    """The PR numbers whose reviewed heads are this ticket's commits: reachable from HEAD, not from the drift base."""
+    if not base:
+        return []
+    prs, mine = set(), {}
+    for path in Path(root).glob("pr*-*/meta.json"):
+        try:
+            meta = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict) or meta.get("kind") != "pr-review" or not isinstance(meta.get("pr"), int):
+            continue
+        head = meta.get("head")
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+            continue
+        if head not in mine:
+            mine[head] = (run_git(["merge-base", "--is-ancestor", head, "HEAD"], repo, timeout=PR_TIMEOUT).returncode == 0
+                          and run_git(["merge-base", "--is-ancestor", head, base], repo, timeout=PR_TIMEOUT).returncode == 1)
+        if mine[head]:
+            prs.add(meta["pr"])
+    return sorted(prs)
+
+
 def cmd_report(args):
     """--report: write <runs root>/reports/REPORT_<ticket>.md from recorded data (phases, the plan's Test plan, test
     lines, reviews, open items, time against the ETA, concurrency) and stop the drift clock."""
@@ -6124,15 +6170,15 @@ def cmd_report(args):
         lines.append("")
     lines.append(f"Total: +{added} -{deleted} lines; plan Tests: {tests_line or 'none'}")
 
-    ledger = load_ledger(root, ledger_key({"plan": plan_rel}))
-    findings = [f for f in ledger["findings"] if isinstance(f, dict)]
+    keys = [ledger_key({"plan": plan_rel})] + [f"pr{n}" for n in report_prs(repo, root, entry.get("base"))]
+    findings = [f for key in keys for f in load_ledger(root, key)["findings"] if isinstance(f, dict)]
     counts = {}
     for f in findings:
         group = counts.setdefault((_flat(f.get("run") or "-"), _flat(f.get("reviewer") or "-")),
                                   dict.fromkeys(REVIEW_SEVERITIES, 0))
         if str(f.get("severity") or "").upper() in group:
             group[str(f.get("severity")).upper()] += 1
-    lines += ["", "## Review", ""]
+    lines += ["", "## Review", "", f"Ledgers: {', '.join(keys)}", ""]
     if counts:
         lines += ["| Run | Reviewer | BLOCKER | HIGH | MEDIUM | NOTE |", "|---|---|---|---|---|---|"] + \
                  ["| " + " | ".join([run, reviewer] + [str(c[s]) for s in REVIEW_SEVERITIES]) + " |"

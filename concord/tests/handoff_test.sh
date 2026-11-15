@@ -134,5 +134,10 @@ python3 -I -c 'import json,sys; p,r=sys.argv[1:3]; d=json.load(open(p)); assert 
 python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["estimates"]={"PLAN_rep.md": 12}; json.dump(d,open(p,"w"))' "$H/.git/concord/drift.json"
 $DP --report --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
 grep -Eq '^Elapsed [0-9]+ min against ETA 12 min \(computed\)' "$REP" && ok "4.10 a stored estimate is the ETA the report uses" || { bad "4.10"; grep '^Elapsed' "$REP"; }
+git -C "$H" commit -qam pr && mkdir -p "$H/.git/concord/pr7-a" && printf '{"kind": "pr-review", "pr": 7, "head": "%s"}' "$(git -C "$H" rev-parse HEAD)" > "$H/.git/concord/pr7-a/meta.json"
+python3 -I -c 'import json,sys; json.dump(dict(key="pr7", next_finding=2, next_decision=1, decisions=[], findings=[dict(id="F1", severity="HIGH", status="open", problem="pr-thing", run="pr7-a", reviewer="opus55")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/pr7.json"
+$DP --report --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
+sec "Open items for the DAT" | grep -qF "pr-thing" && sec Review | grep -qF "| pr7-a | opus55 | 0 | 1 | 0 | 0 |" \
+  && ok "4.11 the reviews of the ticket's PR (its reviewed head is a ticket commit) are in the report" || { bad "4.11 PR ledger"; sec Review; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

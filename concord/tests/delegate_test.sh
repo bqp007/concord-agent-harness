@@ -1,5 +1,5 @@
 #!/bin/bash
-# concord.py regression (35 checks, ~15 s, no network, fake qwen executor): report lines for in-scope, out-of-scope,
+# concord.py regression (36 checks, ~15 s, no network, fake qwen executor): report lines for in-scope, out-of-scope,
 # deleted, staged, plan-modified and git-internal changes; red-run refusal (exit 6); --restore; billing guard (exit 5);
 # the run watchdog (memory cap, free-disk floor; the memory check needs ps, which Claude Code's own sandbox denies);
 # OpenCode permission set (Code Mode, subagents, web search denied; version and project config pinned);
@@ -282,5 +282,14 @@ $DP --estimate --plan PLAN_S.md --repo "$R" > "$T/out.txt" 2>&1         # P1 210
 grep -qxF "CRITICAL PATH: 1 = 35 min; session lane 38 min; final revision 10 min" "$T/out.txt" \
   && grep -Eqx "ETA: 48 min, lands at [0-2][0-9]:[0-5][0-9] local" "$T/out.txt" \
   && ok "E.6 the ETA takes the session lane when it is longer than the critical path" || { bad "E.6 session lane"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
+{ printf '# Plan\nTier: S\n'; ph 1 planner 'Size: ~180 lines\nFiles: t.sh'; ph 2 deepseek-flash 'Size: ~180 lines\nFiles: a.py'
+  ph 3 deepseek-flash 'Size: ~180 lines\nAfter: Phase 1 and 2 (needs both), tests\nFiles: b.py'
+  ph 4 deepseek-flash 'Size: ~180 lines\nFiles: src/a*.py'; ph 5 deepseek-flash 'Size: ~180 lines\nFiles: src/*b.py'; } > "$R/PLAN_A.md"
+$DP --estimate --plan PLAN_A.md --repo "$R" > "$T/out.txt" 2>&1        # P1 4, P2 10, P3 starts at 10: path 2 -> 3 = 20
+grep -qxF "CRITICAL PATH: 2 → 3 = 20 min; session lane 14 min; final revision 10 min" "$T/out.txt" \
+  && grep -qF "ESTIMATE LINT: Phase 3 After: 'tests' names no phase" "$T/out.txt" && ! grep -q "with no reason" "$T/out.txt" \
+  && grep -qF "ESTIMATE LINT: Phases 4 and 5 can run at once and both list src/*b.py, src/a*.py" "$T/out.txt" \
+  && ok "E.7 After: takes Phase and 'and'; an item naming no phase is linted; two globs that can share a file overlap" \
+  || { bad "E.7 After forms"; grep -E "^(CRITICAL|ESTIMATE LINT)" "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

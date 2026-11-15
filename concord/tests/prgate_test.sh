@@ -159,10 +159,13 @@ $DP --pr-status me/kit#61 --repo "$C" > "$T/out.txt" 2>&1
 
 echo "== 5 at most three full review rounds (heads) per PR (2026-11-15, kit-flow)"
 git -C "$C" remote set-url origin "$O" || { echo "setup failed: origin"; exit 1; }
-for v in 62 621 622; do newpr 62 a.py "a = $v"; opus 62 high concord:reviewer-opus55; done
-$DP --review-pr 62 --packet --tier high --repo "$C" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && ! has "REFUSED" && ok "5 another full review of a head already reviewed is not a new round" \
-  || { bad "5 same head rc=$RC"; tail -3 "$T/out.txt"; }
+for v in 62 621; do newpr 62 a.py "a = $v"; opus 62 high concord:reviewer-opus55; done
+rebase(){ GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" newpr 62 a.py "$2"; $DP --review-pr 62 --packet --tier high --repo "$C" > "$T/out.txt" 2>&1; }
+rebase 2001-01-01T00:00:00 'a = 621'; RC=$?
+[ $RC -eq 0 ] && has "COVERED" && ok "5 a rebased head with reviewed content is COVERED" || { bad "5 rebase rc=$RC"; tail -3 "$T/out.txt"; }
+newpr 62 a.py 'a = 622'; opus 62 high concord:reviewer-opus55 && ok "5 a COVERED head starts no round: the third full review runs" || bad "5 third round"
+rebase 2002-01-01T00:00:00 'a = 622'; RC=$?
+[ $RC -eq 0 ] && ! has "REFUSED" && ok "5 a 4th head with reviewed content is COVERED, not refused" || { bad "5 covered 4th rc=$RC"; tail -3 "$T/out.txt"; }
 newpr 62 a.py 'a = 623'
 $DP --review-pr 62 --packet --tier high --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 8 ] && has "REFUSED: PR 62 already had 3 full review rounds" && ! grep -q "^PACKET" "$T/out.txt" \
