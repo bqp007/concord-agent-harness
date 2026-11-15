@@ -1,6 +1,6 @@
 #!/bin/bash
-# Worktree regression (49 checks, ~20 s, no network, fake qwen executor): wt.py new/list/done/fork/join, concord.py
-# per-checkout locks, per-checkout "last", main-checkout snapshot ignoring nested worktrees, done refusals,
+# Worktree regression (53 checks, ~20 s, no network, fake qwen executor): wt.py new/list/done/fork/join, concord.py
+# locks per set of files (disjoint runs share a checkout), per-checkout "last", main-checkout snapshot ignoring nested worktrees, done refusals,
 # plan archive on done, OVERLAP and DRIFT lines in `wt.py list`.
 # Run: bash ~/.claude/concord/tests/worktree_test.sh   (exit 0 = all passed; temp repo under $TMPDIR, removed).
 # Tests the dispatcher this file belongs to, copied into the temp dir, so runs.jsonl stays untouched.
@@ -66,8 +66,27 @@ touch "$T/release"; wait $P1; R1=$?
 [ $R1 -eq 0 ] && grep -q "a.py" "$T/r1.txt" && ok "T1 run completed" || { bad "T1 run rc=$R1"; tail -4 "$T/r1.txt"; }
 [ $R2 -eq 0 ] && ok "T2 ran while T1 was running (no lock wait)" || { bad "T2 rc=$R2"; tail -3 "$T/r2.txt"; }
 [ $R3 -eq 0 ] && ok "main checkout ran while T1 was running" || { bad "main rc=$R3"; tail -3 "$T/r3.txt"; }
-[ $R4 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/r4.txt" && ok "second run in T1 blocked (same checkout)" || { bad "same-checkout block rc=$R4"; tail -3 "$T/r4.txt"; }
+[ $R4 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/r4.txt" && grep -qF "both list a.py" "$T/r4.txt" \
+  && ok "second run in T1 blocked (same checkout), naming the shared file" || { bad "same-checkout block rc=$R4"; tail -3 "$T/r4.txt"; }
 grep "OUT OF SCOPE" "$T/r3.txt" | grep -qv ": none" && bad "main run flagged out-of-scope files: $(grep -i 'out of scope' "$T/r3.txt")" || ok "main run saw no worktree files"
+echo "== lock per set of files: disjoint runs share a checkout (2026-11-15, kit-flow)"
+printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py b.py c.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py, c.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"; printf 'c\n' > "$W1/c.py"
+FAKE_ACTIONS="i=0; while [ ! -e '$T/release2' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
+  $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f1.txt" 2>&1 & PF=$!
+i=0; until [ -e "$L1" ] || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done
+printf 'z\n' > "$W1/z.py"; FAKE_ACTIONS='echo y > b.py; rm z.py; echo y >> c.py' $DP 2 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f2.txt" 2>&1; F2=$?
+FAKE_ACTIONS='true' $DP 3 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f3.txt" 2>&1; F3=$?
+touch "$T/release2"; wait $PF; F1=$?
+[ $F2 -eq 0 ] && grep -q "b.py" "$T/f2.txt" && ok "a run with disjoint Files ran in the same checkout while another ran" \
+  || { bad "disjoint run rc=$F2"; tail -3 "$T/f2.txt"; }
+[ $F3 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/f3.txt" \
+  && ok "a run with no Files is refused while another runs (exit 2)" || { bad "no-Files run rc=$F3"; tail -3 "$T/f3.txt"; }
+[ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 2 lines (+2 -0)" "$T/f1.txt" \
+  && grep -qxF "ACCEPTANCE FILES CHANGED: c.py (modified; in a concurrent run's Files: re-run this phase once that run ends)" "$T/f1.txt" \
+  && ok "the long run leaves the concurrent run's b.py and deleted z.py out of OUT OF SCOPE, DELETED, ACCEPTANCE FILES CHANGED and its diff size; its change of c.py, there at the start, stays" \
+  || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|acceptance|diff size" "$T/f1.txt"; }
+[ ! -e "$L1" ] && ok "the lock file is gone once both runs ended" || bad "lock file left: $(cat "$L1" 2>&1)"
+rm -f "$W1/b.py" "$W1/c.py" "$W1/PLAN_F.md"
 echo "== 'last' is per checkout"
 L1=$($DP --show last --repo "$W1" 2>&1 | grep -m1 "^DELEGATE RESULT"); L2=$($DP --show last --repo "$W2" 2>&1 | grep -m1 "^DELEGATE RESULT")
 [ -n "$L1" ] && [ "$L1" != "$L2" ] && ok "--show last differs per worktree ($L1 / $L2)" || { bad "last isolation: [$L1] [$L2]"; $DP --show last --repo "$W1" 2>&1 | head -3; }

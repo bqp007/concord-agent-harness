@@ -141,8 +141,8 @@ pushn 30 "sed -i.bak 's/^v_1999 = 0/v_1999 = 1/' big.py && rm big.py.bak"; delta
 [ $RC -eq 0 ] && grep -q '^+v_1999 = 1$' "$P" && grep -q '^ v_1989 = 0$' "$P" && ! grep -q 'v_0000' "$P" \
   && grep -q '^\[function context of big.py over 12,000 chars; 10 lines of context shown\]$' "$P" \
   && ok "--delta: function context over 12,000 chars -> 10 lines of context, marked" || { bad "fallback rc=$RC: $(grep -n 'function context\|^@@' "$P" | head)"; tail -3 "$T/out.txt"; }
-pushn 30 "python3 $T/gen.py huge.py 7000 h"; delta 30 FAKE_CLEAN=1
-[ $RC -eq 2 ] && has "fix diff since" && has "over the 60,000 cap; run a full review" \
+pushn 30 "python3 $T/gen.py huge.py 30000 h"; delta 30 FAKE_CLEAN=1
+[ $RC -eq 2 ] && has "fix diff since" && has "over the 300,000 cap; run a full review" \
   && ok "--delta: a fix diff over the cap refuses (exit 2)" || { bad "huge fix rc=$RC"; tail -3 "$T/out.txt"; }
 
 echo "== the 12,000-char cap is on a file's function context, not on the file; C/C++ use the cpp driver"

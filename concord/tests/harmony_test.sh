@@ -1,7 +1,7 @@
 #!/bin/bash
 # One mechanism per concern (2026-10-23, PLAN_kit-harmony; from the workflow review after kit-cpptools): every entry
 # point fails closed on hostile input (exit 2, never a traceback), run ids name a run folder and nothing else, plans
-# must be UTF-8 (1); --lint reads every phase with the lint model, Claude executors included (2); the Zen free tier has
+# must be UTF-8 (1); the Zen free tier has
 # aliases, its own billing label and a PROVIDER LIMIT line (4); --check compares the installed plugin and dispatcher
 # with their marketplace source (5); wt.py new cuts from the remote default branch, writes no .git/config, leaves
 # nothing behind on failure and git-excludes plan files (6); one Opus reviewer above the low tier (7).
@@ -134,28 +134,6 @@ run "echo y >> a.py"; G=$(rid)
 $DP --show "$G" --repo "$R" > "$T/out.txt" 2>&1; RC1=$?; $DP --show last --repo "$R" > "$T/out.txt" 2>&1; RC2=$?
 [ -n "$G" ] && [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && ok "1 a real run id and 'last' still resolve (characterization)" \
   || bad "1 real run id rc=$RC1/$RC2 id='$G'"
-fi
-
-if sel 2; then
-echo "== 2 --lint reads every phase with the lint model, a Claude executor's too"
-mkrepo '## Phase 1 - claude phase (P1 <- S1)
-Executor: concord:implementer-opus48
-Risk: high
-Files: a.py
-Acceptance:
-- `grep -q y a.py`
-## Phase 2 - sonnet phase (P2 <- S1)
-Executor: sonnet
-Risk: low
-Files: a.py
-Acceptance:
-- `grep -q y a.py`'
-C0=$(calls); $DP --lint 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(calls)" = "$((C0 + 1))" ] && ! has "LINT SKIPPED" && grep -qE '^LINT [0-9]{8}-[0-9]{6}-lint-' "$T/out.txt" \
-  && ok "2 a concord:implementer-opus48 phase: one lint model call, no LINT SKIPPED" || { bad "2 claude phase rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
-$DP --lint 2 --dry-run --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "LINT SKIPPED" && ok "2 a sonnet phase: the dry run builds the lint call" \
-  || { bad "2 sonnet phase rc=$RC"; tail -3 "$T/out.txt"; }
 fi
 
 if sel 4; then

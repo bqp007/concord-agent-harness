@@ -3,7 +3,8 @@
 # (path:function, path:a-b) are resolved at dispatch and the current code is inlined into the executor's task; a
 # pointer that resolves to nothing is marked. (2) FOUND: lines of an executor's report land once in the plan's notes
 # file, and later executor and --review tasks of that plan include it. (3) Retry feedback is not called verifier
-# feedback. No network: fake qwen executor.
+# feedback. (4) --report writes the test report from recorded data and stops the drift clock. No network: fake
+# qwen executor.
 # Run: bash ~/.claude/concord/tests/handoff_test.sh   (exit 0 = every check passed)
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -86,5 +87,59 @@ dry --extra "EVIDENCE: marker-feedback" > "$T/p3.txt"
 grep -qF 'marker-feedback' "$T/p3.txt" && ! grep -qi 'verifier feedback' "$T/p3.txt" \
   && ok "3 --extra reaches the task as feedback from the previous attempt, not verifier feedback" \
   || { bad "3 feedback wording"; grep -i -m2 'feedback' "$T/p3.txt"; }
+
+
+echo "== 4 --report: the test report for the Dev Acceptance Test (2026-11-15, kit-flow)"
+H="$T/h"; mkdir -p "$H/tests"
+( set -e; cd "$H"; git init -q -b main; git config user.email t@t; git config user.name t
+  printf 'x = 1\n' > a.py; printf 'echo old\n' > tests/a_test.sh; git add -A; git commit -qm init
+  printf '# Plan\nTier: M\nSize: ~10 lines\nTests: +2/−0 lines, net ≤ +2\nETA: 30 min\n\n## Open questions\n- Q1 which name to show\n
+## Test plan (behavior ledger)\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| marker-behavior-row | none | ADD | tests/a_test.sh |
+\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py, tests/a_test.sh\nAcceptance:\n- `grep -q 2 a.py`\n' > PLAN_rep.md
+) || { echo "setup failed"; exit 1; }
+printf 'VERDICT: APPROVE\n' > "$T/v.txt"; $DP --plan-verdict "$T/v.txt" --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
+FAKE_ACTIONS='echo "x = 2" > a.py; printf "echo new1\necho new2\n" >> tests/a_test.sh' \
+  $DP 1 --plan PLAN_rep.md --via qwen --model fake/m --no-baseline --repo "$H" > "$T/r1.txt" 2>&1 || { bad "4 setup run"; tail -3 "$T/r1.txt"; }
+mkdir -p "$H/.git/concord/ledger"
+python3 -I -c 'import json, sys
+f = lambda i, sev, st, text: dict(id=f"F{i}", severity=sev, path="a.py", line=1, line_end=1, problem=text, fix="", repro={},
+                                  reviewer="opus55", run="r1", at="2026-11-15T00:00:00", status=st)
+json.dump(dict(key="PLAN_rep", next_finding=4, next_decision=1, decisions=[], findings=[f(1, "HIGH", "adopted", "high-thing"),
+          f(2, "MEDIUM", "open", "medium-thing"), f(3, "NOTE", "note", "note-thing")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/PLAN_rep.json"
+$DP --report --plan PLAN_rep.md --repo "$H" > "$T/rep.txt" 2>&1; RC=$?
+REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1)
+[ $RC -eq 0 ] && [ "$REP" = "$H/.git/concord/reports/REPORT_rep.md" ] && [ -f "$REP" ] \
+  && ok "4.1 --report writes REPORT_<ticket>.md in the runs root and prints its path" || { bad "4.1 rc=$RC path=$REP"; tail -3 "$T/rep.txt"; }
+[ -f "$REP" ] || REP="$T/none"
+prev=0; order=ok
+for h in "# Test report: rep" "## Phases" "## Test plan" "## Test lines" "## Review" "## Open items for the DAT" "## Time"; do
+  n=$(grep -nxF -- "$h" "$REP" | head -1 | cut -d: -f1); { [ -n "$n" ] && [ "$n" -gt "$prev" ]; } || order="missing or out of order: $h"; prev=${n:-0}
+done
+[ "$order" = ok ] && ok "4.2 seven sections in order" || { bad "4.2 $order"; grep "^#" "$REP"; }
+sec(){ sed -n "/^## $1/,/^## /p" "$REP"; }
+sec Phases | grep -Eq '^\| 1 \| [^|]+ \| 1 \|' && ok "4.3 phase row: one run of phase 1" || { bad "4.3 phases"; sec Phases; }
+sec "Test plan" | grep -qF "marker-behavior-row" && ok "4.4 the plan's Test plan is copied" || { bad "4.4 test plan"; sec "Test plan"; }
+sec "Test lines" | grep -qF "| tests/a_test.sh | 2 | 0 |" && ! sec "Test lines" | grep -qF "| a.py |" \
+  && sec "Test lines" | grep -qF "Total: +2 -0 lines; plan Tests: +2/−0 lines, net ≤ +2" \
+  && ok "4.5 test lines: test files only, total against the plan's Tests: line" || { bad "4.5 test lines"; sec "Test lines"; }
+sec Review | grep -qF "| r1 | opus55 | 0 | 1 | 1 | 1 |" && ok "4.6 review row: BLOCKER/HIGH/MEDIUM/NOTE per reviewer and run" || { bad "4.6 review"; sec Review; }
+O=$(sec "Open items for the DAT")
+echo "$O" | grep -qF "medium-thing" && echo "$O" | grep -qF "note-thing" && ! echo "$O" | grep -qF "high-thing" \
+  && echo "$O" | grep -qF "Q1 which name to show" && echo "$O" | grep -qxF "Never adjudicated: 1" \
+  && ok "4.7 open items: open and note findings, open questions, never-adjudicated count" || { bad "4.7 open items"; echo "$O"; }
+grep -Eq '^Elapsed [0-9]+ min against ETA 30 min \(plan\)' "$REP" && grep -q '^Concurrency: 1.00' "$REP" \
+  && ok "4.8 time against the plan's ETA; concurrency of one run" || { bad "4.8 time"; sec Time; }
+python3 -I -c 'import json,sys; p,r=sys.argv[1:3]; d=json.load(open(p)); assert d[r].get("reported"), d[r]' "$H/.git/concord/drift.json" "$H" 2>/dev/null \
+  && $DP --drift --plan PLAN_rep.md --repo "$H" 2>&1 | grep -q "DRIFT OFF" && ok "4.9 the report stops the drift clock" || bad "4.9 drift still on"
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["estimates"]={"PLAN_rep.md": 12}; json.dump(d,open(p,"w"))' "$H/.git/concord/drift.json"
+$DP --report --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
+grep -Eq '^Elapsed [0-9]+ min against ETA 12 min \(computed\)' "$REP" && ok "4.10 a stored estimate is the ETA the report uses" || { bad "4.10"; grep '^Elapsed' "$REP"; }
+git -C "$H" commit -qam pr && P7=$(git -C "$H" rev-parse HEAD) && git -C "$H" checkout -qb other HEAD~1 && echo s > "$H/s.txt" && git -C "$H" add s.txt \
+  && git -C "$H" commit -qm other && P20=$(git -C "$H" rev-parse HEAD) && git -C "$H" checkout -q - && git -C "$H" merge -q --no-edit other   # PR 20 comes in with main
+for x in "7 $P7 pr-thing" "20 $P20 other-thing"; do read -r n h p <<< "$x"; mkdir -p "$H/.git/concord/pr$n-a"; printf '{"kind": "pr-review", "pr": %s, "head": "%s"}' "$n" "$h" > "$H/.git/concord/pr$n-a/meta.json"
+  python3 -I -c 'import json,sys; n,p=sys.argv[2:]; json.dump(dict(key="pr"+n, next_finding=2, next_decision=1, decisions=[], findings=[dict(id="F1", severity="HIGH", status="open", problem=p, run=f"pr{n}-a", reviewer="opus55")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/pr$n.json" "$n" "$p"; done
+$DP --report --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
+sec "Open items for the DAT" | grep -qF "pr-thing" && sec Review | grep -qF "| pr7-a | opus55 | 0 | 1 | 0 | 0 |" && ! grep -qF "other-thing" "$REP" \
+  && ok "4.11 the reviews of the ticket's PR are in the report, not those of a PR merged in with main" || { bad "4.11 PR ledger"; sec Review; grep -F "other-thing" "$REP"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

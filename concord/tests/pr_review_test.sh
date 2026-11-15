@@ -52,7 +52,7 @@ git init -q --bare -b main "$O" && git clone -q "$O" "$R" 2> /dev/null || { echo
   git checkout -qb feat-a; printf 'y = 2\n' > b.py; git add b.py && git commit -qm "feat-a: b" && git push -q origin feat-a
   git checkout -qb pr7; printf 'x = 2\n' > a.py; printf 'z = 3\n' > c.py; mkdir vendor; printf 'v = 4\n' > vendor/v.py
   git add -A && git commit -qm "pr7" && git push -q origin HEAD:refs/pull/7/head
-  git checkout -q main; git checkout -qb pr8; python3 -c "print('# ' + 'x' * 70000)" > big.py
+  git checkout -q main; git checkout -qb pr8; python3 -c "print('# ' + 'x' * 310000)" > big.py
   git add big.py && git commit -qm "pr8" && git push -q origin HEAD:refs/pull/8/head
   git checkout -q main; git branch -qD pr7 pr8 feat-a ) || { echo "setup failed: history"; exit 1; }
 H7=$(git -C "$O" rev-parse refs/pull/7/head); H8=$(git -C "$O" rev-parse refs/pull/8/head)
@@ -91,8 +91,8 @@ clean "files"
 C0=$(calls)
 $DP --review-pr 8 --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 D="$RUNS/$(rid)"
-[ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "over the 60,000 cap" && has "split the change, or use --packet for an Opus reviewer" \
-  && ok "over the 60k cap: no model call, exit 2 with the file groups (no segmented review)" \
+[ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "over the 300,000 cap" && has "split the change, or use --packet for an Opus reviewer" \
+  && ok "over the 300k cap: no model call, exit 2 with the file groups (no segmented review)" \
   || { bad "cap rc=$RC calls $C0 -> $(calls)"; tail -4 "$T/out.txt"; }
 C0=$(calls)
 clean "cap"

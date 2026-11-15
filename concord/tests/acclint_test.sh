@@ -94,11 +94,8 @@ printf '%s\n' 'vacuous on empty input: grep -c x f | grep -qx 0' 'vacuous on emp
   'string compare of wc output: test "$(wc -l < f)" = 7' 'not run (no backticks): bash tests/x.sh' \
   'names a missing file outside Files: tests/nothere.sh' 'vacuous on empty input: grep -c x concord/nothere.md | grep -qx 0' \
   'names a missing file outside Files: concord/nothere.md' > "$T/want.txt"
-[ $RC -eq 0 ] && has "DRY RUN LINT" && ok "A.1 dry-run lint exits 0" || bad "A.1 dry-run lint rc=$RC"
-lint > "$T/got.txt"; diff -u "$T/want.txt" "$T/got.txt" > "$T/diff.txt" && ok "A.2 seven lint lines: plan order, two rules per command, one line per missing path" \
+lint > "$T/got.txt"; [ $RC -eq 0 ] && diff -u "$T/want.txt" "$T/got.txt" > "$T/diff.txt" && ok "A.2 exit 0, seven lint lines: plan order, two rules per command, one line per missing path" \
   || { bad "A.2 lint lines differ"; cat "$T/diff.txt"; }
-L1=$(last "^ACCEPTANCE LINT"); L2=$(first "^DRY RUN LINT")
-[ -n "$L1" ] && [ -n "$L2" ] && [ "$L1" -lt "$L2" ] && ok "A.3 lint lines come before DRY RUN LINT" || bad "A.3 order: last lint line ${L1:-none}, DRY RUN LINT ${L2:-none}"
 $DP --lint 5 --dry-run --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1
 [ "$(lint)" = "vacuous on empty input: grep -c x f | grep -qx 0" ] && ok "A.4 an inline Acceptance: command is linted" || { bad "A.4 inline Acceptance: not linted"; lint; }
 printf '# Plan: Porting the parser\n## Phase 1 - p1\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n' > "$T/P.md"; $DP --lint 1 --dry-run --via qwen --model fake/m --plan "$T/P.md" --repo "$R" > "$T/out.txt" 2>&1
@@ -108,19 +105,26 @@ fi
 
 if sel B; then echo "== B. clean block, no lines"
 $DP --lint 3 --dry-run --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "ACCEPTANCE LINT" && ok "B.1 clean block: no lint line (Files entry/dir, ./ path, globs, redirections, VAR=, ::, sed, -c code, wc pipe, continuation)" \
+[ $RC -eq 0 ] && ! has "ACCEPTANCE LINT" && ok "B.1 clean block: no lint line (Files entry/dir, ./ path, globs, redirections, VAR=, ::, sed, -c code, wc pipe, continuation)" \
   || { bad "B.1 clean block rc=$RC"; lint; }
 $DP --lint 4 --dry-run --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "ACCEPTANCE LINT" && ok "B.2 no Acceptance block: no lint line" || bad "B.2 no block rc=$RC"
+[ $RC -eq 0 ] && ! has "ACCEPTANCE LINT" && ok "B.2 no Acceptance block: no lint line" || bad "B.2 no block rc=$RC"
 fi
 
-if sel C; then echo "== C. lint lines with a model run and without one"
-FAKE_ACTIONS="echo 'QUESTIONS: none'" $DP --lint 2 --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>/dev/null; RC=$?
-L1=$(last "^ACCEPTANCE LINT"); L2=$(first "^LINT ")
-[ $RC -eq 0 ] && [ "$(nlint)" = 7 ] && [ -n "$L1" ] && [ -n "$L2" ] && [ "$L1" -lt "$L2" ] && has "QUESTIONS: none" \
-  && ok "C.1 model lint: seven lines on stdout before the model body" || { bad "C.1 model lint rc=$RC lines $(nlint) L1=${L1:-none} L2=${L2:-none}"; head -12 "$T/out.txt"; }
-$DP --lint 2 claude --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 3 ] && [ "$(nlint)" = 7 ] && ok "C.2 refused model (exit 3): lint lines still printed before the exit" || bad "C.2 rc=$RC lines $(nlint)"
+if sel C; then echo "== C. no model call; Tests: and Cases: lint lines; a Cases: file edit blocks PASS (2026-11-15, kit-flow)"
+C0=$(calls); $DP --lint 2 --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(calls)" = "$C0" ] && [ "$(nlint)" = 7 ] && has 'PLAN LINT: no `Tests:` line' \
+  && ok "C.1 --lint calls no model, prints its seven lines and the missing Tests: line" || { bad "C.1 rc=$RC calls $C0 -> $(calls) lines $(nlint)"; head -12 "$T/out.txt"; }
+printf 'Cases: cases.md\n' > "$T/concord/repo-notes/repo.md"
+( cd "$R" && printf 'case 1\n' > cases.md && git add cases.md && git commit -qm cases ) > /dev/null 2>&1
+printf '# Plan\nTests: +1/-0 lines, net <= +1\n## Phase 1 - p1\nExecutor: deepseek-flash\nFiles: a.py, cases.md\nAcceptance:\n- `grep -q 2 a.py`\n## Phase 2 - p2\nExecutor: planner\nFiles: cases.md\nAcceptance:\n- `true`\n' > "$R/PLAN_C.md"
+$DP --lint 1 --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1; $DP --lint 2 --plan PLAN_C.md --repo "$R" > "$T/out2.txt" 2>&1
+has "PLAN LINT: phase 1 lists the Cases file cases.md" && ! has 'no `Tests:` line' && ! grep -q "lists the Cases file" "$T/out2.txt" \
+  && ok "C.2 an executor phase listing the Cases file is linted; a planner phase may list it" || { bad "C.2"; cat "$T/out.txt" "$T/out2.txt"; }
+FAKE_ACTIONS='echo "x = 2" > a.py; echo "case 2" >> cases.md' $DP 1 --plan PLAN_C.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+RID=$(rid); has "ACCEPTANCE FILES CHANGED: cases.md (modified)" && { $DP --verdict "$RID" PASS --repo "$R" > /dev/null 2>&1; [ $? -eq 7 ]; } \
+  && ok "C.3 an executor edit of the Cases file is an acceptance change: PASS refused (exit 7)" || { bad "C.3"; grep -i "acceptance" "$T/out.txt"; }
+rm -f "$T/concord/repo-notes/repo.md"
 fi
 
 if sel D; then echo "== D. planner edits its plan inside a planner run"
@@ -157,7 +161,7 @@ C0=$(calls); review "$RID" --files 'nothing/*' --exclude zz; RC=$?
 [ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "no changed file matches --files nothing/* --exclude zz" && ok "E.3 no match: exit 2, message names both flags, no model call" || { bad "E.3 rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --review "$RID" --packet --files 'docs/*' --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET //p' "$T/out.txt" | head -1)
 [ $RC -eq 0 ] && [ -f "$PK" ] && grep -q '^+more$' "$PK" && ! grep -q '^+# r$' "$PK" && ok "E.4 --packet --files: packet holds the docs diff only" || { bad "E.4 packet rc=$RC"; tail -2 "$T/out.txt"; }
-run "python3 -c \"open('big.py','w').write(''.join('v_%04d = %r\\\\n' % (i, 'x' * 30) for i in range(2000)))\"; echo y > docs/y.md"; BIG=$(rid)
+run "python3 -c \"open('big.py','w').write(''.join('v_%04d = %r\\\\n' % (i, 'x' * 30) for i in range(8000)))\"; echo y > docs/y.md"; BIG=$(rid)
 C0=$(calls); review "$BIG"; RC=$?
 [ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "split the change, or use --packet for an Opus reviewer" && has "--files GLOB" \
   && ok "E.5 over the cap without --files: refusal unchanged" || { bad "E.5 rc=$RC"; tail -3 "$T/out.txt"; }

@@ -192,5 +192,24 @@ FAKE_ACTIONS=true $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline
 [ $RC -eq 0 ] && python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1]))[sys.argv[2]]; sys.exit(e["plan"] != "PLAN_F.md" or e["elapsed"] < 300)' "$F/.git/concord/drift.json" "$F" \
   && ok "a gated run of the fork's plan takes over the removed fork's entry (its time carries over)" || { bad "gated takeover rc=$RC"; tail -2 "$T/out.txt"; }
 
+echo "== drift against the stored --estimate ETA; ## Passes edits keep the APPROVE; --report stops the clock (2026-11-15, kit-flow)"
+K="$T/k"; mkdir -p "$K" && ( cd "$K" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > a.py; git add -A && git commit -qm init
+  { printf '# Plan\nTier: M\nSize: ~400 lines\nETA: 600 min\n\n'; phase 1 '' 'true'; printf '\n## Passes\nPhase 1 deepseek-flash\n'; } > PLAN_K.md ) \
+  || { echo "setup failed"; exit 1; }
+printf 'VERDICT: APPROVE\n' > "$T/vk.txt"; $DP --plan-verdict "$T/vk.txt" --plan PLAN_K.md --repo "$K" > /dev/null 2>&1
+krun(){ FAKE_ACTIONS=true $DP 1 --plan PLAN_K.md --via qwen --model fake/m --no-baseline --repo "$K" > "$T/out.txt" 2>&1; }
+printf 'Phase 1 deepseek-flash 9 min\nETA: 29 min\n' >> "$K/PLAN_K.md"; krun; RC=$?
+[ $RC -eq 0 ] && ok "an edit of ## Passes (filled by --estimate) keeps the APPROVE" || { bad "passes edit rc=$RC"; tail -2 "$T/out.txt"; }
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["estimates"]={"PLAN_K.md": 10}; json.dump(d,open(p,"w"))' "$K/.git/concord/drift.json"
+clock 960 0 "$K"; $DP --drift --plan PLAN_K.md --repo "$K" > /dev/null 2>&1; $DP --drift --plan PLAN_K.md --repo "$K" > "$T/out.txt" 2>&1
+has "time 16/10 min" && has "DRIFT BLOCK" && ok "drift measures time against the stored estimate, not the plan's ETA: line; the estimate survives a save" \
+  || { bad "estimate drift"; tail -2 "$T/out.txt"; }
+el(){ python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["elapsed"])' "$K/.git/concord/drift.json" "$K"; }
+python3 -I -c 'import json,sys; p,r=sys.argv[1:3]; d=json.load(open(p)); d[r]["reported"]=1; json.dump(d,open(p,"w"))' "$K/.git/concord/drift.json" "$K"
+E0=$(el); krun; RC=$?; $DP --drift --plan PLAN_K.md --repo "$K" > "$T/d.txt" 2>&1; E1=$(el)
+[ $RC -eq 0 ] && grep -q "DRIFT OFF" "$T/d.txt" && [ "$E0" = "$E1" ] && ok "a reported checkout is not gated and its drift clock stops" \
+  || { bad "reported rc=$RC elapsed $E0 -> $E1"; cat "$T/d.txt"; }
+
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
