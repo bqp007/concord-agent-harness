@@ -4,7 +4,8 @@
 always, the languages seen, `ml` for model, eval or data paths, `tests` when only tests changed (`--checklist a,b`
 overrides). Reviewers answer one REVIEW-JSON block, severities BLOCKER, HIGH, MEDIUM or NOTE. The first three need a
 reproduction from a real input source and a line inside the diff, or the dispatcher makes them a NOTE. Findings get
-ledger ids (F1, F2, ...) that bind later reviewers of the ticket or PR.
+ledger ids (F1, F2, ...) that bind later reviewers of the ticket or PR. The session fixes BLOCKER and HIGH, and a MEDIUM
+only when its reproduction comes from a real flow; the other findings go to the test report for the owner's DAT.
 
 ## any
 Anchor every finding: name the caller, input or line that makes it real, else it is a NOTE. One defect in several places
@@ -74,3 +75,5 @@ is ONE finding at its first instance in the diff, listing every instance (path:l
 - Specific assertions (values, not truthiness); no golden copied from the implementation's output.
 - Behaviour, not structure: no asserts on call order, private names or formatting.
 - No dependence on time, network, ordering or shared state; fast enough for every attempt.
+- Test bloat: a new test or case where an existing one covers the behavior (extend or merge it instead), setup or
+  asserts duplicated across the tests the change touched, or more than one new test for one finding.

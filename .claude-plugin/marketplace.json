@@ -10,7 +10,7 @@
       "name": "concord",
       "source": "./adapters/claude-code",
       "description": "Keep control of AI coding agents. Each task becomes a short plan you approve; low-cost models implement it inside a fixed file scope, against tests that must fail first; an independent reviewer checks each change once at its risk level; every verdict is recorded with its cause. You commit; Concord never does. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
-      "version": "2.2.0",
+      "version": "2.3.0",
       "category": "development"
     }
   ]

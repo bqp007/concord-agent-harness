@@ -9,14 +9,14 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: lean STE (tables); commands, plan
 - Model: the request, else `Executor:`, else models.conf `default`, checked with `concord.py --resolve "<name>"`; ask when unknown or ambiguous.
 
 ## 2. Run in passes, not as a chain (CLAUDE.md, `/concord:plan-then-delegate` step 3)
-- An executor phase gets its own fork: `python3 ~/.claude/concord/wt.py fork <TICKET> <N>`, run and checked there with `--repo <fork>`; after PASS, `wt.py join <TICKET> <N>` applies its changes back and removes the fork. Planner phases run in the ticket's worktree meanwhile; reviews, lints and suites take no lock.
+- The run lock covers each run's `Files:`: executor phases with disjoint `Files:` run in the ticket's worktree at once; a run with no `Files:`, or one that shares a file with a running phase, is refused. An open `--begin` run blocks every other run in its checkout, so executor phases that run beside a planner phase, or that share a file, get a fork: `python3 ~/.claude/concord/wt.py fork <TICKET> <N>`, run and checked there with `--repo <fork>`; after PASS, `wt.py join <TICKET> <N>` applies its changes back and removes the fork. Reviews, lints and suites take no lock.
 - `planner` phase: `--begin <phase>` first (it starts the drift clock and passes the gates), write it, re-run its acceptance, `--end <run-id>`.
 - Claude subagent: `--begin <phase> --label <name>`, the subagent (plan path, phase, feedback), `--end <run-id>`.
 - OpenCode: `concord.py <model> <phase> --plan <F> [--extra=<feedback>]`, background, outside the sandbox; red-run exit 6 (acceptance already green): TEST_DEFECT, or mark it `(characterization)`.
 
 ## 3. Check (per pass, only the phases it changed)
 - Failing report lines: OUT OF SCOPE (source), DELETED, STAGED BY EXECUTOR, GIT INTERNALS CHANGED, PLAN FILE MODIFIED, HEAD MOVED, BRANCH CHANGED, DEPENDENCIES CHANGED, CHARACTERIZATION CHANGED, ACCEPTANCE FILES CHANGED, OUTSIDE CHECKOUT CHANGED by the executor, STATIC NEW, ACCEPTANCE AFTER RUN: 0/N, RESOURCE LIMIT (the line names the cause). `EXECUTOR BLOCKED` → FAIL BLOCKED; `PROVIDER LIMIT` or `PROVIDER BLOCKED` → FAIL PROVIDER, then the next model; on a review (exit 9) nothing is recorded, so the next model reviews; an OpenCode refusal of an unlisted file without a BLOCKED line → PLAN_GAP.
-- Re-run the report's acceptance (a flip on rerun: FLAKY), read `git diff HEAD -- <the phase's files>`: out-of-scope source, or tests an implementing phase touched, fail it. No full suite and no review before §5.
+- Trust the report's `acceptance after run` line (the dispatcher re-ran the acceptance); re-run only to settle a doubt (a flip on rerun: FLAKY). Read `git diff HEAD -- <the phase's files>`: out-of-scope source, or tests an implementing phase touched, fail it. No full suite and no review before §5.
 - PASS when acceptance passes and the diff matches the phase: `--verdict <run> PASS`.
 
 ## 4. FAIL
@@ -28,19 +28,22 @@ Rules: CLAUDE.md. Arguments: $ARGUMENTS. Chat: lean STE (tables); commands, plan
 - A defect found after the gate (a later review, a PR comment, production) is fixed with a test or lint that fails on the old code, never a REVIEW.md line.
 
 ## 5. Full revision
-- After the last pass, at once: every suite (one checking the checkout itself, such as `tests/demo_test.sh`, alone) and one review of the whole diff: the PR gate (§6), else each implementing run's review.
-- Tier = the phase's Risk (default medium), raised for matching non-test files by a repo-notes `Risk floor <tier>: <globs>` line. low: `concord.py --review <run>` (flash), approve-only: only BLOCKER and HIGH are kept. medium, high: `--review <run> --packet`, a fresh `concord:reviewer-opus55` Agent per round given your acceptance results, `--review-record` its answer with `--tokens <the Agent's total_tokens>`. Over the 60,000-character cap: `--files <globs>` per group.
+- After the last pass: consolidate the tests the ticket touched (one test per behavior, within the plan's `Tests:` line; only this session merges or deletes tests), then at once every suite (one checking the checkout itself, such as `tests/demo_test.sh`, alone) and the review of the whole diff: the PR gate (§6), else each implementing run's review.
+- Review loop: a full review → fixes → a delta review of the fix → a full review of the new head; stop at 0 BLOCKER and 0 HIGH, at most 3 full reviews. Fix BLOCKER and HIGH, and a MEDIUM only when it occurs in a real flow; the other MEDIUMs and the NOTEs go to the test report (§7).
+- Tier = the phase's Risk (default medium), raised for matching non-test files by a repo-notes `Risk floor <tier>: <globs>` line. low: `concord.py --review <run>` (flash), approve-only: only BLOCKER and HIGH are kept. medium, high: `--review <run> --packet`, a fresh `concord:reviewer-opus55` Agent per round given your acceptance results, `--review-record` its answer with `--tokens <the Agent's total_tokens>`. Over the 300,000-character cap: `--files <globs>` per group.
 - Unchanged files cleared at that tier or higher print `COVERED` (`--force-review` overrides).
 - Review a fork (`wt.py fork <TICKET> r`); Monitor `<packet>.stream`, fix each streamed finding in the ticket worktree as it lands (small: here, else its executor, `--extra`); one delta review after the final verdict. Every delta review runs on flash, else on the `concord:reviewer-delta` agent, never on Opus.
 
 ## 6. PR gate
 - Review the full diff (`base...head`; stacked: against the parent branch) on its current head at the PR's tier, the riskiest content's: high for shipped product code, verdict, score, threshold or licence paths, exporters, untrusted input, security, release config; medium for reference, data and eval pipelines, behaviour-pinning fixtures; low for tooling, scripts, docs.
 - `--review-pr <PR> --tier <T>` runs flash; `--packet` for `concord:reviewer-opus55`. Over the cap: one reviewer per file group (`--files`), in parallel, together covering every PR file.
-- After a fix commit: `--review-pr <PR> --delta`; a fix rewriting over half of an existing file (refused) or changing the design needs a full review, one of only tests, docs or comments runs at low.
+- After a fix commit: `--review-pr <PR> --delta`; a fix rewriting over half of an existing file (refused) or changing the design needs a full review, one of only tests, docs or comments runs at low. A full review of a 4th head is refused (exit 8) without `--user-approved "<their words>"`; more reviews of a head already reviewed (file groups, a second reviewer) finish its round.
 - `--pr-status <PR>` must print `CURRENT HEAD <sha>: REVIEWED`; it names the files no review covered and the missing reviewer, and lists `--exclude`d files. A review counts at most at its reviewer's rank (flash low, `concord:reviewer-opus55` high and below); a lesser one needs `--user-approved "<their words>"`.
 - Others' PR: findings go to the author; another engineer approves; never merge.
 
-## 7. Report
-Per phase: executor, model, billing, risk, verdict and cause, acceptance evidence, checks skipped, review verdict, findings fixed and left, files.
+## 7. Report, DAT and KB
+- Per phase: executor, model, billing, risk, verdict and cause, acceptance evidence, checks skipped, review verdict, findings fixed and left, files.
+- `concord.py --report --plan <PLAN>` writes `REPORT_<ticket>.md` in the runs root (`.git/concord/reports/`) from recorded data: phases, the plan's Test plan, test lines against `Tests:`, reviews, open items for the DAT (with the findings never adjudicated) and time against the ETA; it stops the drift clock. Give the user its path for the DAT; DAT fixes take the small-fix path (scoped tests, one cheap delta review).
+- KB step: replace stale lines in the repo notes and memory (never append a duplicate), run the repo notes' `KB command:` if one is set, and merge the approved case diff into the `Cases:` file (executor phases may not list it).
 
-Lessons: the moment you learn something every session or executor should apply, record it: `concord.py --lesson "<rule>" --tag plan|exec` (plan: open sessions see it on their next prompt through the `--lessons-hook` UserPromptSubmit hook; exec: every executor task carries it). The weekly rules review folds lessons into the docs or a lint and removes them.
+Lessons: the moment you learn something every session or executor should apply, record it: `concord.py --lesson "<rule>" --tag plan|exec` (plan: open sessions see it on their next prompt through the `--lessons-hook` UserPromptSubmit hook; exec: every executor task carries it). At most 15 live lessons: a 16th is refused (exit 8), so fold or retire one first. The weekly rules review folds lessons into the docs or a lint and removes them.
