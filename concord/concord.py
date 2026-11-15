@@ -2254,11 +2254,11 @@ def finish_run(run_dir, rc, secs=None):
         if not st.get("acceptance_capped"):
             known = set(st["acceptance_hashes"])
             for p in acceptance_files(repo, st.get("acceptance") or [], None, exclude=files):
-                if p not in known:
+                if p not in known and not in_scope(p, concurrent):   # added in a concurrent run's Files: its work
                     acceptance_changed.append((p, "added"))
-        # A concurrent run's change under an acceptance path is that run's work, as above.
-        acceptance_changed = [(p, how) for p, how in acceptance_changed
-                              if in_scope(p, files) or not in_scope(p, concurrent)]
+        # A changed file that was there at the start stays (fail closed); say when a concurrent run may have changed it.
+        acceptance_changed = [(p, how + ("; in a concurrent run's Files: re-run this phase once that run ends"
+                                         if in_scope(p, concurrent) else "")) for p, how in acceptance_changed]
         if oversize:
             acceptance_oversize_note = (f"acceptance files over {acceptance_max} bytes compared by size and "
                                         f"mtime: " + ", ".join(oversize))
