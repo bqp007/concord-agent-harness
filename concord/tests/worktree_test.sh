@@ -70,7 +70,7 @@ touch "$T/release"; wait $P1; R1=$?
   && ok "second run in T1 blocked (same checkout), naming the shared file" || { bad "same-checkout block rc=$R4"; tail -3 "$T/r4.txt"; }
 grep "OUT OF SCOPE" "$T/r3.txt" | grep -qv ": none" && bad "main run flagged out-of-scope files: $(grep -i 'out of scope' "$T/r3.txt")" || ok "main run saw no worktree files"
 echo "== lock per set of files: disjoint runs share a checkout (2026-11-15, kit-flow)"
-printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"
+printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py b.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release2' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
   $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f1.txt" 2>&1 & PF=$!
 i=0; until [ -e "$L1" ] || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done
@@ -82,8 +82,9 @@ touch "$T/release2"; wait $PF; F1=$?
 [ $F3 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/f3.txt" \
   && ok "a run with no Files is refused while another runs (exit 2)" || { bad "no-Files run rc=$F3"; tail -3 "$T/f3.txt"; }
 [ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 2 lines (+2 -0)" "$T/f1.txt" \
-  && ok "the long run leaves the concurrent run's b.py and deleted z.py out of OUT OF SCOPE, DELETED and its diff size" \
-  || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|diff size" "$T/f1.txt"; }
+  && ! grep -q "^ACCEPTANCE FILES CHANGED" "$T/f1.txt" \
+  && ok "the long run leaves the concurrent run's b.py and deleted z.py out of OUT OF SCOPE, DELETED, ACCEPTANCE FILES CHANGED and its diff size" \
+  || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|acceptance|diff size" "$T/f1.txt"; }
 [ ! -e "$L1" ] && ok "the lock file is gone once both runs ended" || bad "lock file left: $(cat "$L1" 2>&1)"
 rm -f "$W1/b.py" "$W1/PLAN_F.md"
 echo "== 'last' is per checkout"

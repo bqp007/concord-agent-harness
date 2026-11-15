@@ -2256,6 +2256,9 @@ def finish_run(run_dir, rc, secs=None):
             for p in acceptance_files(repo, st.get("acceptance") or [], None, exclude=files):
                 if p not in known:
                     acceptance_changed.append((p, "added"))
+        # A concurrent run's change under an acceptance path is that run's work, as above.
+        acceptance_changed = [(p, how) for p, how in acceptance_changed
+                              if in_scope(p, files) or not in_scope(p, concurrent)]
         if oversize:
             acceptance_oversize_note = (f"acceptance files over {acceptance_max} bytes compared by size and "
                                         f"mtime: " + ", ".join(oversize))
