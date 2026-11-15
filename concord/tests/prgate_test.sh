@@ -4,6 +4,8 @@
 # recorded before the fix with a refusal in its run's log is not counted. (2) A model review is named by the model
 # that ran and kept per reviewer and file set, so two models or two --files groups at one head both count. (3) A
 # head is REVIEWED at tier T only when reviews crediting at least T cover every PR file (--exclude'd files listed).
+# (5) A full review of a 4th head of a PR is refused (exit 8) unless --user-approved; more reviews of a head
+# already reviewed finish that round.
 # No network: fake gh, fake qwen reviewer and executor, a local bare repository as the remote.
 # Run: bash ~/.claude/concord/tests/prgate_test.sh   (exit 0 = every check passed)
 set -u
@@ -154,5 +156,18 @@ $DP --review-pr me/kit#61 --via qwen --model fake/m --tier low --repo "$C" > "$T
 $DP --pr-status me/kit#61 --repo "$C" > "$T/out.txt" 2>&1
 [ $RC -eq 0 ] && has "CURRENT HEAD ${H61:0:8}: REVIEWED at low" && ok "4 owner/repo#N fetches from the remote that names it, not origin" \
   || { bad "4 any remote rc=$RC"; tail -3 "$T/out.txt"; }
+
+echo "== 5 at most three full review rounds (heads) per PR (2026-11-15, kit-flow)"
+git -C "$C" remote set-url origin "$O" || { echo "setup failed: origin"; exit 1; }
+for v in 62 621 622; do newpr 62 a.py "a = $v"; opus 62 high concord:reviewer-opus55; done
+$DP --review-pr 62 --packet --tier high --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && ! has "REFUSED" && ok "5 another full review of a head already reviewed is not a new round" \
+  || { bad "5 same head rc=$RC"; tail -3 "$T/out.txt"; }
+newpr 62 a.py 'a = 623'
+$DP --review-pr 62 --packet --tier high --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 8 ] && has "REFUSED: PR 62 already had 3 full review rounds" && ! grep -q "^PACKET" "$T/out.txt" \
+  && ok "5 a 4th head's full review is refused (exit 8), no packet" || { bad "5 cap rc=$RC"; tail -3 "$T/out.txt"; }
+$DP --review-pr 62 --packet --tier high --user-approved "one more" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && grep -q "^PACKET" "$T/out.txt" && ok "5 --user-approved lifts the cap" || { bad "5 approved rc=$RC"; tail -3 "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

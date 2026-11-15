@@ -40,12 +40,12 @@ RID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 echo "== no segmented reviews"
 $DP --review "$RID" --segment --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && has "unrecognized arguments: --segment" && ok "--segment is gone (argparse refuses it)" || { bad "--segment rc=$RC"; tail -2 "$T/out.txt"; }
-FAKE_ACTIONS="python3 -c \"open('big.py','w').write(''.join('v_%04d = %r\\\\n' % (i, 'x' * 30) for i in range(2000)))\"; printf 'x = 2\\n' > a.py" \
+FAKE_ACTIONS="python3 -c \"open('big.py','w').write(''.join('v_%04d = %r\\\\n' % (i, 'x' * 30) for i in range(8000)))\"; printf 'x = 2\\n' > a.py" \
   $DP 1 --plan PLAN_S.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
 BIG=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 C0=$(calls)
 $DP --review "$BIG" --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "over the 60,000 cap" && has "big.py" && has "split the change, or use --packet for an Opus reviewer" \
+[ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "over the 300,000 cap" && has "big.py" && has "split the change, or use --packet for an Opus reviewer" \
   && ok "phase review over the cap: exit 2, file groups, no model call" || { bad "over-cap phase review rc=$RC calls $C0->$(calls)"; tail -4 "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"

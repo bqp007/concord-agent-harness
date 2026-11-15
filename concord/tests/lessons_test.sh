@@ -27,5 +27,7 @@ run --lesson "[exec] wt.py flags are planner-only" >/dev/null
 check tag-at-start 'python3 -c "import sys;sys.path.insert(0,\"$T/c\");import concord;assert not any(\"planner-only\" in l for _,l in concord.lesson_lines(\"exec\"))"'
 check bad-json-exit0 'echo nope | python3 "$T/c/concord.py" --lessons-hook >/dev/null; [ $? = 0 ]'
 check exec-in-task 'python3 -c "import sys;sys.path.insert(0,\"$T/c\");import concord;t=concord.build_task(\"$T/r\",\"P.md\",1,\"do\",\"\");assert \"Lessons (current; binding):\" in t and \"name exact checks\" in t and \"plan only\" not in t"'
+python3 -c 'import sys; p=sys.argv[1]; n=sum(1 for l in open(p) if l[:1]=="L"); open(p,"a").write("".join(f"L{90+i} 2026-11-15 [plan] filler {i}\n" for i in range(15-n)))' "$T/c/LESSONS.md"
+check cap-16th 'out=$(run --lesson "one too many" 2>&1); rc=$?; [ $rc = 8 ] && echo "$out" | grep -q "15 live lessons" && ! grep -q "one too many" "$T/c/LESSONS.md"'
 echo "passed $P, failed $F"
 [ "$F" = 0 ]

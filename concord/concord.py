@@ -5,7 +5,7 @@ Usage:
   concord.py [MODEL] PHASE [--plan PLAN.md] [--via EXECUTOR] [--model ID] [--mode full|edit]
               [--wall 30m] [--repo DIR] [--extra TEXT] [--no-ignored] [--no-baseline] [--force] [--dry-run]
               [--user-approved QUOTE]
-  concord.py --lint PHASE [MODEL] [--plan PLAN.md] [--repo DIR]           # read-only pre-flight: questions a cheap model would need answered
+  concord.py --lint PHASE [--plan PLAN.md] [--repo DIR]                   # zero-token pre-flight: ACCEPTANCE LINT and PLAN LINT lines
   concord.py --review RUN_ID|last [MODEL] [--checklist a,b] [--repo DIR] [--files GLOBS] [--exclude GLOBS]
                                               # read-only review of a run's diff against REVIEW.md checklists
   concord.py --review RUN_ID|last --packet                                # prompt file for a Claude reviewer subagent (subscription)
@@ -20,6 +20,8 @@ Usage:
                                               # before a Claude implementer / planner run
   concord.py --end RUN_ID|last [--repo DIR]                                # after it: same report as a CLI run
   concord.py --abort RUN_ID|last [--repo DIR]
+  concord.py --estimate [--plan PLAN.md] [--repo DIR]                     # phase minutes, lanes, critical path, ETA from the run ledger
+  concord.py --report [--plan PLAN.md] [--repo DIR]                       # test report for the owner's acceptance test; stops the drift clock
   concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED] [--note TEXT]
               [--tokens N]
   concord.py --resolve "MODEL WORDS"
@@ -65,6 +67,7 @@ import glob
 import hashlib
 import io
 import json
+import math
 import os
 import random
 import re
@@ -251,25 +254,10 @@ GENERATED_GLOBS = (
 PROTECTED_GLOBS = (".env", ".env.*", ".netrc", ".npmrc", ".pypirc", "*.pem", "*.key", "*.p12", "*.pfx",
                    "id_rsa*", "id_ed25519*", "*secret*", "*credential*")
 
-LINT_TASK = """You are reviewing ONE phase of an implementation plan BEFORE anyone implements it.
-Do not modify any file. Read the files the phase lists (and only what you need around them).
-Answer in this exact structure, tersely:
-
-QUESTIONS: numbered questions you would need answered to implement this phase without guessing
-  (missing inputs/outputs, undefined behaviour, names or paths that do not exist, conflicting steps).
-  Write "none" if there are none.
-FILES: completeness of the `Files:` list. Follow the callers, callees, configs and tests of the
-  listed files: name any file that must also change but is not listed, and any listed file that needs
-  no change.
-  Write "complete" if the list is right.
-RISKS: places where the steps conflict with the current code, or where the acceptance commands
-  would not detect a wrong implementation. Write "none" if there are none.
-VERDICT: READY | NEEDS ANSWERS
-"""
-
 # --review: a cheap model reads the finished diff against the REVIEW.md checklists (read-only).
 REVIEW_FILE = HERE / "REVIEW.md"
-REVIEW_DIFF_CAP = 60_000
+REVIEW_DIFF_CAP = 300_000
+PR_FULL_REVIEW_CAP = 3       # full review rounds (heads) per PR; a 4th head needs --user-approved (deltas not counted)
 REWRITE_MIN_LINES = 40
 FUNC_CONTEXT_CAP = 12_000
 DOC_SUFFIXES = (".md", ".rst", ".adoc")
@@ -581,7 +569,7 @@ def file_hash(path):
 PHASE_HEAD = re.compile(r"^(#{1,6})\s*Phase\s+(\d+(?:\.\d+)*)\b.*$", re.I | re.M)
 PHASE_WORD = re.compile(r"(\d+)(?:\.([1-9]\d*))?")
 FIELD_NAMES = ("Executor|Purpose|Risk|Files|Context|Interfaces|Notes|Inputs|Steps|Examples?|Edge cases|Decisions|"
-               "Budget|Baseline|Characterize|Acceptance|Out of scope")
+               "Budget|Baseline|Characterize|Acceptance|Out of scope|Size|After")
 FIELD = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(" + FIELD_NAMES + r")(?:(?<=inputs)\s+(?:and\s[^:*\n]{1,40}|"
                    r"\([^():*\n]{1,40}\)))?\s*\**\s*:", re.I)
 
@@ -862,6 +850,13 @@ def repo_notes(repo):
     if len(text) > NOTES_CAP_CHARS:
         text = text[:NOTES_CAP_CHARS] + "\n[notes truncated: keep repo-notes under 4000 characters]"
     return text
+
+
+def repo_cases(repo):
+    """The automation test-case file the repo notes name (`Cases: <path>`), repo-relative, or None. Only the session
+    changes it (the KB step): start_state hashes it with the acceptance files, so an executor edit blocks PASS."""
+    m = re.search(r"^\s*(?:[-*]\s+)?Cases:\s*`?([^`\s]+)`?", repo_notes(repo), re.M)
+    return m.group(1) if m else None
 
 
 def notes_path(repo, plan_rel):
@@ -1585,11 +1580,41 @@ def pid_alive(pid, group=False):
     return True
 
 
-def lock_holder(lock):
+def lock_holders(lock):
+    """The holders of <git-dir>/concord.lock. A file written before 2026-11-15 holds one holder and reads as
+    one holder with no files."""
     try:
-        return json.loads(lock.read_text())
+        data = json.loads(lock.read_text())
     except (OSError, ValueError):
-        return {}
+        return []
+    if not isinstance(data, dict):
+        return []
+    if isinstance(data.get("holders"), list):
+        return [h for h in data["holders"] if isinstance(h, dict)]
+    if not data.get("run"):
+        return []
+    return [{"pid": data.get("pid"), "child": data.get("child"), "run": data.get("run"),
+             "manual": bool(data.get("manual")), "repo": data.get("repo"), "files": [], "shared": []}]
+
+
+@contextlib.contextmanager
+def lock_guard(lock):
+    """The mutex beside the lock file: every read and write of the lock happens under its flock. The mutex
+    file stays after the lock file goes."""
+    fd = os.open(lock.with_name(lock.name + ".mutex"), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield lock_holders(lock)              # read under the mutex, so a concurrent write is never half seen
+    finally:
+        os.close(fd)                          # the close releases the flock too
+
+
+def write_holders(lock, holders):
+    """Store the holders (the caller holds the mutex); the file is deleted when the last holder leaves."""
+    if holders:
+        lock.write_text(json.dumps({"holders": holders}))
+    else:
+        lock.unlink(missing_ok=True)
 
 
 def lock_file(root):
@@ -1606,56 +1631,127 @@ def is_main_checkout(repo):
     return gd == cd
 
 
-def check_held(lock):
-    held = lock_holder(lock)
-    if held.get("manual"):
-        die(f"run {held.get('run')} is still open (started with --begin); finish it with "
-            f"--end {held.get('run')} or --abort {held.get('run')}")
-    if (held.get("pid") and pid_alive(held["pid"])) or \
-       (held.get("child") and pid_alive(held["child"], group=True)):
-        die(f"another delegated run is active in this checkout ({held.get('run')}); edits would collide")
+def lock_alive(h):
+    """True while the holder's process or its harness process group runs. A manual (--begin) holder lives
+    until --end or --abort. A field that is not a pid counts as dead."""
+    if h.get("manual"):
+        return True
+    for key, group in (("pid", False), ("child", True)):
+        pid = h.get(key)
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and pid_alive(pid, group=group):
+            return True
     return False
 
 
-def acquire_lock(root, run_id, manual=False):
-    """Exclusive per-checkout lock. Tracks our pid and the harness process group; manual locks
-    (--begin) stay held until --end or --abort. The old shared lock (<git-common-dir>/concord/.lock,
-    written before 2026-10-15) is still honoured in the main checkout."""
+def lock_overlap(files, theirs):
+    """The first entry of another run's Files that this run also lists: an equal path, or in_scope either way."""
+    for q in theirs:
+        for p in files:
+            if p == q or in_scope(p, [q]) or in_scope(q, [p]):
+                return q
+    return None
+
+
+def check_held(lock):
+    """Refuse when the old shared lock (<git-common-dir>/concord/.lock, written before 2026-10-15) of a live
+    run is still held. That file has no Files, so it blocks every run."""
+    for h in lock_holders(lock):
+        if h.get("manual"):
+            die(f"run {h.get('run')} is still open (started with --begin); finish it with "
+                f"--end {h.get('run')} or --abort {h.get('run')}")
+        if lock_alive(h):
+            die(f"another delegated run is active in this checkout ({h.get('run')}); edits would collide")
+    return False
+
+
+def check_free(holders, files):
+    """Refuse this run when a live holder must block it: a manual (--begin) holder, a holder with no files, an
+    overlap with its Files, or no Files for this run beside a holder. The overlap message names the path."""
+    for h in holders:
+        if h.get("manual"):
+            die(f"run {h.get('run')} is still open (started with --begin); finish it with "
+                f"--end {h.get('run')} or --abort {h.get('run')}")
+    for h in holders:
+        theirs = h.get("files") or []
+        collide = f"another delegated run is active in this checkout ({h.get('run')}); edits would collide"
+        both = lock_overlap(files, theirs)
+        if not theirs:
+            die(f"{collide} (it lists no Files:)")
+        if not files:
+            die(f"{collide} (this run lists no Files:)")
+        if both:
+            die(f"{collide} (both list {both})")
+
+
+def acquire_lock(root, run_id, manual=False, files=()):
+    """Lock this run's Files: runs with disjoint Files share a checkout, and a manual (--begin) lock stays held
+    until --end or --abort. Dead non-manual holders are dropped, and each side records the other's Files as
+    `shared`, so a concurrent run's edits are not out of scope. The old shared lock
+    (<git-common-dir>/concord/.lock, written before 2026-10-15) is still honoured in the main checkout."""
     legacy = root / ".lock"
     lock = lock_file(root)
+    files = list(dict.fromkeys(f.rstrip("/") for f in files if f.rstrip("/")))
     if legacy != lock and legacy.exists() and (CURRENT_REPO is None or is_main_checkout(CURRENT_REPO)):
         check_held(legacy)
         legacy.unlink(missing_ok=True)
-    for _ in range(3):
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            check_held(lock)
-            lock.unlink(missing_ok=True)
-            continue
-        with os.fdopen(fd, "w") as fh:
-            json.dump({"pid": None if manual else os.getpid(), "child": None, "run": run_id,
-                       "manual": manual, "repo": str(CURRENT_REPO or "")}, fh)
-        return lock
-    die("could not acquire the run lock")
+    me = {"pid": None if manual else os.getpid(), "child": None, "run": run_id, "manual": manual,
+          "repo": str(CURRENT_REPO or ""), "files": files, "shared": []}
+    with lock_guard(lock) as holders:
+        holders = [h for h in holders if lock_alive(h)]        # dead non-manual holders are dropped
+        for h in holders:
+            h["files"], h["shared"] = list(h.get("files") or []), list(h.get("shared") or [])
+        check_free(holders, files)
+        for h in holders:
+            h["shared"] = sorted(set(h["shared"]) | set(files))
+            me["shared"] = sorted(set(me["shared"]) | set(h["files"]))
+        write_holders(lock, holders + [me])
+    return lock
 
 
-def record_child(lock, child_pid):
-    held = lock_holder(lock)
-    held["child"] = child_pid
-    lock.write_text(json.dumps(held))
+def record_child(root, run_id, pid):
+    """Record the harness's process group under the mutex, so a concurrent acquire cannot lose it."""
+    lock = lock_file(root)
+    if not lock.exists():
+        return
+    with lock_guard(lock) as holders:
+        for h in holders:
+            if h.get("run") == run_id:
+                h["child"] = pid
+        write_holders(lock, holders)
+
+
+def lock_shared(root, run_id):
+    """The Files of the runs that hold the lock beside `run_id`, as recorded on its holder ([] when it lists
+    none). `finish_run` keeps their paths out of OUT OF SCOPE."""
+    lock = lock_file(root)
+    if not lock.exists():
+        return []
+    with lock_guard(lock) as holders:
+        for h in holders:
+            if h.get("run") == run_id:
+                return list(h.get("shared") or [])
+    return []
 
 
 def release_lock(root, run_id=None):
+    """Release this run's holder (run_id), or every holder whose pid is this process (None). The other holders
+    keep their `shared` list. A legacy lock of another run is not ours to release."""
     for lock in dict.fromkeys([lock_file(root), root / ".lock"]):   # per-checkout lock, then a legacy one
-        held = lock_holder(lock)
-        if not held:
+        legacy = lock == root / ".lock"
+        if not lock.exists():
             continue
-        if run_id and held.get("run") not in (None, run_id):
-            if lock == root / ".lock":
-                continue                      # a legacy lock of another run: not ours to release
-            die(f"lock belongs to run {held.get('run')}, not {run_id}")
-        lock.unlink(missing_ok=True)
+        with lock_guard(lock) as holders:
+            if legacy:
+                if run_id and any(h.get("run") not in (None, run_id) for h in holders):
+                    continue
+                write_holders(lock, [])
+                continue
+            match = (lambda h: h.get("run") == run_id) if run_id else \
+                (lambda h: h.get("pid") == os.getpid())
+            keep = [h for h in holders if not match(h)]
+            if run_id and len(keep) == len(holders) and holders:
+                die(f"lock belongs to run {holders[0].get('run')}, not {run_id}")
+            write_holders(lock, keep)
 
 
 # ---------- run lifecycle ----------
@@ -1944,6 +2040,9 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     acceptance_max = acceptance_hash_max(conf)
     notes_before = len(notes)
     acc_list = acceptance_files(repo, acceptance, notes, exclude=files)
+    cases = repo_cases(repo)
+    if cases and (repo / cases).is_file() and cases not in acc_list:
+        acc_list.append(cases)                         # the Cases file: only the session changes it (KB step)
     acceptance_capped = any(n.startswith("acceptance file list capped at") for n in notes[notes_before:])
     acceptance_hashes = {p: acceptance_hash(repo / p, acceptance_max) for p in acc_list}
     state = {
@@ -2144,7 +2243,9 @@ def finish_run(run_dir, rc, secs=None):
     touched = changed + created
     stats = numstat(repo, [p for p in changed if post.get(p, ["??"])[0] not in ("??", "!!")])
     scope_in = [p for p in touched if in_scope(p, files)]
-    scope_out = [p for p in touched if not in_scope(p, files)]
+    # The Files of a run that held the lock beside this one: their edits are that run's work, not out of scope.
+    concurrent = lock_shared(run_dir.parent, st["run_id"])
+    scope_out = [p for p in touched if not in_scope(p, files) and not in_scope(p, concurrent)]
     source_oos, generated = split_out_of_scope(scope_out, post, tuple(st.get("generated_globs") or GENERATED_GLOBS))
     staged_new = sorted(set(staged(repo)) - set(st.get("staged_before") or []))
     internals_before, internals_after = st.get("git_internals") or {}, git_internals(repo)
@@ -2388,6 +2489,7 @@ def finish_run(run_dir, rc, secs=None):
         "tool_calls": tool_calls["tool_calls"] if tool_calls else None,
         "webfetch_attempts": tool_calls["webfetch_attempts"] if tool_calls else [],
         "deleted": deleted, "out_of_scope": source_oos, "generated": generated, "backed_up": st["backed_up"],
+        "concurrent": concurrent,
         "head_before": st["head_before"], "head_after": head_after, "branch_before": st["branch_before"],
         "branch_after": branch_after, "started": st["started"], "verdict": None, "cause": None,
         "provider_refusals": [label for label, _ in refusals],
@@ -2404,7 +2506,7 @@ def finish_run(run_dir, rc, secs=None):
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
     index_append({k: meta[k] for k in ("run_id", "repo", "executor", "model", "name", "mode", "rc",
                                        "seconds", "plan", "phase", "plan_modified", "started", "verdict",
-                                       "executor_tokens", "executor_cost", "sandbox")}
+                                       "executor_tokens", "executor_cost", "sandbox", "diff_lines")}
                  | {"out_of_scope_n": len(source_oos), "generated_n": len(generated), "deleted_n": len(deleted),
                     "staged_n": len(staged_new), "git_internals_n": len(internals_changed),
                     "outside_n": len(outside_changed)})
@@ -2434,6 +2536,9 @@ def pick_executor(args, target, phase, conf, entries):
     return res["name"], executor, model
 
 
+LESSON_CAP = 15                # live lessons; the weekly rules review folds or retires them before a 16th
+
+
 def lesson_lines(tag):
     """(id, line) for the current lesson lines carrying [tag]."""
     if not LESSONS.is_file():
@@ -2451,6 +2556,10 @@ def cmd_lesson(text, tags):
     tags = tags or ["plan"]
     if any(t not in ("plan", "exec") for t in tags):
         die("--tag takes plan or exec")
+    live = [ln for ln in (LESSONS.read_text().splitlines() if LESSONS.is_file() else []) if re.match(r"L\d+ ", ln)]
+    if len(live) >= LESSON_CAP:
+        die(f"REFUSED: {len(live)} live lessons (the cap is {LESSON_CAP}); fold or retire some in the weekly rules "
+            "review (/concord:rules-review) first", code=8)
     ids = [int(m.group(1)) for l in (LESSONS.read_text().splitlines() if LESSONS.is_file() else [])
            for m in [re.match(r"L(\d+) ", l)] if m]
     stored = LESSONS_NEXT.read_text().strip() if LESSONS_NEXT.is_file() else ""
@@ -2464,11 +2573,21 @@ def cmd_lesson(text, tags):
     return 0
 
 
-# Drift brakes: time against the plan's ETA:, size against Size:, changed files against the
-# union of its Files: lists. Warn at 1.2x, block at 1.5x or at a changed file outside Files.
+# Drift brakes: time against the ETA --estimate stored (else the plan's ETA:), size against Size:, changed files
+# against the union of its Files: lists. Warn at 1.2x, block at 1.5x or at a changed file outside Files.
 DRIFT_WARN, DRIFT_BLOCK = 1.2, 1.5
 DRIFT_IDLE = 600                                       # a longer gap between checks counts only where a run covered it
-VERIFY_SKIP = ("## open questions", "## handoff")      # sections written after the plan-verifier approved
+DRIFT_KEYS = ("verdicts", "estimates")                 # drift.json keys that are not a checkout's entry
+VERIFY_SKIP = ("## open questions", "## handoff", "## passes")   # sections written after the plan-verifier approved
+
+# --estimate: phase minutes from the run ledger (the median, or the p75 for high risk, of PASS runs per executor name)
+# scaled by the phase's Size: against that name's median changed lines, plus the session's check of an executor
+# result. ETA = max(critical path, session lane) + one final revision per Tier.
+EST_REF_LINES = 180            # changed lines per phase assumed while the ledger has no diff_lines for a name
+EST_CHECK_MIN = 2.5            # the session's check of one executor result (measured median 2.3 min, 2026-11)
+EST_DEFAULT_S = 600            # phase seconds assumed for a name with fewer than EST_MIN_RUNS PASS runs
+EST_MIN_RUNS = 5
+EST_FINAL_MIN = {"S": 10, "M": 20, "L": 30}            # every suite, one review of the whole diff, its fix round
 
 
 def plan_number(text, label):
@@ -2496,15 +2615,17 @@ def load_drift(root):
 
 
 def save_drift(root, key, value, locked=False):
-    """Set one key of drift.json (a checkout's entry, or new plan verdicts under "verdicts") under a lock, re-read
-    first, so a concurrent writer keeps its key. One entry per existing checkout, the newest 50 verdicts."""
+    """Set one key of drift.json (a checkout's entry, or new items merged into "verdicts" or "estimates") under a
+    lock, re-read first, so a concurrent writer keeps its key. One entry per existing checkout, the newest 50
+    verdicts and 100 estimates."""
     with contextlib.nullcontext() if locked else open(root / "drift.lock", "a") as lock:   # locked: the caller holds it
         if not locked:
             fcntl.flock(lock, fcntl.LOCK_EX)
         data = load_drift(root)
-        data[key] = {**(data.get("verdicts") or {}), **value} if key == "verdicts" else value
-        data = {k: v for k, v in data.items() if k == "verdicts" or Path(k).is_dir()}
+        data[key] = {**(data.get(key) or {}), **value} if key in DRIFT_KEYS else value
+        data = {k: v for k, v in data.items() if k in DRIFT_KEYS or Path(k).is_dir()}
         data["verdicts"] = dict(sorted((data.get("verdicts") or {}).items(), key=lambda kv: kv[1])[-50:])
+        data["estimates"] = dict(list((data.get("estimates") or {}).items())[-100:])
         tmp = root / f"drift.json.{os.getpid()}"
         tmp.write_text(json.dumps(data))
         tmp.replace(root / "drift.json")
@@ -2559,7 +2680,8 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = load_drift(root)
         if (data.get(str(repo)) or {}).get("plan") != plan_rel:     # a fork: the ticket checkout's entry gates it
-            keys = [k for k, e in data.items() if k != "verdicts" and e.get("plan") == plan_rel]
+            keys = [k for k, e in data.items()
+                    if k not in DRIFT_KEYS and isinstance(e, dict) and e.get("plan") == plan_rel]
             live = [k for k in keys if Path(k).is_dir()]
             if live:
                 repo = Path(live[0])
@@ -2572,6 +2694,8 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
             base = git(repo, "rev-parse", "HEAD").strip()
             entry = data[str(repo)] = {"plan": plan_rel, "base": base, "elapsed": 0.0, "last": now,
                                        "pre": drift_measure(repo, base, plan_rel)}
+        if entry.get("reported"):                      # --report wrote the test report: the clock stopped
+            return None, f"DRIFT OFF {plan_rel}: the test report is written; the drift clock stopped", entry.get("level")
         gap = now - entry["last"]
         entry["elapsed"] += gap if 0 < gap < DRIFT_IDLE else run_cover(root, plan_rel, entry["last"], now)
         entry["last"] = now
@@ -2582,7 +2706,8 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
                  for f in parse_files(extract_phase(text, h.group(2)))]
         outside = sorted(n for n in changed if not in_scope(n, files))
         have = {"time": entry["elapsed"] / 60, "size": sum(changed.values())}
-        want = {"time": plan_number(text, "ETA"), "size": plan_number(text, "Size")}
+        want = {"time": (data.get("estimates") or {}).get(plan_rel) or plan_number(text, "ETA"),
+                "size": plan_number(text, "Size")}
 
         def level_of(ok):
             if set(outside) - set(ok.get("files", [])) or any(
@@ -2603,6 +2728,20 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         if level == "BLOCK":
             line += ". Stop, report to the owner and ask; continue only with --user-approved \"<the owner's words>\""
         return level, line, prev
+
+
+def mark_reported(repo, plan_rel):
+    """Stop the drift clock of this checkout's plan (from a fork, the ticket checkout's entry): --report wrote the
+    test report. False when no gated run registered an entry for the plan."""
+    root = runs_root(repo)
+    with open(root / "drift.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load_drift(root)
+        key = drift_entry_key(data, repo, plan_rel)
+        if key is None:
+            return False
+        save_drift(root, key, dict(data[key], reported=time.time()), locked=True)
+        return True
 
 
 def plan_gates(repo, plan_rel, text, approval):
@@ -2660,6 +2799,193 @@ def cmd_plan_verdict(args):
     root = runs_root(repo)
     save_drift(root, "verdicts", {verified_hash(text): time.time()})
     print(f"plan verdict APPROVE recorded for {plan_rel} ({verified_hash(text)})")
+    return 0
+
+
+def est_order(key):
+    """Sort key for a phase number: 2 before 2.1 before 3."""
+    whole, _, frac = str(key).partition(".")
+    return int(whole), int(frac) if frac else 0
+
+
+def est_median(values):
+    """Median of the values (the mean of the two middle ones for an even count); 0.0 for none."""
+    vals = sorted(values)
+    if not vals:
+        return 0.0
+    mid = len(vals) // 2
+    return float(vals[mid]) if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def est_p75(values):
+    """Nearest-rank 75th percentile: the ceil(0.75 n)-th smallest value; 0.0 for none."""
+    vals = sorted(values)
+    return float(vals[max(1, math.ceil(0.75 * len(vals))) - 1]) if vals else 0.0
+
+
+def est_index():
+    """{name: {"seconds": [...], "lines": [...]}} from the run INDEX: one record per run_id (the last one), PASS runs
+    only, the newest 200 per name."""
+    last = {}
+    try:
+        rows = INDEX.read_text(errors="replace").splitlines()
+    except OSError:
+        rows = []
+    for row in rows:
+        with contextlib.suppress(ValueError, TypeError):
+            rec = json.loads(row)
+            if isinstance(rec, dict) and rec.get("run_id") and rec.get("name"):
+                last[str(rec["run_id"])] = rec          # the last record of one run wins
+    out = {}
+    for rec in last.values():
+        if rec.get("verdict") != "PASS":
+            continue
+        try:
+            secs, lines = float(rec["seconds"]), rec.get("diff_lines")
+            lines = None if lines is None else int(lines)
+        except (KeyError, TypeError, ValueError):
+            continue
+        bucket = out.setdefault(str(rec["name"]), {"seconds": [], "lines": []})
+        bucket["seconds"].append(secs)
+        if lines is not None:
+            bucket["lines"].append(lines)
+    return {name: {"seconds": b["seconds"][-200:], "lines": b["lines"][-200:]} for name, b in out.items()}
+
+
+def est_stats(name, index):
+    """(median s, p75 s, median changed lines, run count, ledger?) for one ledger name: fewer than EST_MIN_RUNS PASS
+    runs fall back to EST_DEFAULT_S and EST_REF_LINES, and the caller lints it."""
+    rec = index.get(name) or {}
+    secs, lines = rec.get("seconds") or [], rec.get("lines") or []
+    if len(secs) < EST_MIN_RUNS:
+        return float(EST_DEFAULT_S), float(EST_DEFAULT_S), EST_REF_LINES, len(secs), False
+    med = est_median(secs)
+    return med, est_p75(secs), (est_median(lines) if len(lines) >= EST_MIN_RUNS else EST_REF_LINES), len(secs), True
+
+
+def est_after(phase_text):
+    """[(phase number, reason)] from `After: 1 (reason), 3`; the reason is "" without parentheses, and a comma
+    inside the parentheses does not split the field."""
+    inline, body = field_block(phase_text, "After")
+    out, depth, item = [], 0, ""
+    for ch in " ".join([inline] + body) + ",":
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth <= 0:
+            m = re.match(r"\s*(\d+(?:\.\d+)*)\s*(?:\((.*)\))?", item)
+            if m and phase_key(m.group(1)) is not None:
+                out.append((phase_key(m.group(1)), (m.group(2) or "").strip()))
+            depth, item = 0, ""
+        else:
+            item += ch
+    return out
+
+
+def est_shared(files_a, files_b):
+    """Paths that both Files lists cover (equal, a directory holding the other, or a glob)."""
+    return sorted({f for f in files_a if in_scope(f, files_b)} | {g for g in files_b if in_scope(g, files_a)})
+
+
+def cmd_estimate(args):
+    """--estimate: minutes per phase from the run ledger, the lanes, the critical path, the session lane and the ETA
+    (stored under drift.json "estimates" for the drift gate), with ESTIMATE LINT lines."""
+    repo = repo_root(args.repo or os.getcwd())
+    _plan, plan_rel, text = read_plan(repo, args.plan)
+    print(f"ESTIMATE {plan_rel}")
+    index, lints, phases, no_ledger = est_index(), [], [], []
+    for head in PHASE_HEAD.finditer(text):
+        n = phase_key(head.group(2))
+        if n is None:
+            continue
+        phase_text = extract_phase(text, n)
+        name = parse_executor(phase_text) or "planner"
+        key = "planner" if name in ("planner", "session", "implementer") else name   # the session's own phases
+        median, p75, med_lines, runs, has_ledger = est_stats(key, index)
+        med_lines = med_lines or EST_REF_LINES
+        size = plan_number(phase_text, "Size")
+        rate = p75 if parse_word(phase_text, "Risk", ("low", "medium", "high"), "medium") == "high" else median
+        minutes = math.ceil(rate * max(1.0, (size or med_lines) / med_lines) / 60
+                            + (0 if key == "planner" else EST_CHECK_MIN))
+        note = (f"{key}: {runs} runs, median {median / 60:.1f} min, p75 {p75 / 60:.1f} min, {med_lines:.0f} lines"
+                if has_ledger else f"{key}: no ledger, EST_DEFAULT_S {EST_DEFAULT_S} s, EST_REF_LINES "
+                                   f"{EST_REF_LINES} lines")
+        print(f"Phase {n}  {name}  ~{size if size else '?'} lines  {minutes} min  ({note})")
+        phases.append({"n": n, "name": name, "key": key, "size": size, "lines": med_lines, "minutes": minutes,
+                       "waits": est_after(phase_text), "files": parse_files(phase_text), "start": None,
+                       "finish": None})
+        if not has_ledger and key not in no_ledger:
+            no_ledger.append(key)
+        if size is None:
+            lints.append(f"Phase {n} has no Size: line; the estimate assumes {med_lines:.0f} lines")
+        elif size > 3 * med_lines:
+            lints.append(f"Phase {n} (~{size} lines) is over 3x the median {med_lines:.0f} lines; split it")
+        elif key != "planner" and size <= 60:
+            lints.append(f"Phase {n} (~{size} lines) is tier S: 60 lines or fewer in one executor phase; merge it")
+    if not phases:
+        print("ESTIMATE LINT: the plan has no `## Phase` heading")
+        return 2
+    lints += [f"no ledger reference for {key}: EST_DEFAULT_S and EST_REF_LINES assumed" for key in no_ledger]
+    lints += [f"Phase {p['n']} waits for Phase {w} with no reason" for p in phases for w, why in p["waits"] if not why]
+    by_num = {p["n"]: p for p in phases}
+
+    def finish(p, stack=()):                     # start = the latest finish of its waits; a cycle counts as 0
+        if p["finish"] is None:
+            waits = [by_num[w] for w, _ in p["waits"] if w in by_num and w != p["n"] and w not in stack]
+            p["start"] = max([finish(q, stack + (p["n"],)) for q in waits], default=0)
+            p["finish"] = p["start"] + p["minutes"]
+        return p["finish"]
+
+    def before(p, stack=()):                     # every phase this one waits for, directly or through others
+        out = set()
+        for w, _ in p["waits"]:
+            if w in by_num and w != p["n"] and w not in stack:
+                out |= {w} | before(by_num[w], stack + (p["n"],))
+        return out
+
+    for p in phases:
+        finish(p)
+    order = {p["n"]: before(p) for p in phases}
+    for i, a in enumerate(phases):
+        for b in phases[i + 1:]:
+            shared = est_shared(a["files"], b["files"])
+            if shared and a["n"] not in order[b["n"]] and b["n"] not in order[a["n"]]:   # no After: orders them
+                lints.append(f"Phases {a['n']} and {b['n']} can run at once and both list {', '.join(shared)}")
+    session = math.ceil(sum(p["minutes"] for p in phases if p["key"] == "planner")
+                        + EST_CHECK_MIN * sum(1 for p in phases if p["key"] != "planner"))
+    end = min(phases, key=lambda p: (-p["finish"], est_order(p["n"])))            # ties: the lower phase number
+    chain = [end]
+    while True:                                                                  # the chain to the latest finish
+        waits = [by_num[w] for w, _ in chain[-1]["waits"] if w in by_num]
+        nxt = min(waits, key=lambda q: (-q["finish"], est_order(q["n"]))) if waits else None
+        if nxt is None or nxt in chain or nxt["finish"] != chain[-1]["start"]:
+            break
+        chain.append(nxt)
+    chain.reverse()
+    path = sum(p["minutes"] for p in chain)
+    tier = re.search(r"^Tier:\s*([SML])\b", text, re.M | re.I)
+    final = EST_FINAL_MIN[tier.group(1).upper()] if tier else EST_FINAL_MIN["M"]
+    eta = max(path, session) + final
+    plan_eta = plan_number(text, "ETA")
+    if plan_eta and abs(plan_eta - eta) > 0.25 * eta:
+        lints.append(f"the plan says ETA {plan_eta} min; computed {eta} min")
+    for line in lints:
+        print(f"ESTIMATE LINT: {line}")
+    print("PASSES")
+    lanes = []
+    for p in sorted(phases, key=lambda p: (p["start"], est_order(p["n"]))):
+        waits = [by_num[w] for w, _ in p["waits"] if w in by_num and w != p["n"]]
+        latest = min(waits, key=lambda q: (-q["finish"], est_order(q["n"]))) if waits else None
+        lane = next((ln for ln in lanes if latest is not None and ln[-1] is latest), None)
+        if lane is None:
+            lanes.append([p])                    # no wait, or its latest-finishing wait closes another lane
+        else:
+            lane.append(p)
+    for lane in lanes:
+        print(" ──> ".join(f"Phase {p['n']} {p['name']} {p['minutes']} min" for p in lane))
+    print(f"CRITICAL PATH: {' → '.join(str(p['n']) for p in chain)} = {path} min; session lane {session} min; "
+          f"final revision {final} min")
+    print(f"ETA: {eta} min, lands at {time.strftime('%H:%M', time.localtime(time.time() + 60 * eta))} local")
+    save_drift(runs_root(repo), "estimates", {plan_rel: eta})
     return 0
 
 
@@ -2848,7 +3174,7 @@ def cmd_run(args, target, phase, conf):
         print(f"prompt: {run_dir / 'prompt.txt'}")
         return 0
 
-    lock = acquire_lock(root, run_dir.name)
+    acquire_lock(root, run_dir.name, files=files)
     try:
         st = start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, args.mode, track_ignored, notes,
                          executor=executor, model=model, name=name, conf=conf, do_baseline=not args.no_baseline)
@@ -2870,10 +3196,10 @@ def cmd_run(args, target, phase, conf):
         print(f"delegate: started {run_dir.name}: {who}, mode {args.mode}, wall {wall_text}{bl_note}; "
               f"log: {run_dir / 'output.log'}", flush=True)
         rc, secs = run_process(cmd, env, repo, run_dir / "output.log", wall_s + 60,
-                               on_start=lambda pid: record_child(lock, pid))
+                               on_start=lambda pid: record_child(root, run_dir.name, pid))
         report = finish_run(run_dir, rc, secs)
     finally:
-        release_lock(root)
+        release_lock(root, run_dir.name)
     print(report)
     return rc
 
@@ -4610,6 +4936,15 @@ def cmd_review_pr(args, target, conf):
     gh_head = (info.get("headRefOid") or "").strip()
     if not base_branch or not gh_head:
         die(f"gh pr view {n} returned no baseRefName/headRefOid", code=3)
+    if not args.delta:
+        # A round is one head with a full review; partial reviews of the same head finish that round.
+        rounds = [h for h, v in pr_reviews_by_head(root, n).items() if v.get("full")]
+        if (len(rounds) >= PR_FULL_REVIEW_CAP and gh_head not in rounds
+                and not " ".join((args.user_approved or "").split())):
+            print(f"REFUSED: PR {n} already had {len(rounds)} full review rounds (the cap is {PR_FULL_REVIEW_CAP}); "
+                  "fix the BLOCKER and HIGH findings and check them with --delta, or pass --user-approved "
+                  "\"<the owner's words>\"")
+            return 8
     slug = slug or remote_slug(repo)
     tier = args.tier
     ref = f"refs/review/pr{n}-{os.getpid()}"
@@ -5487,10 +5822,11 @@ def cmd_pr_status(args):
 
 
 def cmd_lint(args, phase, target, conf):
-    """Read-only pre-flight: a cheap model lists the questions it would need answered."""
-    entries, settings = load_models()
+    """Zero-token pre-flight of one phase and the plan head: ACCEPTANCE LINT and PLAN LINT lines, no model call.
+    A MODEL word, --via, --model and --dry-run are accepted and ignored (older callers)."""
     repo, plan, plan_rel, phase_text = load_plan_phase(args, phase)
-    for f in acceptance_lint(repo, phase_text, parse_files(phase_text)):
+    files = parse_files(phase_text)
+    for f in acceptance_lint(repo, phase_text, files):
         print(f"ACCEPTANCE LINT: {f}")
     text = plan.read_text(errors="replace")
     head = PHASE_HEAD.split(text, 1)[0]                                    # title, Done when, Ship
@@ -5499,52 +5835,13 @@ def cmd_lint(args, phase, target, conf):
     for label in ("Size", "ETA"):
         if plan_number(text, label) is None:
             print(f"PLAN LINT: no `{label}:` line, so --drift cannot measure it")
-    target = target or settings.get("lint") or settings.get("default") or ""
-    if not target:
-        die("no lint model: name one, or set `lint =` / `default =` in models.conf")
-    res = resolve_target(target, entries)
-    executor, model = res["executor"], res["model"]
-    if args.via and args.via != executor:
-        executor, model = args.via, (model if res["how"] == "model id" else conf.get(f"{args.via}.model", ""))
-    if executor in SESSION_EXECUTORS:
-        die("lint needs a non-Claude model (the point is a second, cheap reading of the phase)", code=3)
-    if args.model:
-        model = args.model
-    guard(executor, model)
-    if executor not in MODE_ENFORCED and not args.force:
-        die(f"lint on {executor} is read-only by contract only and takes no backup; use qwen, opencode or pi "
-            "(read-only enforced), or --force")
-    binary = resolve_bin(executor, conf)
-    if not binary:
-        die(f"{executor}: binary not found")
-    notes = repo_notes(repo)
-    task = (f"Plan file: {plan_rel} (repository root: {repo}).\n"
-            + (f"\nRepository notes (binding):\n{notes}\n" if notes else "")
-            + f"\nPhase {phase} under review:\n\n{phase_text}\n")
-    root = runs_root(repo)
-    run_dir = new_run_dir(root, res["name"], phase, prefix="lint-")
-    cmd, env, combined = build_command(executor, binary, task, LINT_TASK, model, "readonly",
-                                       args.wall or "10m", run_dir, conf, repo=repo, args=args)
-    (run_dir / "prompt.txt").write_text(combined)
-    if args.dry_run:
-        print(f"DRY RUN LINT {run_dir.name}\nexecutor: {res['name']} -> {executor} {model}")
-        print("cmd:", json.dumps(redact_cmd(cmd, LINT_TASK, combined, task)))
-        return 0
-    enforced = executor in MODE_ENFORCED
-    pre = snapshot(repo)
-    rc, secs = run_process(cmd, env, repo, run_dir / "output.log", parse_wall(args.wall or "10m") + 60)
-    changed, created, deleted = compare(pre, snapshot(repo), repo)
-    out = ANSI.sub("", (run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
-    body = out[out.find("QUESTIONS:"):] if "QUESTIONS:" in out else "\n".join(out.splitlines()[-40:])
-    print(f"LINT {run_dir.name}: {res['name']} -> {executor} {model}  (exit {rc}, {int(secs)}s, "
-          f"read-only {'enforced' if enforced else 'by contract only'})")
-    if changed or created or deleted:
-        print(f"WARNING: lint run touched files: changed={changed} created={created} deleted={deleted}")
-    print(body.strip())
-    usage = opencode_usage(run_dir.name) if executor == "opencode" else pi_usage(run_dir)
-    if usage:
-        print(usage_line(usage, model))
-    return rc
+    if not re.search(r"^Tests:", head, re.M):
+        print("PLAN LINT: no `Tests:` line (test lines added and removed, and the net budget)")
+    cases = repo_cases(repo)
+    if cases and (parse_executor(phase_text) or "").lower() not in ("planner", "session") and in_scope(cases, files):
+        print(f"PLAN LINT: phase {phase} lists the Cases file {cases} in Files; only the session merges case changes "
+              "(KB step)")
+    return 0
 
 
 def session_executor_for(label, phase):
@@ -5584,8 +5881,9 @@ def cmd_begin(args, phase, conf):
     if gate:
         print(gate[1])
         return gate[0]
+    files = parse_files(phase_text)
     run_dir = new_run_dir(root, label, phase)
-    acquire_lock(root, run_dir.name, manual=True)
+    acquire_lock(root, run_dir.name, manual=True, files=files)
     try:
         notes = [plan_note] if plan_note else []
         if approval_note:
@@ -5594,7 +5892,7 @@ def cmd_begin(args, phase, conf):
                          notes, executor=executor, model=label, name=label, conf=conf,
                          do_baseline=not args.no_baseline)
     except BaseException:
-        release_lock(root)
+        release_lock(root, run_dir.name)
         raise
     bl = st["baseline"]
     if not bl:
@@ -5690,7 +5988,7 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
     index_append({k: meta.get(k) for k in ("run_id", "repo", "executor", "model", "name", "mode", "rc",
                                            "seconds", "plan", "phase", "plan_modified", "started", "verdict",
                                            "cause", "behaviour", "risk", "executor_tokens", "executor_cost",
-                                           "frontier_tokens")}
+                                           "frontier_tokens", "diff_lines")}
                  | {"out_of_scope_n": len(meta.get("out_of_scope", [])), "generated_n": len(meta.get("generated", [])),
                     "deleted_n": len(meta.get("deleted", [])), "staged_n": len(meta.get("staged", [])),
                     "git_internals_n": len(meta.get("git_internals_changed", [])),
@@ -5717,6 +6015,166 @@ def cmd_verdict(args):
     meta = json.loads(meta_path.read_text())
     return record_verdict(repo, run_dir, meta_path, meta, verdict, cause=args.cause, note=args.note,
                           tokens=args.tokens, behaviour=args.behaviour, force=args.force)
+
+
+def plan_section(text, name):
+    """Body lines of the plan's `## <name>` section: the heading's first words, up to the next `## ` heading."""
+    body, keep = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            keep = line.casefold().startswith(f"## {name}".casefold())
+            continue
+        if keep:
+            body.append(line)
+    while body and not body[-1].strip():
+        body.pop()
+    while body and not body[0].strip():
+        body.pop(0)
+    return body
+
+
+def drift_entry_key(data, repo, plan_rel):
+    """The drift.json key of this plan's checkout entry (from a fork, the ticket checkout's entry), or None."""
+    if (data.get(str(repo)) or {}).get("plan") == plan_rel:
+        return str(repo)
+    return next((k for k, e in data.items() if k not in DRIFT_KEYS and isinstance(e, dict)
+                 and e.get("plan") == plan_rel and Path(k).is_dir()), None)
+
+
+def plan_run_records(root, plan_rel):
+    """[(state, meta)] of the plan's runs in this runs root, oldest first: each run whose state names the plan."""
+    out = []
+    for path in root.glob("*/state.json"):
+        try:
+            state = json.loads(path.read_text())
+            meta = path.with_name("meta.json")
+            meta = json.loads(meta.read_text()) if meta.exists() else {}
+        except (OSError, ValueError):
+            continue
+        if isinstance(state, dict) and state.get("plan") == plan_rel and isinstance(meta, dict):
+            out.append((state, meta))
+    return sorted(out, key=lambda sm: sm[0].get("started") or 0)
+
+
+def test_line_deltas(repo, base, plan_rel):
+    """{test path: (added, deleted)} against `base`: tracked changes by numstat, untracked files counted as added.
+    A base git refuses (an older or foreign commit) falls back to HEAD."""
+    args = ["-c", "core.quotePath=false", "diff", "--numstat", "-z", "--no-renames", base]
+    res = run_git(args, repo, timeout=PR_TIMEOUT)
+    if res.returncode != 0:
+        res = run_git(args[:-1] + ["HEAD"], repo, timeout=PR_TIMEOUT)
+    out = {}
+    for rec in (res.stdout if res.returncode == 0 else "").split("\0"):
+        cols = rec.split("\t")
+        if len(cols) == 3:
+            out[cols[2]] = (int(cols[0]) if cols[0].isdigit() else 0, int(cols[1]) if cols[1].isdigit() else 0)
+    others = run_git(["ls-files", "-z", "--others", "--exclude-standard"], repo, timeout=PR_TIMEOUT)
+    for name in filter(None, (others.stdout if others.returncode == 0 else "").split("\0")):
+        path = Path(repo) / name
+        with contextlib.suppress(OSError):
+            out[name] = (path.read_bytes().count(b"\n") if path.stat().st_size < 1_000_000 else 0, 0)
+    out.pop(plan_rel, None)
+    return {p: v for p, v in out.items() if TEST_PATH.search(p)}
+
+
+def cmd_report(args):
+    """--report: write <runs root>/reports/REPORT_<ticket>.md from recorded data (phases, the plan's Test plan, test
+    lines, reviews, open items, time against the ETA, concurrency) and stop the drift clock."""
+    repo = repo_root(args.repo or os.getcwd())
+    _plan, plan_rel, text = read_plan(repo, args.plan)
+    root = runs_root(repo)
+    ticket = re.sub(r"^PLAN_", "", Path(plan_rel).stem, flags=re.I)     # PLAN_t.md -> t
+    runs = plan_run_records(root, plan_rel)
+    data = load_drift(root)
+    key = drift_entry_key(data, repo, plan_rel)
+    entry = (data.get(key) if key else None) or {}
+    lines = [f"# Test report: {ticket}", ""]
+
+    lines += ["## Phases", "", "| Phase | Executor | Runs | Last verdict | Acceptance re-run |",
+              "|---|---|---|---|---|"]
+    numbers = list(dict.fromkeys(phase_key(h.group(2)) for h in PHASE_HEAD.finditer(text)
+                                 if phase_key(h.group(2)) is not None))
+    by_phase = {}
+    for state, meta in runs:
+        by_phase.setdefault(state.get("phase"), []).append(meta)
+    for number in numbers + [p for p in by_phase if p not in numbers]:
+        metas = by_phase.get(number) or []
+        if metas:
+            last = metas[-1]
+            after = last.get("acceptance_after_rc") or []
+            row = [str(number), _flat(last.get("name") or last.get("executor") or "-"), str(len(metas)),
+                   _flat(last.get("verdict") or "-"),
+                   f"{sum(1 for r in after if r == 0)}/{len(after)} pass" if after else "-"]
+        else:
+            row = [str(number), parse_executor(extract_phase(text, number)) or "-", "0", "-", "-"]
+        lines.append("| " + " | ".join(row) + " |")
+    if not numbers and not by_phase:
+        lines.append("| - | - | 0 | - | - |")
+
+    lines += ["", "## Test plan", ""] + (plan_section(text, "Test plan") or ["none in the plan"])
+
+    stats = test_line_deltas(repo, entry.get("base") or "HEAD", plan_rel)
+    added, deleted = sum(a for a, _ in stats.values()), sum(d for _, d in stats.values())
+    tests_line = next((line.strip()[len("Tests:"):].strip() for line in text.splitlines()
+                       if re.match(r"^tests:", line.strip(), re.I)), "")
+    lines += ["", "## Test lines", ""]
+    if stats:
+        lines += ["| Test file | + | - |", "|---|---|---|"] + \
+                 [f"| {_flat(p)} | {a} | {d} |" for p, (a, d) in sorted(stats.items())]
+        lines.append("")
+    lines.append(f"Total: +{added} -{deleted} lines; plan Tests: {tests_line or 'none'}")
+
+    ledger = load_ledger(root, ledger_key({"plan": plan_rel}))
+    findings = [f for f in ledger["findings"] if isinstance(f, dict)]
+    counts = {}
+    for f in findings:
+        group = counts.setdefault((_flat(f.get("run") or "-"), _flat(f.get("reviewer") or "-")),
+                                  dict.fromkeys(REVIEW_SEVERITIES, 0))
+        if str(f.get("severity") or "").upper() in group:
+            group[str(f.get("severity")).upper()] += 1
+    lines += ["", "## Review", ""]
+    if counts:
+        lines += ["| Run | Reviewer | BLOCKER | HIGH | MEDIUM | NOTE |", "|---|---|---|---|---|---|"] + \
+                 ["| " + " | ".join([run, reviewer] + [str(c[s]) for s in REVIEW_SEVERITIES]) + " |"
+                  for (run, reviewer), c in counts.items()]
+    else:
+        lines.append("none recorded")
+
+    open_items = [f for f in findings if f.get("status") in ("open", "note")]
+    lines += ["", "## Open items for the DAT", ""]
+    lines += [f"- {_flat(f.get('id'))} {str(f.get('severity') or '').upper()} "
+              f"{_flat(f.get('path') or '')}:{f.get('line') if f.get('line') is not None else '-'}: "
+              f"{_trim(f.get('problem'))} (status {f.get('status')})" for f in open_items]
+    questions = [line for line in plan_section(text, "Open questions") if line.strip()]
+    if questions:
+        lines += ["", "Plan open questions:", ""] + questions
+    if not open_items and not questions:
+        lines.append("none recorded")
+    lines.append("")
+    lines.append(f"Never adjudicated: {len([f for f in findings if f.get('status') == 'open'])}")
+
+    wall = 0.0
+    timed = [(s.get("started") or 0, m.get("seconds") or 0) for s, m in runs]
+    if timed:
+        wall = max(t + secs for t, secs in timed) - min(t for t, _ in timed)
+    total = sum(secs for _, secs in timed)      # a duration that rounds to 0.0 leaves no overlap to measure
+    elapsed = entry.get("elapsed") if isinstance(entry.get("elapsed"), (int, float)) else wall
+    estimates = data.get("estimates") or {}
+    eta = estimates.get(plan_rel) if isinstance(estimates.get(plan_rel), (int, float)) else plan_number(text, "ETA")
+    source = "computed" if isinstance(estimates.get(plan_rel), (int, float)) else "plan"
+    lines += ["", "## Time", ""]
+    lines.append(f"Elapsed {int(round(elapsed / 60))} min against ETA {eta:g} min ({source})" if eta
+                 else f"Elapsed {int(round(elapsed / 60))} min; the plan has no ETA: line")
+    lines.append(f"Concurrency: {total / wall:.2f}" if wall > 0 else
+                 "Concurrency: 1.00" if timed else "Concurrency: none (no run of the plan)")
+
+    out = root / "reports" / f"REPORT_{ticket}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n")
+    print(f"report: {out}")
+    if not mark_reported(repo, plan_rel):
+        print(f"note: no gated run registered {plan_rel}; the drift clock has nothing to stop")
+    return 0
 
 
 def last_verdict_time(root, meta):
@@ -6461,6 +6919,10 @@ def main():
                         "only when the drift level changes")
     parser.add_argument("--plan-verdict", metavar="FILE", help="record the plan-verifier's answer (its VERDICT: "
                         "line) for this plan text; --begin and executor runs need an APPROVE (exit 11)")
+    parser.add_argument("--estimate", action="store_true", help="phase minutes from the run ledger, lanes, critical "
+                        "path and ETA of the plan; stores the ETA for the drift gate")
+    parser.add_argument("--report", action="store_true", help="write the test report for the owner's acceptance test "
+                        "(REPORT_<ticket>.md in the runs root) and stop the drift clock")
     parser.add_argument("--abort", metavar="RUN_ID", help="release a session run's lock without a report")
     parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the phase's outcome")
     parser.add_argument("--note", help="with --verdict: short reason")
@@ -6537,6 +6999,10 @@ def main():
         return cmd_drift(args)
     if args.plan_verdict:
         return cmd_plan_verdict(args)
+    if args.estimate:
+        return cmd_estimate(args)
+    if args.report:
+        return cmd_report(args)
     conf = load_conf()
     if args.resolve:
         return cmd_resolve(args.resolve)

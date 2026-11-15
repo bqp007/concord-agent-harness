@@ -253,7 +253,7 @@ packet "$ES"
   && ok "E.4 a 2.1 packet holds only its own change, a new file whole, and the header" || { bad "E.4 $ES"; tail -3 "$T/out.txt"; }
 flash "$ES"; lastp -review- > "$T/p.txt"
 [ -n "$ES" ] && grep -qF "+SUB_LINE = 2" "$T/p.txt" && ! grep -qF "PARENT_LINE" "$T/p.txt" && ok "E.5 the flash review of 2.1 sends only its own change" || { bad "E.5"; tail -3 "$T/rev.txt"; }
-FA="seq 1 20000 >> big.txt" run 2.2 PLAN_E.md; E2=$(rid)
+FA="seq 1 60000 >> big.txt" run 2.2 PLAN_E.md; E2=$(rid)
 packet "$E2"
 [ -n "$E2" ] && pk "[diff truncated at" && ! pk "PARENT_BIG" && ok "E.6 a sub-phase delta over the cap is cut and still holds no parent hunk" || { bad "E.6 $E2"; tail -3 "$T/out.txt"; }
 packet "$EP"

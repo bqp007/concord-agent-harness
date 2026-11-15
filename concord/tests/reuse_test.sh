@@ -4,8 +4,8 @@
 # review of an equal-or-higher tier already saw at the same content, records a reused entry (so the tier gate
 # still passes) and writes no packet / calls no model; a lower tier never covers a higher one. Partial coverage
 # reviews only the uncovered files. --review-pr reuses PR and phase coverage alike and records a suppression at
-# the head so --pr-status reports the gate met. --force-review bypasses reuse. --lint reads a phase whose Executor
-# is a Claude model like any other: a model lint plus the zero-token ACCEPTANCE LINT lines. No network: a fake qwen
+# the head so --pr-status reports the gate met. --force-review bypasses reuse. --lint lints a phase whose Executor
+# is a Claude model like any other. No network: a fake qwen
 # is the executor and the flash reviewer, a fake gh answers `gh pr view`.
 # Run: bash ~/.claude/concord/tests/reuse_test.sh   (exit 0 = all passed).
 set -u
@@ -120,15 +120,10 @@ FAKE_ACTIONS="cat $T/fix.txt" $DP --review "$U" --via qwen --model fake/m --repo
   && ok "a flash phase review with a HIGH on a.py: no covered or flagged map" \
   || { bad "phase FIX credit: verdict=$(lastrev "$U" verdict) covered=$(lastrev "$U" covered) flagged=$(lastrev "$U" flagged)"; tail -3 "$T/out.txt"; }
 
-echo "== --lint reads a Claude-model phase like any other and still lints acceptance"
+echo "== --lint lints a Claude-model phase's acceptance like any other"
 $DP --lint 3 --dry-run --via qwen --model fake/m --plan PLAN_R.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "LINT SKIPPED" \
-  && has "ACCEPTANCE LINT: vacuous on empty input: grep -c x f | grep -qx 0" \
-  && ok "Claude-model phase: a model lint (dry run) plus the zero-token ACCEPTANCE LINT lines" \
-  || { bad "claude-phase lint rc=$RC"; tail -4 "$T/out.txt"; }
-$DP --lint 1 --dry-run --via qwen --model fake/m --plan PLAN_R.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRY RUN LINT" && ! has "LINT SKIPPED" \
-  && ok "a non-Claude (deepseek-flash) phase is not skipped" || { bad "non-claude lint rc=$RC"; tail -3 "$T/out.txt"; }
+[ $RC -eq 0 ] && has "ACCEPTANCE LINT: vacuous on empty input: grep -c x f | grep -qx 0" \
+  && ok "Claude-model phase: the zero-token ACCEPTANCE LINT lines" || { bad "claude-phase lint rc=$RC"; tail -4 "$T/out.txt"; }
 
 echo "== PR review reuse (Phase 13b): fully covered, higher tier still runs, partial"
 cat > "$T/bin/gh" <<'G'
