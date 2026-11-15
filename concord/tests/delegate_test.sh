@@ -284,12 +284,14 @@ grep -qxF "CRITICAL PATH: 1 = 35 min; session lane 38 min; final revision 10 min
   && ok "E.6 the ETA takes the session lane when it is longer than the critical path" || { bad "E.6 session lane"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
 { printf '# Plan\nTier: S\n'; ph 1 planner 'Size: ~180 lines\nFiles: t.sh'; ph 2 deepseek-flash 'Size: ~180 lines\nFiles: a.py'
   ph 3 deepseek-flash 'Size: ~180 lines\nAfter: Phase 1 and 2 (needs both), tests\nFiles: b.py'
-  ph 4 deepseek-flash 'Size: ~180 lines\nFiles: src/a*.py'; ph 5 deepseek-flash 'Size: ~180 lines\nFiles: src/*b.py'; } > "$R/PLAN_A.md"
-$DP --estimate --plan PLAN_A.md --repo "$R" > "$T/out.txt" 2>&1        # P1 4, P2 10, P3 starts at 10: path 2 -> 3 = 20
-grep -qxF "CRITICAL PATH: 2 → 3 = 20 min; session lane 14 min; final revision 10 min" "$T/out.txt" \
-  && grep -qF "ESTIMATE LINT: Phase 3 After: 'tests' names no phase" "$T/out.txt" && ! grep -q "with no reason" "$T/out.txt" \
+  ph 4 deepseek-flash 'Size: ~180 lines\nFiles: src/a*.py'; ph 5 deepseek-flash 'Size: ~180 lines\nFiles: src/*b.py'
+  ph 6 deepseek-flash 'Size: ~180 lines\nAfter:\n- 3\n- 4 (shares src/ab.py) and 5 (shares src/ab.py)\nFiles: src/ab.py'; } > "$R/PLAN_A.md"
+$DP --estimate --plan PLAN_A.md --repo "$R" > "$T/out.txt" 2>&1        # P1 4, P2 10, P3 starts at 10, P6 at 20: path 2 -> 3 -> 6 = 30
+grep -qxF "CRITICAL PATH: 2 → 3 → 6 = 30 min; session lane 17 min; final revision 10 min" "$T/out.txt" \
+  && grep -qF "ESTIMATE LINT: Phase 3 After: 'tests' names no phase" "$T/out.txt" && [ "$(grep -c "with no reason" "$T/out.txt")" = 1 ] \
+  && grep -qF "ESTIMATE LINT: Phase 6 waits for Phase 3 with no reason" "$T/out.txt" && ! grep -qE "Phases [345] and 6 " "$T/out.txt" \
   && grep -qF "ESTIMATE LINT: Phases 4 and 5 can run at once and both list src/*b.py, src/a*.py" "$T/out.txt" \
-  && ok "E.7 After: takes Phase and 'and'; an item naming no phase is linted; two globs that can share a file overlap" \
+  && ok "E.7 After: takes Phase, 'and', bullet lines and one reason per phase; an item naming no phase is linted; two globs that can share a file overlap" \
   || { bad "E.7 After forms"; grep -E "^(CRITICAL|ESTIMATE LINT)" "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

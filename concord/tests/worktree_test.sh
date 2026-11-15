@@ -81,7 +81,7 @@ touch "$T/release2"; wait $PF; F1=$?
   || { bad "disjoint run rc=$F2"; tail -3 "$T/f2.txt"; }
 [ $F3 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/f3.txt" \
   && ok "a run with no Files is refused while another runs (exit 2)" || { bad "no-Files run rc=$F3"; tail -3 "$T/f3.txt"; }
-[ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -qE "^diff size: [0-9]+ lines \(\+[0-9]+ -0\)" "$T/f1.txt" \
+[ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 2 lines (+2 -0)" "$T/f1.txt" \
   && ok "the long run leaves the concurrent run's b.py and deleted z.py out of OUT OF SCOPE, DELETED and its diff size" \
   || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|diff size" "$T/f1.txt"; }
 [ ! -e "$L1" ] && ok "the lock file is gone once both runs ended" || bad "lock file left: $(cat "$L1" 2>&1)"

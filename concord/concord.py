@@ -2882,22 +2882,23 @@ def est_stats(name, index):
 
 def est_after(phase_text):
     """([(phase number, reason)], [items naming no phase]) from `After: 1 (reason), Phase 3 and 4 (reason)`: an
-    optional Phase or P before each number, `and` between numbers; a comma inside the parentheses does not split
-    the field, and the reason covers every phase of its item."""
+    optional Phase or P before each number, `and` between numbers. A comma, a semicolon, a bullet line or the end
+    of a parenthesized reason ends an item (a comma inside the parentheses does not), and the reason covers every
+    phase of its item: `1 (a) and 2 (b)` gives each phase its own reason."""
     inline, body = field_block(phase_text, "After")
     out, bad, depth, item = [], [], 0, ""
-    for ch in " ".join([inline] + body) + ",":
-        depth += ch == "("
-        depth -= ch == ")"
-        if ch == "," and depth <= 0:
-            head, _, why = item.partition("(")
-            nums = [phase_key(x) for x in re.findall(r"(?<![\w.])(?:phases?\s*|p)?(\d+(?:\.\d+)*)", head, re.I)]
-            out += [(x, why.rsplit(")", 1)[0].strip()) for x in nums if x is not None]
-            if not any(x is not None for x in nums) and item.strip().lower() not in ("", "none", "-"):
-                bad.append(item.strip())
-            depth, item = 0, ""
-        else:
+    for ch in " ".join([inline] + [re.sub(r"^[-*+]\s+", "; ", ln.strip()) for ln in body]) + ",":
+        depth += (ch == "(") - (ch == ")")
+        if depth > 0 or ch not in ",;":
             item += ch
+        if depth > 0 or ch not in ",;)":
+            continue
+        head, _, why = item.partition("(")
+        nums = [phase_key(x) for x in re.findall(r"(?<![\w.])(?:phases?\s*|p)?(\d+(?:\.\d+)*)", head, re.I)]
+        out += [(x, why.rsplit(")", 1)[0].strip()) for x in nums if x is not None]
+        if not any(x is not None for x in nums) and head.strip().lower() not in ("", "none", "-", "and"):
+            bad.append(item.strip())
+        depth, item = 0, ""
     return out, bad
 
 
@@ -6101,10 +6102,12 @@ def test_line_deltas(repo, base, plan_rel):
 
 
 def report_prs(repo, root, base):
-    """The PR numbers whose reviewed heads are this ticket's commits: reachable from HEAD, not from the drift base."""
-    if not base:
+    """The PR numbers whose reviewed heads are this ticket's commits: on the first-parent line from HEAD back to the
+    drift base, so the PRs that a merge of main brings in stay out."""
+    if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}", base):
         return []
-    prs, mine = set(), {}
+    own = set(run_git(["rev-list", "--first-parent", f"{base}..HEAD"], repo, timeout=PR_TIMEOUT).stdout.split())
+    prs = set()
     for path in Path(root).glob("pr*-*/meta.json"):
         try:
             meta = json.loads(path.read_text())
@@ -6115,10 +6118,7 @@ def report_prs(repo, root, base):
         head = meta.get("head")
         if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
             continue
-        if head not in mine:
-            mine[head] = (run_git(["merge-base", "--is-ancestor", head, "HEAD"], repo, timeout=PR_TIMEOUT).returncode == 0
-                          and run_git(["merge-base", "--is-ancestor", head, base], repo, timeout=PR_TIMEOUT).returncode == 1)
-        if mine[head]:
+        if head in own:
             prs.add(meta["pr"])
     return sorted(prs)
 
