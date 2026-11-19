@@ -2962,21 +2962,23 @@ def run_diff_base(repo, meta):
     return sha if ancestor.returncode == 0 else "HEAD"
 
 
-def diff_base_note(meta, base):
-    """The review task says so when the run's start commit exists but could not be used as the diff base."""
+def fell_back(meta, base):
+    """True when the run's start commit exists but could not be used as the diff base, so the base is HEAD."""
     sha = meta.get("head_before") if isinstance(meta, dict) else None
-    if base == "HEAD" and isinstance(sha, str) and sha:
-        return (f"note: diff base is HEAD (the run's start commit {sha[:8]} is not an ancestor of HEAD); "
-                f"the diff may be empty\n")
+    return base == "HEAD" and isinstance(sha, str) and bool(sha)
+
+
+def diff_base_note(meta, base):
+    """The review task says so when the review diff falls back to HEAD (fell_back)."""
+    if fell_back(meta, base):
+        return (f"note: the run's start commit {meta['head_before'][:8]} is not an ancestor of HEAD; each file shows "
+                f"its change since the run's start copy (a file without one: since HEAD)\n")
     return ""
 
 
 def diff_base_warnings(meta, base, diff, files):
     """Review-output warnings: a fallback to HEAD and an empty diff over a non-empty file list."""
-    sha = meta.get("head_before") if isinstance(meta, dict) else None
-    warnings = []
-    if base == "HEAD" and isinstance(sha, str) and sha:
-        warnings.append("WARNING: diff base fell back to HEAD")
+    warnings = ["WARNING: diff base fell back to HEAD"] if fell_back(meta, base) else []
     if files and not (diff or "").strip():
         warnings.append(f"WARNING: empty diff for {len(files)} file(s)")
     return warnings
@@ -3024,11 +3026,12 @@ def started_dirty(repo, run_dir, meta, files):
 
 
 def review_diff(repo, run_dir, meta, files, cap=REVIEW_DIFF_CAP, base=None):
-    """Whole-phase runs: change_diff (also for a clean start). Sub-phase or dirty-start runs: only the change since
-    start_state's copy (no copy: change_diff)."""
+    """Whole-phase runs: change_diff (also for a clean start). Sub-phase, dirty-start or fallen-back runs (fell_back:
+    a fork's start commit is no ancestor here): only the change since start_state's copy (no copy: change_diff)."""
     if base is None:
         base = run_diff_base(repo, meta)
-    if not isinstance(phase_key(meta.get("phase")), str) and not started_dirty(repo, run_dir, meta, files):
+    if (not isinstance(phase_key(meta.get("phase")), str) and not fell_back(meta, base)
+            and not started_dirty(repo, run_dir, meta, files)):
         return change_diff(repo, files, cap=cap, base=base)
     parts = []
     for f in files:
@@ -5854,20 +5857,16 @@ def cmd_report(args):
         if heads:
             newest = max(heads, key=lambda h: _at(heads[h]["full"] + heads[h]["delta"]))
             states[n] = (newest, head_state(root, n, newest, repo=repo, heads=heads, trees=trees, cache=cache))
+    groups = [(f"PR {n} REVIEWED at {states[n][0][:8]}", by_key[f"pr{n}"])
+              for n in prs if (states.get(n) or ("", {}))[1].get("status") == "REVIEWED"]
+    if prs and len(groups) == len(prs):
+        groups.append(("every PR REVIEWED", by_key[keys[0]]))
     fixed, fixed_ids = [], set()
-    for n in prs:
-        newest, state = states.get(n) or ("", {"status": "UNREVIEWED"})
-        done = ([f for f in by_key[f"pr{n}"] if str(f.get("severity") or "").upper() in GATE_SEVERITIES
-                 and f.get("status") not in ("incorrect", "declined")]
-                if state["status"] == "REVIEWED" else [])
-        if done:
-            fixed.append(f"Fixed (PR {n} REVIEWED at {newest[:8]}): {', '.join(_flat(f.get('id')) for f in done)}")
-            fixed_ids |= {id(f) for f in done}
-    if prs and all((states.get(n) or ("", {}))[1].get("status") == "REVIEWED" for n in prs):
-        done = [f for f in by_key[keys[0]] if str(f.get("severity") or "").upper() in GATE_SEVERITIES
+    for label, ledger in groups:
+        done = [f for f in ledger if str(f.get("severity") or "").upper() in GATE_SEVERITIES
                 and f.get("status") not in ("incorrect", "declined")]
         if done:
-            fixed.append(f"Fixed (every PR REVIEWED): {', '.join(_flat(f.get('id')) for f in done)}")
+            fixed.append(f"Fixed ({label}): {', '.join(_flat(f.get('id')) for f in done)}")
             fixed_ids |= {id(f) for f in done}
     if fixed:
         lines += ["", "## Fixed by the gate", ""] + fixed

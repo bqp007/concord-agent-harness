@@ -97,6 +97,14 @@ $DP --review-pr 5 --packet --repo "$P" > "$T/out.txt" 2>&1; PK=$(pk)
 [ -n "$PK" ] && [ -f "$PK" ] && grep -qF "$MARK_B" "$PK" && ! grep -qF "Checklists (" "$PK" \
   && ok "B.2 the PR packet carries the REVIEW.md prompt and no checklist list" \
   || bad "B.2 packet '$PK' marker=$(grep -cF "$MARK_B" "$PK" 2> /dev/null)"
+newrepo; tplan a.py   # a fork run: it starts at a snapshot commit that holds earlier uncommitted work
+( cd "$R" && echo '# earlier' >> a.py && git commit -qam snapshot ) || { echo "setup failed: snapshot"; exit 1; }
+run 'echo "# r" >> a.py'; RID=$(rid)
+( cd "$R" && git reset -q --soft HEAD~1 ) || { echo "setup failed: reset"; exit 1; }
+$DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1; PK=$(pk)
+[ -n "$PK" ] && grep -qF '+# r' "$PK" && ! grep -qF '# earlier' "$PK" \
+  && ok "B.3 a run whose start commit is no ancestor of HEAD shows only its own change" \
+  || bad "B.3 packet '$PK' earlier=$(grep -cF '# earlier' "$PK" 2> /dev/null)"
 fi
 
 if sel D; then echo "== D. After: takes the leading phase numbers"
