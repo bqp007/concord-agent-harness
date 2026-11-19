@@ -90,7 +90,7 @@ Exit codes: 2 usage, plan or lock; 3 a Claude model on the run path; 4 unknown m
 | `concord/wt.py` | `~/.claude/concord/` | one git worktree per ticket; links large untracked folders from the main checkout |
 | `concord/CONTRACT.md` | `~/.claude/concord/` | the contract every executor reads first: twelve rules and the report format |
 | `concord/PLAN_TEMPLATE.md` | `~/.claude/concord/` | the plan format |
-| `concord/REVIEW.md` | `~/.claude/concord/` | review checklists: generic, Python, C++, Kotlin, Swift, security, ML, tests |
+| `concord/REVIEW.md` | `~/.claude/concord/` | the review task: three closed questions, severities, the REVIEW-JSON format |
 | `concord/*.conf` | `~/.claude/concord/` (kept if present) | model registry and billing routes, harness settings, worktree links |
 | `concord/tests/` | `~/.claude/concord/tests/` | twenty-one regression suites; `run_all.sh` runs them in parallel with a fake HOME |
 | `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` and the implementer and reviewer agents; also four hook rules (`install.sh --repo`), and the CLAUDE.md rules block and settings keys the installer writes |

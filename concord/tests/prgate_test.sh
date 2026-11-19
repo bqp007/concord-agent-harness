@@ -96,7 +96,7 @@ rev = {"reviewer": "deepseek-flash", "model": "opencode/glm-5.3-flash-free", "ve
        "highs": 0, "mediums": 0, "report": d + "/report.md", "retried": True, "head": h, "tier": "high",
        "at": "2026-10-23T07:03:34.155703+00:00"}
 json.dump({"kind": "pr-review", "pr": 52, "slug": "", "base": "main", "head": h, "files": ["a.py"], "excluded": [],
-           "checklists": ["any"], "tier": "high", "run_id": d.rsplit("/", 1)[1], "reviews": [rev]}, open(d + "/meta.json", "w"))
+           "tier": "high", "run_id": d.rsplit("/", 1)[1], "reviews": [rev]}, open(d + "/meta.json", "w"))
 PY
 opus 52 high concord:reviewer-opus55; st 52
 has "CURRENT HEAD ${H52:0:8}: REVIEWED at high" && has "(provider refusal: not counted)" \

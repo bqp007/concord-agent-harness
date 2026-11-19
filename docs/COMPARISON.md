@@ -23,7 +23,7 @@ Concord runs inside Claude Code and leans on its real enforcement: subagents for
 
 ## Plugins for the same host
 
-ECC is the largest of them: 71 agents, 311 skills and 27 hook registrations, installed from a plugin marketplace or npm, with tooling tests across 33 CI jobs and a large community. A few of its hooks really block (`--no-verify`, config protection, a first-edit gate); its plan approval, test-first order and review delegation are prompt text, and fully independent review is opt-in (`/santa-loop`, `/orch-review`). Its report on its own first-edit gate is unusually candid: the benefit was "not established". Concord started next to ECC. Its review checklists were distilled from ECC's reviewer agents, and both refuse to let a finding block without proof. When ECC was switched off, mainly for the roughly 33,000 tokens its catalog added to every session on our setup, Concord's four hook rules moved to the hookify plugin unchanged.
+ECC is the largest of them: 71 agents, 311 skills and 27 hook registrations, installed from a plugin marketplace or npm, with tooling tests across 33 CI jobs and a large community. A few of its hooks really block (`--no-verify`, config protection, a first-edit gate); its plan approval, test-first order and review delegation are prompt text, and fully independent review is opt-in (`/santa-loop`, `/orch-review`). Its report on its own first-edit gate is unusually candid: the benefit was "not established". Concord started next to ECC, and both refuse to let a finding block without proof. When ECC was switched off, mainly for the roughly 33,000 tokens its catalog added to every session on our setup, Concord's four hook rules moved to the hookify plugin unchanged.
 
 agentic-sdlc drives a seven-phase lifecycle with 35 subagents, persisted state and resumable phases. Its strongest idea is evidence that quotes the command, exit code and runner summary instead of a claim; Concord re-runs the acceptance commands itself. agent-protocols is a set of 25 concise skills and seven commands, such as plan, build, review and ship, with verification checklists and tables that answer the excuses an agent gives for skipping a step; nothing in it is enforced. Both rest mostly on instructions a model may ignore. Concord's bet is that the few rules that matter should fail a run, not ask nicely.
 
@@ -33,7 +33,7 @@ MetaGPT turns a one-line requirement into a repository through a chain of typed 
 
 ## Harness evolution and review research
 
-<p align="center"><img src="figures/fig4-papers-to-changes.svg" alt="Nine papers and the change each one made to Concord" width="760"></p>
+<p align="center"><img src="figures/fig4-papers-to-changes.svg" alt="Eight papers and the change each one made to Concord" width="760"></p>
 
 Several recent papers let an agent rewrite its own harness and keep a change when a score improves. Concord took specific mechanisms from them and left the automatic loop alone:
 

@@ -145,7 +145,7 @@ echo "== --mutate on a run"
 newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.clamp(5) == 5"`\n'
 run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
 H0=$(sha "$R/lib.py")
-$DP --mutate "$RID" --seed 0 --max 20 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --mutate "$RID" --max 20 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 K=$(mut killed); SV=$(mut survived)
 [ $RC -eq 0 ] && has "MUTATION $RID:" && has "seed 0" && [ "${K:-0}" -ge 1 ] && [ "${SV:-0}" -ge 1 ] && grep -q "^SURVIVED lib.py:L2: compare: " "$T/out.txt" \
   && ok "mutants sampled and run: some killed, the untested boundary survives (SURVIVED lib.py:L2: compare)" || { bad "mutate rc=$RC"; head -8 "$T/out.txt"; }
@@ -157,10 +157,10 @@ WK=$(sed -n '1s/^note: mutating an isolated copy of the checkout (\(.*\)); the l
 [ "$(mj "$R/.git/concord/$RID/meta.json" '(m["mutation"]["seed"], m["mutation"]["mode"], m["mutation"]["killed"] >= 1, m["mutation"]["survived"] >= 1, len(m["mutation"]["sampled"]) == m["mutation"]["killed"] + m["mutation"]["survived"])')" = "(0, 'isolated', True, True, True)" ] \
   && ok "meta.mutation recorded" || bad "mutation meta: $(mj "$R/.git/concord/$RID/meta.json" 'm.get("mutation")')"
 mj "$R/.git/concord/$RID/meta.json" '[(x["line"], x["operator"], x["result"]) for x in m["mutation"]["sampled"]]' > "$T/m1.txt"
-$DP --mutate last --seed 0 --max 20 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --mutate last --max 20 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 mj "$R/.git/concord/$RID/meta.json" '[(x["line"], x["operator"], x["result"]) for x in m["mutation"]["sampled"]]' > "$T/m2.txt"
 [ $RC -eq 0 ] && [ -s "$T/m1.txt" ] && cmp -s "$T/m1.txt" "$T/m2.txt" && ok "--mutate last: same seed -> identical sample and results" || bad "determinism rc=$RC"
-$DP --mutate "$RID" --seed 0 --max 2 --repo "$R" > "$T/out.txt" 2>&1
+$DP --mutate "$RID" --max 2 --repo "$R" > "$T/out.txt" 2>&1
 has "2 mutants (sampled from" && ok "--max bounds the sample" || { bad "max"; head -2 "$T/out.txt"; }
 $DP --mutate "$RID" --max 0 --repo "$R" > "$T/out.txt" 2>&1; R1=$?
 $DP --mutate "$RID" --max -1 --repo "$R" > "$T/out.txt" 2>&1; R2=$?
@@ -185,7 +185,7 @@ L=$(mj "$R/.git/concord/$RID/meta.json" 'sorted({x["line"] for x in m["mutation"
 newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.clamp(5) == 5"`\n- `python3 -c "import lib" && echo graded >> "$T/glog"`\n- `echo char >> "$T/clog"` (characterization)\n'
 run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
 rm -f "$T/glog"; C0=$(wc -l < "$T/clog" | tr -d ' ')
-$DP --mutate "$RID" --seed 0 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 K=$(mut killed); SV=$(mut survived); G=$(cat "$T/glog" 2> /dev/null | wc -l | tr -d ' ')
 [ $RC -eq 0 ] && [ "${K:-0}" -ge 1 ] && [ "$G" -eq $(( ${SV:-0} + 1 )) ] \
   && ok "each mutant stops at its first failing command: the second ran only on the unmutated copy and the $SV survivor(s)" \

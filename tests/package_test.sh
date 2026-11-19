@@ -17,7 +17,7 @@ check() { local name=$1; shift; local out
 AGENTS="implementer implementer-opus48 reviewer-opus55 reviewer-delta plan-verifier"
 COMMANDS="plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
-SUITES="acclint delegate delta guards papers pr_review protocol slim testquality worktree"
+SUITES="acclint delegate delta guards papers pr_review protocol simplify slim testquality worktree"
 
 # Every relative link, reference link and image in the given markdown files names a file that would be
 # published: present, and tracked or untracked-but-not-ignored (a link into an ignored folder breaks on GitHub).
@@ -82,7 +82,7 @@ s_layout() { local p old
   check layout/old-name "git grep -n -I -F --untracked -e '$old' -- .; [ \$? = 1 ]"; }
 
 s_budgets() { local spec f
-  for spec in README.md:220 install.sh:160 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
+  for spec in README.md:220 install.sh:165 $A/CLAUDE.md:25 $A/commands/delegate.md:60 \
       $A/commands/plan-then-delegate.md:25 docs/WORKFLOW.md:400 tests/package_test.sh:270 tests/demo_test.sh:120 \
       $A/settings.snippet.json:12 $K/repo-notes/README.md:15; do
     local f=${spec%%:*} n=${spec##*:} name; name=$(basename "$f"); [ "$f" = $K/repo-notes/README.md ] && name=repo-notes-README.md
@@ -90,7 +90,7 @@ s_budgets() { local spec f
   done
   for spec in scripts/demo.sh:220 examples/PLAN_example.md:60; do f=${spec%%:*}   # once they exist
     [ -f "$f" ] && check "budgets/$(basename "$f")" "[ \$(wc -l < '$f') -le ${spec##*:} ] || { wc -l '$f'; false; }"; done
-  check budgets/concord.py "[ \$(wc -l < $K/concord.py) -le 7100 ] || { wc -l $K/concord.py; false; }"
+  check budgets/concord.py "[ \$(wc -l < $K/concord.py) -le 6766 ] || { wc -l $K/concord.py; false; }"
   check budgets/wt.py "[ \$(wc -l < $K/wt.py) = 597 ] || { wc -l $K/wt.py; false; }"
   check budgets/models.conf "[ \$(grep -c '=' $K/models.conf) = 32 ] || { grep -c '=' $K/models.conf; false; }"
   check budgets/executors.conf "[ \$(grep -cE '^[a-z_.]+ *=' $K/executors.conf) = 17 ]"
@@ -159,10 +159,10 @@ inst_k() { mkdir -p "$H/.claude" && printf 'TOP SENTINEL\n' > "$H/.claude/CLAUDE
   [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" -eq 1 ]; }
 inst_l() { mkdir -p "$H/.claude" && printf '%s' '{"myKey":"keep","modelSettings":{"claude-opus-5-5":{"autoCompactWindow":123}}}' > "$H/.claude/settings.json" &&
   inst --no-tests >/dev/null &&
-  python3 -B -I -c "import json; d=json.load(open('$H/.claude/settings.json')); assert d['myKey']=='keep'; assert d['modelSettings']['claude-opus-5-5']['autoCompactWindow']==123; assert d['modelSettings']['claude-fable-5-1']=={'autoCompactWindow':400000}; assert 'git push *' in d['sandbox']['excludedCommands']; assert any('--lessons-hook' in h['command'] for e in d['hooks']['UserPromptSubmit'] for h in e['hooks'])" &&
-  printf '%s' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"other"}]}]}}' > "$H/.claude/settings.json" &&
+  python3 -B -I -c "import json; d=json.load(open('$H/.claude/settings.json')); assert d['myKey']=='keep'; assert d['modelSettings']['claude-opus-5-5']['autoCompactWindow']==123; assert d['modelSettings']['claude-fable-5-1']=={'autoCompactWindow':400000}; assert 'git push *' in d['sandbox']['excludedCommands']; assert any('--drift-hook' in h['command'] for e in d['hooks']['PostToolUse'] for h in e['hooks']); assert not any('--lessons-hook' in h['command'] for v in d['hooks'].values() for e in v for h in e['hooks'])" &&
+  printf '%s' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"other"},{"type":"command","command":"python3 \"$HOME/.claude/concord/concord.py\" --lessons-hook 2>/dev/null || true","timeout":5}]},{"hooks":[{"type":"command","command":"python3 \"$HOME/.claude/concord/concord.py\" --lessons-hook 2>/dev/null || true","timeout":5}]}]}}' > "$H/.claude/settings.json" &&
   inst --no-tests >/dev/null && inst --no-tests >/dev/null &&
-  python3 -B -I -c "import json; u=json.load(open('$H/.claude/settings.json'))['hooks']['UserPromptSubmit']; c=[h['command'] for e in u for h in e['hooks']]; assert 'other' in c and sum('--lessons-hook' in x for x in c)==1, c"; }
+  python3 -B -I -c "import json; d=json.load(open('$H/.claude/settings.json'))['hooks']; c=[h['command'] for v in d.values() for e in v for h in e['hooks']]; assert 'other' in c and not any('--lessons-hook' in x for x in c) and sum('--drift-hook' in x for x in c)==1 and all(e['hooks'] for v in d.values() for e in v), c"; }
 inst_m() { inst --no-tests >/dev/null && links_made && inst --plugin --no-tests > "$H/out" &&
   grep -qF '/plugin marketplace add' "$H/out" && grep -qF '/plugin install concord@concord' "$H/out" &&
   [ ! -e "$H/.claude/commands/concord" ] && [ ! -L "$H/.claude/agents/implementer.md" ] &&

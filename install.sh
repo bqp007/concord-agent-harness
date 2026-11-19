@@ -117,7 +117,8 @@ PY
   echo "update $md"; }
 install_claude_md
 
-# settings.json: add only the keys the snippet introduces; keep every existing value; back the file up first.
+# settings.json: add the snippet's missing keys, keep every existing value and remove the retired concord.py
+# hooks; back the file up first.
 install_settings() { local s="$DEST/settings.json" snip="$A/settings.snippet.json"
   [ -f "$snip" ] || return 0
   if [ "$DRY" = 1 ]; then echo "would update $s"; return 0; fi
@@ -140,6 +141,14 @@ for event, entries in snip.get("hooks", {}).items():
     known = " ".join(h.get("command", "") for e in have for h in e.get("hooks", []))
     have.extend(e for e in entries
                 if not all(w in known for h in e.get("hooks", []) for w in h["command"].split() if w.endswith("-hook")))
+# A hook that calls concord.py with a --*-hook flag this snippet no longer ships is retired (an old --lessons-hook,
+# say). The other hooks of its entry stay; an entry left with no hooks goes.
+flags = {w for v in snip.get("hooks", {}).values() for e in v for h in e.get("hooks", []) for w in h["command"].split()}
+def retired(h): return "concord.py" in h.get("command", "") and any(w.endswith("-hook") and w not in flags for w in h["command"].split())
+for event, entries in base.get("hooks", {}).items():
+    for e in entries:
+        e["hooks"] = [h for h in e["hooks"] if not retired(h)]
+    base["hooks"][event] = [e for e in entries if e["hooks"]]
 with open(sys.argv[2], "w") as f: json.dump(base, f, indent=2); f.write("\n")
 PY
   echo "update $s"; }

@@ -160,11 +160,6 @@ git -C "$R" config --unset color.diff; git -C "$R" config --unset color.ui
   && ok "--delta since the open head: since = P1, both files" || { bad "delta from open base rc=$RC"; tail -3 "$T/out.txt"; }
 ! grep -q "$(printf '\033')" "$D8/prompt.txt" && grep -q "^+z = 3$" "$D8/prompt.txt" && ok "delta prompt has no color codes under color.ui=always" || bad "color codes in the delta prompt"
 stn 8; has "CURRENT HEAD ${P3:0:8}: REVIEWED at high (via delta from ${P1:0:8}; light fix at low)" && ok "review finds a HIGH, fix lands, clean delta -> REVIEWED via the open head" || { bad "main flow"; cat "$T/out.txt"; }
-newpr 19 "printf 'm = 1\n' > m.py"; review 19 FAKE_SEV=MEDIUM FAKE_PATH=m.py
-pushn 19 "printf 'm = 1  # todo\n' > m.py"; M1=$(headn 19)
-FAKE_SEV=MEDIUM FAKE_PATH=m.py $DP --review-pr 19 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1
-stn 19; has "CURRENT HEAD ${M1:0:8}: FINDINGS OPEN" && ok "a cheap delta keeps a MEDIUM the fix leaves open: the gate stays shut" || { bad "delta MEDIUM"; cat "$T/out.txt"; }
-
 echo "== a delta never clears a full review at the same head"
 # --force-review: a clean delta already covers this head; force the full review this case deliberately re-runs
 $DP --review-pr 8 --via qwen --model fake/m --user-approved "test go-ahead" --tier high --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"

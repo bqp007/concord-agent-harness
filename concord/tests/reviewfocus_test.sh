@@ -76,11 +76,11 @@ flash "$A"; RV=$(sed -n 's/^REVIEW \([^ ]*\) of .*/\1/p' "$T/out.txt" | head -1)
   && ok "flash review prompt carries the repo notes right after Files changed" || { bad "flash review prompt has no repo notes ('$RV')"; tail -2 "$T/out.txt"; }
 packet "$A"; P=$(pk)
 [ -n "$P" ] && before "$P" "Files changed:" "$MARK" && before "$P" "$MARK" "The phase that was implemented" \
-  && before "$P" "$MARK" "Checklists (" && ok "phase packet: repo notes right after Files changed, before the phase text and the checklists" \
+  && ok "phase packet: repo notes right after Files changed, before the phase text" \
   || { bad "phase packet '$P'"; tail -2 "$T/out.txt"; }
 prpacket 7; P=$(pk)
-[ -n "$P" ] && before "$P" "<<<END-PR-TEXT-" "$MARK" && before "$P" "$MARK" "Checklists (" \
-  && ok "PR packet: repo notes after the PR-text block, before the checklists" || { bad "PR packet '$P'"; tail -2 "$T/out.txt"; }
+[ -n "$P" ] && before "$P" "<<<END-PR-TEXT-" "$MARK" \
+  && ok "PR packet: repo notes after the PR-text block" || { bad "PR packet '$P'"; tail -2 "$T/out.txt"; }
 mv "$NOTES" "$T/notes.off"
 packet "$A"; P1=$(pk); prpacket 7; P2=$(pk)
 # --force-review: A's content is unchanged since its flash review above, so re-review it to inspect the prompt
