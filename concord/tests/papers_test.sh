@@ -153,8 +153,8 @@ PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
   || { echo "setup failed: orphan"; exit 1; }
 $DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
-[ -f "$PK" ] && grep -q "note: diff base is HEAD (the run's start commit [0-9a-f]\{8\} is not an ancestor of HEAD); the diff may be empty" "$PK" \
-  && ok "start commit not an ancestor of HEAD: fallback to HEAD is stated in the review task" || bad "no fallback note in the packet"
+[ -f "$PK" ] && grep -q "note: the run's start commit [0-9a-f]\{8\} is not an ancestor of HEAD; each file shows its change since the run's start copy" "$PK" \
+  && ok "start commit not an ancestor of HEAD: the start-copy diff is stated in the review task" || bad "no fallback note in the packet"
 pyblock <<'PYB'
 import importlib.util, subprocess, sys
 from pathlib import Path

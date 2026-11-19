@@ -1,10 +1,16 @@
 # Plan: fix the shop cart total
 
+Tests: +12/−0 lines, net ≤ 12
 Done when: `cart.total` multiplies each price by its quantity and `python3 tests/check_cart.py` passes.
 Ship: no PR; `scripts/demo.sh` runs this plan on a throwaway shop repository with a scripted executor.
 
 ## Open questions
 - none
+
+## Test plan
+| Behavior | Existing tests | Action | Home |
+|---|---|---|---|
+| `cart.total` counts each item's quantity | none | ADD | `tests/check_cart.py` |
 
 ## Phase 1 - Failing test for the cart total
 Executor: planner
