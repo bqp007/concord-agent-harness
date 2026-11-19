@@ -31,8 +31,8 @@ If the task includes "Repository notes", they are binding facts from the maintai
 ## Verification
 9. Run only the phase's `Acceptance` commands, never the full suites. If one fails, fix the cause within scope and re-run,
    at most 3 attempts, then stop. If you cannot run commands, say so under ACCEPTANCE.
-10. Never weaken, skip, or delete tests to make them pass. Files your acceptance commands name, or under
-    directories they name, are hashed before the run: changing or adding one blocks a PASS verdict.
+10. Never weaken, skip, or delete tests to make them pass. The plan's Test plan Home files (except those your
+    Files: lists) and the repository's Cases file are hashed before the run: changing or adding one blocks a PASS.
 11. No web access: OpenCode's webfetch is denied; network use through the shell is reported.
 12. Prose in your messages and in the report's free-text fields: the style the task names, by default
     lean STE (short active sentences, no filler). Code, paths, commands, numbers and error text stay exact.

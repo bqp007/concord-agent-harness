@@ -1,12 +1,11 @@
 #!/bin/bash
-# concord.py fixes for C++ phases (2026-10-22, PLAN_kit-cpptools; issues found on a C++ ticket): the acceptance-file
-# snapshot skips command words, git-ignored paths and CMake build trees and never derives "added" files from a capped
-# list, so a clean C++ run takes --verdict PASS without --force (1, 1c); --restore leaves restored sources newer than
-# the build (2); --mutate runs C/C++ and listed mutants in an isolated copy (3; 3b: NUL strings, over-long path parts
-# and C/C++ files in build trees, found by the third P3 review, and a generated isolated run with no candidate, found
-# by the P3.1 mutation probe); the (characterization) marker variants (4); --repo takes a directory (8); the field
-# heading "Inputs and failure classes:" (9); the lint of git inside $( ) (10); a Files: glob on Python 3.9 (11, found
-# while planning). Sections 1c, 2 and 3 build a small CMake project (SKIP without cmake, ctest, c++).
+# concord.py fixes for C++ phases (2026-10-22, PLAN_kit-cpptools; issues found on a C++ ticket): --restore leaves
+# restored sources newer than the build (2); --mutate runs C/C++ and listed mutants in an isolated copy (3; 3b: NUL
+# strings, over-long path parts and C/C++ files in build trees, found by the third P3 review, and a generated
+# isolated run with no candidate, found by the P3.1 mutation probe); the (characterization) marker variants (4);
+# --repo takes a directory (8); the field heading "Inputs and failure classes:" (9); the lint of git inside $( )
+# (10); a Files: glob on Python 3.9 (11, found while planning). Sections 2 and 3 build a small CMake project (SKIP
+# without cmake, ctest, c++).
 # Sections 5-7 (--stats, --map, --close-round) went with those commands in the lean revision (2026-10-23, kit-lean).
 # No network: fake qwen executor and reviewer.
 # Run: bash ~/.claude/concord/tests/cpptools_test.sh [SECTION ...]   (default all; exit 0 = every selected check passed)
@@ -70,117 +69,6 @@ Acceptance:
   (characterization)
 P
 }
-
-if sel 1; then
-echo "== 1 acceptance files: command words, git-ignored paths and CMake build trees are not acceptance files"
-A="$T/af"; gitrepo "$A"; ( cd "$A" && mkdir -p cmake tests data build out2
-  printf 'set(X 1)\n' > cmake/a.cmake; printf 'exit 0\n' > cmake/x.sh; printf 'exit 0\n' > tests/run.sh; printf 'd\n' > data/d.txt
-  printf 'build/\nign.txt\n.claude/\n' > .gitignore; git add -A && git commit -qm init
-  : > build/CMakeCache.txt; echo g > build/gen.txt; : > out2/CMakeCache.txt; echo o > out2/o.txt; echo i > ign.txt )
-python3 -I - "$T/concord/concord.py" "$A" <<'EOF'
-import importlib.util, sys
-from pathlib import Path
-sys.dont_write_bytecode = True
-spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
-repo = Path(sys.argv[2])
-cases = [
-    ("cmake -S . -B build -DBUILD_TESTING=ON > /dev/null && cmake --build build -j6 && ctest --test-dir build -R '^(a_test|b_test)$'", []),
-    ("bash tests/run.sh", ["tests/run.sh"]),
-    ("cmake/x.sh --flag", ["cmake/x.sh"]),
-    ("FOO=1 cmake --version; echo $(cmake --version) | cmake -E echo x", []),
-    ("true && tests", []),
-    ("ls out2 && cat ign.txt && cat build/gen.txt", []),
-    ("ls data", ["data/d.txt"]),
-]
-p = []
-for cmd, want in cases:
-    got = d.acceptance_files(repo, [cmd], [])
-    if got != want:
-        p.append(f"{cmd!r}: {got[:6]} (want {want})")
-print("  ok   acceptance files skip the command word of each simple command, git-ignored paths and directories holding "
-      "CMakeCache.txt; arguments and command words with a / still count" if not p else "  FAIL acceptance files: " + "; ".join(p))
-sys.exit(1 if p else 0)
-EOF
-counted $?
-
-echo "== 1 acceptance files keep the files a command names: after a closing ), as NAME=value values, beside an in-source CMakeCache.txt, in another case, next to a non-UTF-8 name"
-A2="$T/af2"; gitrepo "$A2"; ( cd "$A2" && mkdir -p tests
-  printf 'g\n' > golden.txt; printf 'e\n' > expected.txt; printf 'o\n' > out.txt; printf 'x\n' > x; printf 'c\n' > tests/conf.ini
-  printf 't\n' > tests/t.py; printf 'true\n' > run.sh; git add -A && git commit -qm init
-  git update-index --add --cacheinfo 100644 "$(printf 'x\n' | git hash-object -w --stdin)" "$(printf 'tests/bad\377.txt')"
-  : > CMakeCache.txt; mkdir -p tests/__pycache__ && printf 'c\n' > tests/__pycache__/t.cpython-39.pyc )
-python3 -I - "$T/concord/concord.py" "$A2" <<'EOF'
-import importlib.util, sys
-from pathlib import Path
-sys.dont_write_bytecode = True
-spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
-repo = Path(sys.argv[2])
-folded = (repo / "Tests/t.py").exists()      # a case-insensitive filesystem (macOS default)
-cases = [
-    ("diff <( sort out.txt ) golden.txt", ["golden.txt", "out.txt"]),
-    ("echo $( cat x ) expected.txt", ["expected.txt", "x"]),
-    ("echo $(./run.sh)", ["run.sh"]),
-    ("CONF=tests/conf.ini bash run.sh", ["run.sh", "tests/conf.ini"]),
-    ("GOLDEN=golden.txt make check", ["golden.txt"]),
-    ("python3 -m pytest tests/t.py golden.txt", ["golden.txt", "tests/t.py"]),
-    ("python3 -m pytest Tests/t.py", ["tests/t.py"] if folded else []),
-    ("ls Tests", ["tests/conf.ini", "tests/t.py"] if folded else []),
-    ("python3 -m pytest tests", ["tests/conf.ini", "tests/t.py"]),
-]
-p = []
-for cmd, want in cases:
-    try:
-        got = d.acceptance_files(repo, [cmd], [])
-    except Exception as exc:  # a non-UTF-8 name in the index must not raise
-        got = f"{type(exc).__name__}: {exc}"
-    if got != want:
-        p.append(f"{cmd!r}: {got if isinstance(got, str) else got[:6]} (want {want})")
-print("  ok   acceptance files keep named files after a closing ), as NAME=value values, beside an untracked root "
-      "CMakeCache.txt (in-source build), in git's spelling when the command uses another case, and next to a non-UTF-8 "
-      "name in the index" if not p else "  FAIL acceptance files keep named files: " + "; ".join(p))
-sys.exit(1 if p else 0)
-EOF
-counted $?
-
-echo "== 1 a build tree whose CMakeCache.txt is git-ignored by name (GitHub's CMake.gitignore), not the tree, is still a build tree"
-A3="$T/af3"; gitrepo "$A3"; ( cd "$A3" && mkdir -p cmake tests
-  printf 'CMakeCache.txt\nCMakeFiles\nMakefile\ncmake_install.cmake\nCTestTestfile.cmake\nTesting\n' > .gitignore
-  printf 'm\n' > cmake/m.cmake; printf 't\n' > tests/a_test.cc; git add -A && git commit -qm init
-  mkdir -p build/sub && for f in CMakeCache.txt Makefile a_test build.ninja sub/b_test; do printf 'x\n' > "build/$f"; done )
-python3 -I - "$T/concord/concord.py" "$A3" <<'EOF'
-import importlib.util, sys
-from pathlib import Path
-sys.dont_write_bytecode = True
-spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
-repo = Path(sys.argv[2])
-cases = [
-    ("cmake -S . -B build && cmake --build build && ctest --test-dir build -R '^a_test$'", []),
-    ("./build/a_test", []),
-    ("ls build", []),
-    ("ls build/sub", []),
-    ("cat tests/a_test.cc", ["tests/a_test.cc"]),
-]
-p = []
-for cmd, want in cases:
-    got = d.acceptance_files(repo, [cmd], [])
-    if got != want:
-        p.append(f"{cmd!r}: {got[:6]} (want {want})")
-print("  ok   acceptance files skip a build tree found on disk by its CMakeCache.txt when only the cache and the "
-      "Makefiles are git-ignored, not the tree" if not p else "  FAIL acceptance files with a name-ignored CMakeCache.txt: "
-      + "; ".join(p))
-sys.exit(1 if p else 0)
-EOF
-counted $?
-
-echo "== 1 capped acceptance list: no 'added' file derived from a recomputed list; the dropped files are named"
-newrepo 'Files: a.py\nAcceptance:\n- `ls data > /dev/null && grep -q y a.py`\n'
-( cd "$R" && mkdir data && for i in $(seq -w 0 599); do echo "$i" > "data/f$i.txt"; done && git add data && git commit -qm data )
-run 'rm data/f000.txt; echo y >> a.py'
-grep -F "ACCEPTANCE FILES CHANGED:" "$T/out.txt" | grep -qF "data/f000.txt (removed)" && ! has "data/f500.txt (added)" \
-  && has "not hashed: data/f500.txt" && has "files added under acceptance directories are not checked" \
-  && ok "capped list: the removed file is reported, the file at the cap boundary is not called added, the dropped files are named" \
-  || { bad "capped list"; grep -e ACCEPT -e capped "$T/out.txt" | cut -c1-300; }
-fi
 
 if sel 4; then
 echo "== 4 the (characterization) marker: a qualifier inside the parentheses, the wrapped next line, a lint near miss"
@@ -570,7 +458,6 @@ Files: src/calc.h
 Acceptance:
 - `true`
 P
-printf '\nacceptance_hash_max_bytes = 1000\n' >> "$T/concord/executors.conf"
 # Like a real executor, the fake one builds after its edit; the touch stands for build files of a test target. make
 # compares mtimes to the second here, so the edit waits one second after the red run's build (a real executor does).
 FAKE_ACTIONS="sleep 1; cp '$T/calc_impl.cpp' src/calc.cpp && cmake --build build -j4 > /dev/null 2>&1; touch build/CMakeFiles/calc_test.dir/flags.make" \
@@ -578,22 +465,11 @@ FAKE_ACTIONS="sleep 1; cp '$T/calc_impl.cpp' src/calc.cpp && cmake --build build
 CR=$(rid); RUN="$C/.git/concord/$CR"
 [ -n "$CR" ] && [ -f "$RUN/meta.json" ] && [ -x "$C/build/calc_print" ] || { echo "setup failed: C++ run rc=$RC"; tail -5 "$T/out.txt"; exit 1; }
 
-if sel 1c; then
-[ $RC -eq 0 ] && has "changed in scope: src/calc.cpp" && ! has "ACCEPTANCE FILES CHANGED" && ! has "acceptance file list capped" \
-  && ! has "compared by size and mtime" && ok "1c C++ run: no build/ or cmake/ file reported as a changed acceptance file, no cap or size note" \
-  || { bad "1c C++ run rc=$RC"; grep -e ACCEPT -e 'note: acc' -e 'changed in scope' "$T/out.txt" | cut -c1-240; tail -6 "$RUN/acceptance.after.txt" 2>/dev/null; }
-[ "$(mj "$RUN/state.json" '[k for k in m["acceptance_hashes"] if k.startswith(("build/", "cmake/"))]')" = "[]" ] \
-  && ok "1c the acceptance snapshot holds no build/ or cmake/ file" || bad "1c snapshot: $(mj "$RUN/state.json" 'sorted(m["acceptance_hashes"])[:4]')"
-$DP --verdict "$CR" PASS --repo "$C" > "$T/v.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(mj "$RUN/meta.json" 'm["verdict"]')" = PASS ] && [ "$(mj "$RUN/meta.json" '"forced" in (m.get("verdict_note") or "")')" = False ] \
-  && ok "1c a clean C++ executor run takes --verdict PASS without --force" || { bad "1c verdict PASS rc=$RC"; cat "$T/v.txt"; }
-fi
-
 if sel 3; then
 H0=$(sha "$C/src/calc.cpp"); M0=$(mtime "$C/src/calc.cpp"); B0=$(sha "$C/build/calc_print")
 $DP --begin 2 --label implementer --plan PLAN_C.md --no-baseline --repo "$C" > "$T/out.txt" 2>&1; HB=$(bid)
 [ -n "$HB" ] || { echo "setup failed: --begin"; tail -3 "$T/out.txt"; exit 1; }
-TMPDIR="$T/tmp" $DP --mutate "$CR" --seed 0 --max 20 --build "cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+TMPDIR="$T/tmp" $DP --mutate "$CR" --max 20 --build "cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "MUTATION $CR:" && has "killed 1, survived 1, stillborn 1" && grep -q "^SURVIVED src/calc.cpp:L3: compare: " "$T/out.txt" \
   && [ "$(mj "$RUN/meta.json" '(m["mutation"]["mode"], m["mutation"]["stillborn"])')" = "('isolated', 1)" ] \
   && ok "3 generated C++ mutants in an isolated copy: one killed, the untested boundary survives, a mutant that does not build is stillborn" \

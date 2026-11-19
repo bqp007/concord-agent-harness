@@ -76,6 +76,7 @@ ETA: <N> min, lands at <hh:mm> local
   behaviour-preserving phase sets `Baseline: pass`, optionally `Characterize: <command>` (output diffed before and
   after).
 - Test plan: one row per touched behavior; ADD only when no test covers it; a finding fix adds at most one row; the
-  rows fit the `Tests:` line.
+  rows fit the `Tests:` line. Home names the test file: an executor phase that changes a Home file its Files: does
+  not list cannot pass (ACCEPTANCE FILES CHANGED, exit 7).
 - One phase: about 5 files and 7 steps at most; Notes, Interfaces, Decisions, Out of scope only when needed.
 -->

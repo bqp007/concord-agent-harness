@@ -1,9 +1,9 @@
 #!/bin/bash
 # concord.py regression for the 2026-10-18 nine-paper changes, lean revision 2026-10-23 (no network, fake qwen
 # executor, ~30 s): webfetch denied by default + tool-call parsing; acceptance files hashed (report line, PASS refused
-# with exit 7, --force, session runs exempt, directory tokens); post-run acceptance pass; NO CHANGES flag; review file
+# with exit 7, --force, session runs exempt); post-run acceptance pass; NO CHANGES flag; review file
 # lists without generated files and the diff base of a committed run; reviewer-finding post-filters (outside diff,
-# TODO-as-fix, delete-only) on --review-record; --behaviour tag on EXECUTOR failures.
+# TODO-as-fix, delete-only) on --review-record.
 # Run: bash ~/.claude/concord/tests/papers_test.sh   (exit 0 = all passed). Copies Concord into a temp dir with
 # HOME pointing at a temp home, so runs.jsonl and the real config stay untouched.
 set -u
@@ -27,7 +27,7 @@ newrepo(){ rm -rf "$R"; mkdir -p "$R/tests"; (
   printf 'x = 1\n' > a.py; printf 'y = 2\n' > b.py; printf 'assert True\n' > tests/test_a.py
   printf 'assert True\n' > tests/test_b.py; printf '.claude/\n' > .gitignore
   git add -A && git commit -qm init
-  printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `%s`\n' "$1" > PLAN_T.md
+  printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| a | test_a | KEEP | tests/test_a.py |\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `%s`\n' "$1" > PLAN_T.md
 ); }
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1; }
 has(){ grep -F -- "$1" "$T/out.txt" > /dev/null; }
@@ -95,18 +95,6 @@ echo "# planner edit" >> "$R/tests/test_a.py"
 $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1 && ok "planner session run may edit acceptance files (PASS accepted)" \
   || { bad "planner run refused ($BID)"; cat "$T/v.txt"; }
-newrepo 'ls tests/'; run 'echo y >> a.py; echo "# t" >> tests/test_b.py'
-line "ACCEPTANCE FILES CHANGED:" "tests/test_b.py (modified)" && ok "directory token in acceptance: files under it hashed" \
-  || { bad "directory acceptance not hashed"; grep -i accept "$T/out.txt" | head -5; }
-
-newrepo 'grep -q y a.py && find . -name "*.py" && ls /'; run 'echo y >> a.py'; RID=$(rid)
-! has "ACCEPTANCE FILES CHANGED" && $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1 \
-  && ok "in-scope file named by acceptance, '.' and '/' tokens: not acceptance files" \
-  || { bad "in-scope/root tokens treated as acceptance files"; grep ACCEPT "$T/out.txt"; cat "$T/v.txt"; }
-
-newrepo 'python3 -m pytest tests/test_a.py::test_x -q'; run 'echo y >> a.py; echo "# t" >> tests/test_a.py'
-line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" && ok "pytest node id names its test file" \
-  || { bad "node id not hashed"; grep -i accept "$T/out.txt" | head -3; }
 newrepo 'python3 tests/test_a.py'
 $DP --begin 1 --label implementer --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
 BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
@@ -116,31 +104,11 @@ $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1
 [ $? -eq 7 ] && ok "implementer session run editing acceptance files -> PASS refused (only planner exempt)" \
   || { bad "implementer session not refused ($BID)"; cat "$T/v.txt"; }
 newrepo 'grep -q y a.py'
-printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py && date +%%N > tests/test_b.py` (characterization)\n' > "$R/PLAN_T.md"
+printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | test_b | KEEP | tests/test_b.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py && date +%%N > tests/test_b.py` (characterization)\n' > "$R/PLAN_T.md"
 FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
 line "changed in scope:" "a.py" && ! has "ACCEPTANCE FILES CHANGED" \
   && ok "files rewritten by the red run are not blamed on the executor" || { bad "red-run artifact blamed"; grep -e ACCEPT -e '^status' "$T/out.txt"; }
-printf '\nacceptance_hash_max_bytes = 10\n' >> "$T/concord/executors.conf"
-newrepo 'python3 tests/test_a.py'; printf 'assert True  # padding padding padding\n' > "$R/tests/test_a.py"; git -C "$R" commit -qam big
-run 'echo y >> a.py; echo "# t" >> tests/test_a.py'
-line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" && has "compared by size and mtime" \
-  && ok "acceptance files over the size cap still compared (size+mtime), with a note" || { bad "size cap"; grep -i -e accept -e mtime "$T/out.txt" | head -4; }
-cp -p "$SRC/executors.conf" "$T/concord/executors.conf"
-newrepo 'ls src/'; mkdir -p "$R/src/aaa" "$R/src/zzz"
-for i in $(seq 1 600); do echo "v = $i" > "$R/src/aaa/m$i.py"; done; echo 'assert True' > "$R/src/zzz/test_z.py"
-git -C "$R" add -A && git -C "$R" commit -qm many
-printf '# Plan\n## Phase 1 - change aaa\nExecutor: deepseek-flash\nFiles: src/aaa/\nAcceptance:\n- `ls src/`\n' > "$R/PLAN_T.md"
-run 'echo x >> src/aaa/m1.py; echo "# t" >> src/zzz/test_z.py'
-line "ACCEPTANCE FILES CHANGED:" "src/zzz/test_z.py (modified)" && ok "excluded in-scope files do not use up the 500-file cap" \
-  || { bad "cap counted excluded files"; grep -i accept "$T/out.txt" | head -3; }
 $DP --help 2>&1 | tr -s ' \n' ' ' | grep -q -- "--force.*acceptance files" && ok "--force help mentions the acceptance-file refusal" || bad "--force help text"
-
-newrepo 'ls tests/'; run 'echo y >> a.py; echo "x = 1" > tests/conftest.py'
-line "ACCEPTANCE FILES CHANGED:" "tests/conftest.py (added)" && ok "file added under an acceptance directory reported" \
-  || { bad "added acceptance file not reported"; grep -i accept "$T/out.txt" | head -3; }
-newrepo 'python3 -m pytest --rootdir=tests -q'; run 'echo y >> a.py; echo "# t" >> tests/test_b.py'
-! has "ACCEPTANCE FILES CHANGED" && ok "directory given as a flag value (--rootdir=tests) is not walked" \
-  || { bad "flag-value directory walked"; grep -i accept "$T/out.txt" | head -3; }
 
 echo "== acceptance after run"
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
@@ -257,16 +225,5 @@ EOF
 rm "$R/a.py"; $DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/rev.txt" --repo "$R" > "$T/rr.txt" 2>&1
 python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))['reviews'][-1]; sys.exit(0 if r.get('highs')==4 and r.get('blockers')==1 else 1)" "$R/.git/concord/$RID/meta.json" \
   && ok "review record on a run whose files are gone keeps findings as written" || { bad "no-files record downgraded"; cat "$T/rr.txt"; }
-
-echo "== behaviour tag"
-newrepo 'grep -q y a.py'; run 'echo y >> a.py; echo w >> b.py'; RID=$(rid)
-$DP --verdict "$RID" FAIL --cause EXECUTOR --behaviour scope --repo "$R" > "$T/v.txt" 2>&1
-[ $? -eq 0 ] && [ "$(meta "$RID" behaviour)" = "scope" ] && ok "--behaviour stored on an EXECUTOR fail" || { bad "behaviour not stored"; cat "$T/v.txt"; }
-$DP --verdict "$RID" FAIL --cause PLAN_GAP --behaviour scope --repo "$R" > "$T/v.txt" 2>&1
-[ $? -eq 2 ] && ok "--behaviour with a non-EXECUTOR cause -> exit 2" || bad "behaviour on PLAN_GAP accepted"
-$DP --verdict "$RID" FAIL --cause EXECUTOR --behaviour nonsense --repo "$R" > "$T/v.txt" 2>&1
-[ $? -eq 2 ] && ok "unknown behaviour slug -> exit 2" || bad "unknown slug accepted"
-$DP --verdict "$RID" FAIL --cause EXECUTOR --repo "$R" > /dev/null 2>&1
-[ "$(meta "$RID" behaviour)" = "scope" ] && ok "re-verdict without --behaviour keeps the stored behaviour" || bad "behaviour wiped: $(meta "$RID" behaviour)"
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

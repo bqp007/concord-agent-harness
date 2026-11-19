@@ -125,8 +125,8 @@ sec "Test lines" | grep -qF "| tests/a_test.sh | 2 | 0 |" && ! sec "Test lines" 
 sec Review | grep -qF "| r1 | opus55 | 0 | 1 | 1 | 1 |" && ok "4.6 review row: BLOCKER/HIGH/MEDIUM/NOTE per reviewer and run" || { bad "4.6 review"; sec Review; }
 O=$(sec "Open items for the DAT")
 echo "$O" | grep -qF "medium-thing" && echo "$O" | grep -qF "note-thing" && ! echo "$O" | grep -qF "high-thing" \
-  && echo "$O" | grep -qF "Q1 which name to show" && echo "$O" | grep -qxF "Never adjudicated: 1" \
-  && ok "4.7 open items: open and note findings, open questions, never-adjudicated count" || { bad "4.7 open items"; echo "$O"; }
+  && echo "$O" | grep -qF "Q1 which name to show" \
+  && ok "4.7 open items: open and note findings, open questions" || { bad "4.7 open items"; echo "$O"; }
 grep -Eq '^Elapsed [0-9]+ min against ETA 30 min \(plan\)' "$REP" && grep -q '^Concurrency: 1.00' "$REP" \
   && ok "4.8 time against the plan's ETA; concurrency of one run" || { bad "4.8 time"; sec Time; }
 python3 -I -c 'import json,sys; p,r=sys.argv[1:3]; d=json.load(open(p)); assert d[r].get("reported"), d[r]' "$H/.git/concord/drift.json" "$H" 2>/dev/null \

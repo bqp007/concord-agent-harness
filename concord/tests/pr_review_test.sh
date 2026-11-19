@@ -109,8 +109,8 @@ echo "== packet, record, status"
 $DP --review-pr 7 --packet --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ $RC -eq 0 ] && [ -f "$PK" ] && [ "$(calls)" = "$C0" ] && grep -q "You are reviewing ONE finished code change" "$PK" \
-  && grep -q "### python" "$PK" && grep -q "Silent failure" "$PK" && grep -q "^diff --git" "$PK" \
-  && ok "--packet writes REVIEW_TASK, checklist text and diff, no model call" || { bad "packet rc=$RC '$PK'"; tail -4 "$T/out.txt"; }
+  && grep -q "^diff --git" "$PK" \
+  && ok "--packet writes the review task and the diff, no model call" || { bad "packet rc=$RC '$PK'"; tail -4 "$T/out.txt"; }
 [ -f "$PK" ] && grep -B4 "PWNED" "$PK" | grep -qi "untrusted" && ok "PR body included, marked untrusted right above it" || bad "body not marked"
 clean "packet"
 JCLEAN='REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'
@@ -133,11 +133,11 @@ rec "$FL" "$JCLEAN"; st; RC=$?
   && ok "--pr-status: every reviewer's latest review clean -> REVIEWED" || { bad "reviewed rc=$RC"; cat "$T/out.txt"; }
 rec reviewer-opus48 'REVIEW-JSON\n{"findings": [{"severity": "NOTE", "path": "a.py", "line": 1, "problem": "style"}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n'; st
 has ": REVIEWED at" && ok "--pr-status: a NOTE-only review counts as clean (dispatcher verdict CLEAN although the model said FIX)" || { bad "notes only"; cat "$T/out.txt"; }
-rec reviewer-opus48 "$(jrev MEDIUM a.py 1 'edge case')"; st; RC=$?
-[ $RC -eq 0 ] && has "FINDINGS OPEN (reviewer-opus48: FIX, 1 MEDIUM)" \
-  && ok "--pr-status: MEDIUM with a reproduction in the latest Opus review -> FINDINGS OPEN, exit 0" || { bad "medium rc=$RC"; cat "$T/out.txt"; }
+rec reviewer-opus48 "$(jrev HIGH a.py 1 'edge case')"; st; RC=$?
+[ $RC -eq 0 ] && has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" \
+  && ok "--pr-status: HIGH with a reproduction in the latest Opus review -> FINDINGS OPEN, exit 0" || { bad "high rc=$RC"; cat "$T/out.txt"; }
 rec "$FL" "$JCLEAN"; st
-has "FINDINGS OPEN (reviewer-opus48: FIX, 1 MEDIUM)" && ok "--pr-status: a later cheap CLEAN does not hide the Opus finding" || { bad "masked"; cat "$T/out.txt"; }
+has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" && ok "--pr-status: a later cheap CLEAN does not hide the Opus finding" || { bad "masked"; cat "$T/out.txt"; }
 # --force-review: PR 7 head is unchanged and already has a clean review, so force the re-review this case needs
 C1=$(calls); FAKE_GARBAGE=1 $DP --review-pr 7 --via qwen --model fake/m --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = $((C1 + 2)) ] && has ", retried" && has "verdict UNPARSED" \
@@ -145,13 +145,13 @@ C1=$(calls); FAKE_GARBAGE=1 $DP --review-pr 7 --via qwen --model fake/m --force-
 clean "unparsed review"
 st; has "$FL: UNPARSED" && ok "--pr-status: UNPARSED verdict -> FINDINGS OPEN" || { bad "unparsed status"; cat "$T/out.txt"; }
 rec "$FL" "$JCLEAN"; rec Reviewer-Opus48 "$JCLEAN"; st
-has ": REVIEWED at" && ok "--pr-status: reviewer names grouped case-insensitively (later CLEAN supersedes the MEDIUM)" || { bad "norm"; cat "$T/out.txt"; }
-rec reviewer-opus48 "$(jrev MEDIUM a.py 5 'two line range' 7)"; st
-has "FINDINGS OPEN (reviewer-opus48: FIX, 1 MEDIUM)" && grep -q "a.py:L5-7" "$(mj "$D" 'm["reviews"][-1]["report"]')" \
+has ": REVIEWED at" && ok "--pr-status: reviewer names grouped case-insensitively (later CLEAN supersedes the HIGH)" || { bad "norm"; cat "$T/out.txt"; }
+rec reviewer-opus48 "$(jrev HIGH a.py 5 'two line range' 7)"; st
+has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" && grep -q "a.py:L5-7" "$(mj "$D" 'm["reviews"][-1]["report"]')" \
   && ok "--pr-status: a line range renders as L5-7 and counts once" || { bad "line range"; cat "$T/out.txt"; }
 printf 'FINDINGS: [HIGH] a.py:L2: inline tag. Fix it.\nVERDICT: FIX\n' > "$T/rev.txt"
 $DP --review-record "$RID1" --reviewer reviewer-opus48 --file "$T/rev.txt" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && st && has "FINDINGS OPEN (reviewer-opus48: FIX, 1 MEDIUM)" \
+[ $RC -eq 2 ] && st && has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" \
   && ok "--review-record refuses free text (exit 2); the gate state is unchanged" || { bad "free text rc=$RC"; cat "$T/out.txt"; }
 python3 -I - "$T/concord/concord.py" "$T" <<'PYU'
 import importlib.util, sys

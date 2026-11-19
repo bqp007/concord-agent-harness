@@ -70,7 +70,7 @@ touch "$T/release"; wait $P1; R1=$?
   && ok "second run in T1 blocked (same checkout), naming the shared file" || { bad "same-checkout block rc=$R4"; tail -3 "$T/r4.txt"; }
 grep "OUT OF SCOPE" "$T/r3.txt" | grep -qv ": none" && bad "main run flagged out-of-scope files: $(grep -i 'out of scope' "$T/r3.txt")" || ok "main run saw no worktree files"
 echo "== lock per set of files: disjoint runs share a checkout (2026-11-15, kit-flow)"
-printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py b.py c.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py, c.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"; printf 'c\n' > "$W1/c.py"
+printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | none | ADD | b.py |\n| c | none | ADD | c.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py b.py c.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py, c.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"; printf 'c\n' > "$W1/c.py"
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release2' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
   $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f1.txt" 2>&1 & PF=$!
 i=0; until [ -e "$L1" ] || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done

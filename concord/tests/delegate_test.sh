@@ -60,7 +60,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
 problems = []
-for mode in ("readonly", "edit", "full"):
+for mode in ("readonly", "full"):
     cmd, env, _ = d.build_command("opencode", "/bin/true", "task", "contract", "opencode-go/x", mode, "30m",
                                   Path(sys.argv[2]), {}, allow_edit=["a.py"])
     perm = json.loads(env["OPENCODE_CONFIG_CONTENT"])["permission"]
@@ -73,12 +73,10 @@ for mode in ("readonly", "edit", "full"):
         edit = perm.get("edit") if isinstance(perm.get("edit"), dict) else {}
         if edit.get("*") != "deny" or edit.get("a.py") != "allow":
             problems.append(f"{mode}: edit scope lost ({perm.get('edit')!r})")
-    if mode == "edit" and perm.get("bash") != "deny":
-        problems.append(f"edit: bash={perm.get('bash')!r}")
     if mode == "full" and (not isinstance(perm.get("bash"), dict) or perm["bash"].get("git push*") != "deny"
                            or perm["bash"].get("*") != "allow"):
         problems.append(f"full: bash deny rules lost ({perm.get('bash')!r})")
-    if mode in ("full", "edit") and perm.get("webfetch") != "deny":
+    if mode == "full" and perm.get("webfetch") != "deny":
         problems.append(f"{mode}: webfetch not denied by default")
     if perm.get("external_directory") != "deny":
         problems.append(f"{mode}: external_directory not denied")

@@ -54,7 +54,7 @@ Before each executor run `concord.py` snapshots the tree, backs up in-scope file
 
 High risk means untrusted input, scores or thresholds, security, money, data deletion or concurrency; a repository's `Risk floor <tier>: <globs>` notes line raises sensitive paths. A finding needs a reproduction to stay above NOTE. Clean reviews are reused on unchanged files. At the PR gate a review counts at most at its reviewer's rank, so a flash review cannot pass a high-risk pull request without your recorded go-ahead.
 
-One PR gets at most three full review rounds, one per head; a full review of a fourth head is refused without `--user-approved`. The loop stops at 0 BLOCKER and 0 HIGH. A MEDIUM is fixed only when it occurs in a real flow; the other MEDIUMs, NOTEs and NITs go to the DAT. A review packet caps at 300,000 characters.
+One PR gets at most three full review rounds, one per head; a full review of a fourth head is refused without `--user-approved`. The loop stops at 0 BLOCKER and 0 HIGH. A MEDIUM is fixed only when it occurs in a real flow; the other MEDIUMs, NOTEs and NITs go to the DAT. The PR gate holds only on BLOCKER and HIGH findings, and the test report lists the ones a REVIEWED head fixed. A review packet caps at 300,000 characters.
 
 ![Segmented review](figures/fig3-segmented-review.svg)
 *A retired segmented review; its file-group split remains, and the packet cap is 300,000 characters.*
