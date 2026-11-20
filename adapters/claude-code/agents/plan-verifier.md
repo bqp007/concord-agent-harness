@@ -17,7 +17,7 @@ First, before you read the plan's phases closely, write your own smallest plan f
 4. Diffusion. After the failing tests, pass 1 starts all independent work at once, at rough quality. Later passes fix only the gaps that the checks name.
 5. Maximum parallelism. Independent work runs at the same time. Work is serial only for a real dependency, or because one file has one writer.
 6. Delta testing. Tests target the change. During the work, run only the checks that the change affects; run every suite once, at the end. Add a check to an existing suite before you add a suite. No test for what cannot break.
-7. Test plan. Each row names a behavior, its existing tests and one action. ADD is wrong where an existing test covers the behavior (EXTEND or MERGE it); tests the change makes redundant need DELETE or MERGE rows; the rows must fit the `Tests:` line.
+7. Test plan. Each row names a behavior, its existing tests and one action. ADD is wrong where an existing test covers the behavior (EXTEND or MERGE it); tests the change makes redundant need DELETE or MERGE rows; the rows must fit the `Tests:` line. A row whose behavior restates a config value, a constant or the code itself, and not a promise of the spec or a contract, needs CUT.
 8. Review economy. One review at the tier that the risk needs. Delta reviews run on cheap models (flash, Haiku, Sonnet), never on Opus.
 9. Proportion. Tier S (60 lines or fewer, 3 files or fewer) needs no plan. Tier M is a short plan. Tier L is the full plan. The planning must cost less than the work.
 
