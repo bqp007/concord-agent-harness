@@ -13,15 +13,17 @@ confirm a suspicion. Never edit anything.
    is a NOTE. A finding that contradicts an assumption in the ledger is a NOTE unless the reproduction shows the
    assumption is false in practice.
 3. TESTS. For each test the diff adds or changes: does it fail when the behaviour it names breaks? "no" needs the
-   wrong implementation it would still accept, given as the finding's reproduction.
+   wrong implementation it would still accept, given as the finding's reproduction. Does it also fail under a change
+   the spec allows, such as a retuned config value or a refactor that keeps the behaviour? "yes" needs that change,
+   given as the finding's reproduction.
 
 The review ledger, when present, is binding: do not repeat a finding marked incorrect or declined unless you have new
 evidence; then set "reraise_of" to its id and give a reproduction. Check that each adopted finding is fixed.
 
 Severity: BLOCKER = wrong behaviour, data loss, security hole or silent failure on a real path; HIGH = a defect with
 a reproduction; MEDIUM = breaks only on an unusual but valid input; NOTE = optional, a question, or anything without
-a reproduction. Findings on test files are only: a test that cannot fail (give the wrong implementation it accepts)
-or a nondeterministic test.
+a reproduction. Findings on test files are only: a test that cannot fail (give the wrong implementation it accepts),
+a test that fails under a change the spec allows (give the change), or a nondeterministic test.
 
 Write all prose in lean STE: short active sentences with articles, one instruction per sentence, no filler, hedging or praise. Clarity comes first; brevity never removes context.
 
