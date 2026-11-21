@@ -202,6 +202,13 @@ done
 $DP --review-pr 90 --packet --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && grep -qF "PLAN-MARK-90" "$PK" && ! grep -qF "No Concord run produced this PR" "$PK" \
   && ok "8 without --tier a review runs at the highest needed tier; the packet holds the run's plan snapshot" || { bad "8 packet with a run '$PK'"; tail -2 "$T/out.txt"; }
+# the base branch moves and is merged into the PR (GitHub's Update branch): the merge base passes the run's start
+( set -e; cd "$C"; git checkout -q main; printf 'readme 2\n' > README; git commit -qam "main moves"; git push -q origin main
+  git fetch -q origin refs/pull/90/head; git checkout -q FETCH_HEAD; git merge -q --no-edit main; git push -q origin HEAD:refs/pull/90/head
+  git checkout -q main ) || { echo "setup failed: base merge into PR 90"; exit 1; }
+prjson 90
+$DP --review-pr 90 --packet --tier medium --files core.py --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 after the base branch is merged into the PR, core.py still needs high: --tier medium is refused" || { bad "8 a base merge dropped the Risk: high run rc=$RC"; tail -2 "$T/out.txt"; }
 runpr 93 high core.py "echo 'c = 93' > core.py" side93
 $DP --review-pr 93 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a run recorded on another branch is not attributed: the PR needs medium, --tier low is refused" || { bad "8 other-branch run rc=$RC"; tail -2 "$T/out.txt"; }

@@ -5110,8 +5110,10 @@ def pr_entries(root, n):
 
 
 def pr_attributable_runs(repo, root, mb, head, head_ref):
-    """The Concord runs that produced this PR: recorded on its head branch, started between the merge base and the
-    head (both included). Returns ({path: highest Risk rank of a run that changed, created or deleted it}, [run meta])."""
+    """The Concord runs that produced this PR: recorded on its head branch, started at the head or an ancestor of it. The
+    merge base is no bound: merging the base branch into the PR, or a rebase, moves it past a run's start, and that run
+    still produced the PR's files (a run whose work is already in the base can only raise a needed tier). Returns
+    ({path: highest Risk rank of a run that changed, created or deleted it}, [run meta])."""
     ranks, runs = {}, []
     for meta_path in sorted(Path(root).glob("*/meta.json")):
         try:
@@ -5123,7 +5125,7 @@ def pr_attributable_runs(repo, root, mb, head, head_ref):
         if head_ref and (m.get("origin_branch") or m.get("branch_before")) != head_ref:
             continue
         start = m.get("origin_head") or m.get("head_before")
-        if not (is_ancestor(repo, mb, start) and is_ancestor(repo, start, head)):
+        if not is_ancestor(repo, start, head):
             continue
         rank = TIER_RANK.get(m.get("risk"), TIER_RANK["medium"])
         runs.append(m)
