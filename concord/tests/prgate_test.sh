@@ -209,6 +209,18 @@ $DP --review-pr 90 --packet --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PAC
 prjson 90
 $DP --review-pr 90 --packet --tier medium --files core.py --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 after the base branch is merged into the PR, core.py still needs high: --tier medium is refused" || { bad "8 a base merge dropped the Risk: high run rc=$RC"; tail -2 "$T/out.txt"; }
+# a Risk: high run starts from a PR commit; the PR is then rebased onto the moved base, which rewrites that commit
+printf '# Plan\n## Phase 1 - run 92\nExecutor: deepseek-flash\nRisk: high\nPurpose: PLAN-MARK-92\nFiles: core.py\nAcceptance:\n- `true`\n' > "$C/.claude/PLAN_92.md"
+( set -e; cd "$C"; git checkout -q main; git checkout -qb pr92; printf 'p = 92\n' > p92.py; git add p92.py; git commit -qm "pr92 first" ) || { echo "setup failed: pr92"; exit 1; }
+approve ".claude/PLAN_92.md" "$C" || exit 1
+FAKE_ACTIONS="echo 'c = 92' > core.py" $DP 1 --plan ".claude/PLAN_92.md" --via qwen --model fake/m --no-baseline --repo "$C" > "$T/out.txt" 2>&1
+grep -q '^DELEGATE RESULT' "$T/out.txt" || { echo "setup failed: run 92"; cat "$T/out.txt"; exit 1; }
+( set -e; cd "$C"; git add -A; git commit -qm "run 92"; git checkout -q main; printf 'readme 3\n' > README; git commit -qam "main moves again"
+  git push -q origin main; git checkout -q pr92; git rebase -q main; git push -qf origin "HEAD:refs/pull/92/head"; git checkout -q main
+  git branch -qD pr92 ) || { echo "setup failed: rebase pr92"; exit 1; }
+prjson 92
+$DP --review-pr 92 --packet --tier medium --files core.py --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 after a rebase rewrites the commit a Risk: high run started from, core.py still needs high: --tier medium is refused" || { bad "8 a rebase dropped the Risk: high run rc=$RC"; tail -2 "$T/out.txt"; }
 runpr 93 high core.py "echo 'c = 93' > core.py" side93
 $DP --review-pr 93 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a run recorded on another branch is not attributed: the PR needs medium, --tier low is refused" || { bad "8 other-branch run rc=$RC"; tail -2 "$T/out.txt"; }
