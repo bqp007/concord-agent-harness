@@ -332,6 +332,16 @@ fork9 3; ln -sf "$T/elsewhere.txt" "$W9L/scratch.lnk"
 $WT join T9L 3 --repo "$W9L" > "$T/j9l3.txt" 2>&1; RJ9L3=$?
 [ $RJ9L3 -eq 0 ] && [ ! -e "$F9L" ] && [ "$(cat "$W9L/mod.py")" = "x = 5" ] && [ -L "$W9L/scratch.lnk" ] && [ -f "$T/r9/data/blob" ] \
   && ok "join: the origin holds the same link (same target text): joins, removes the fork, keeps the link and the data folder" || { bad "join with the same link in the origin rc=$RJ9L3"; cat "$T/j9l3.txt"; }
+mkdir -p "$T/data9b"; fork9 4; ln -sfn "$T/data9b" "$F9L/data"          # the user re-points wt.py's own data link
+$WT join T9L 4 --repo "$W9L" > "$T/j9l4.txt" 2>&1; RJ9L4=$?
+[ $RJ9L4 -ne 0 ] && [ -d "$F9L" ] && [ "$(readlink "$F9L/data")" = "$T/data9b" ] && grep -q "^  data: " "$T/j9l4.txt" \
+  && ok "join: a link wt.py made that now points elsewhere is refused, the fork and the new target kept, the link named" || { bad "join lost a re-pointed wt.py link rc=$RJ9L4"; cat "$T/j9l4.txt"; }
+[ -d "$F9L" ] && $WT join T9L 4 --repo "$W9L" --force > /dev/null 2>&1
+$WT new T9R --repo "$T/r9" --no-fetch --link data > /dev/null 2>&1; W9R="$T/r9/.claude/worktrees/T9R"; ln -sfn "$T/data9b" "$W9R/data"
+$WT done T9R --repo "$T/r9" > "$T/d9r.txt" 2>&1; RD9R=$?
+[ $RD9R -ne 0 ] && [ "$(readlink "$W9R/data")" = "$T/data9b" ] && grep -q "data: " "$T/d9r.txt" \
+  && ok "done: a link wt.py made that now points elsewhere is refused, the link kept and named" || { bad "done lost a re-pointed wt.py link rc=$RD9R"; cat "$T/d9r.txt"; }
+$WT done T9R --repo "$T/r9" --force > /dev/null 2>&1
 mkr "$T/r10"; mkdir "$T/extdir"; printf 'keep\n' > "$T/extdir/f"
 $WT new T10D --repo "$T/r10" --no-fetch > /dev/null 2>&1; W10D="$T/r10/.claude/worktrees/T10D"
 $WT new T10F --repo "$T/r10" --no-fetch > /dev/null 2>&1; W10F="$T/r10/.claude/worktrees/T10F"

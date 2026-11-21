@@ -89,7 +89,7 @@ python3 ~/.claude/concord/wt.py new <TICKET>     # one git worktree per ticket
 python3 ~/.claude/concord/concord.py --pr-status <PR>   # exits 0 only when the PR's current diff is REVIEWED
 ```
 
-Exit codes: 1 `--pr-status` short of REVIEWED, or a REVISE plan verdict; 2 usage, plan or lock, or a review answer that quotes no packet of its run; 3 a Claude model on the run path, or a tool (git, gh) missing or failing; 4 unknown model; 5 billing guard; 6 acceptance already green (red run); 7 PASS refused (an acceptance result missing or unexpected, or an acceptance file changed); 8 a full review past the cap of reviewed heads; 9 a provider refused a review (nothing recorded); 10 drift block, or a plan whose report is written; 11 no APPROVE from the plan verifier for this plan text; 124 timeout; 125 resource limit. `concord.py --help` lists every command.
+Exit codes: 1 `--pr-status` short of REVIEWED, or a REVISE plan verdict; 2 usage, plan or lock, or a review answer that quotes no packet of its run; 3 a Claude model on the run path, or a tool (git, gh) missing or failing; 4 unknown model; 5 billing guard; 6 acceptance already green (red run); 7 PASS refused (an acceptance result missing or unexpected, or an acceptance file changed); 8 a full review past the cap of reviewed heads; 9 a provider refused a review (nothing recorded); 10 drift block, or a plan whose report is written; 11 no APPROVE from the plan verifier for this plan text; 75 the PR head is unsettled (gh reports one head, the fetched pull ref is another; nothing judged or written, run again); 124 timeout; 125 resource limit. `concord.py --help` lists every command.
 
 ## Components
 
@@ -104,7 +104,7 @@ Exit codes: 1 `--pr-status` short of REVIEWED, or a REVISE plan verdict; 2 usage
 | `concord/tests/` | `~/.claude/concord/tests/` | the regression suites; `run_all.sh` runs them in parallel with a fake HOME |
 | `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review`, the implementer and reviewer agents and the `concord:concord-design-review` skill; also four hook rules (`install.sh --repo`), and the CLAUDE.md rules block and settings keys the installer writes |
 | `scripts/demo.sh`, `examples/` | nowhere | the credential-free demo and its plan |
-| `tests/` | nowhere | the repository's own checks: layout, budgets, install, docs, demo |
+| `tests/` | nowhere | the repository's own checks: `package_test.sh` (scrub, layout, agents, Python, install, style, hygiene, docs) and `demo_test.sh` |
 | `docs/` | nowhere | setup, the workflow, the comparison, figures |
 
 ## Safety

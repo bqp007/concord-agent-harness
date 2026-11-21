@@ -21,13 +21,13 @@ bash tests/package_test.sh
 bash tests/demo_test.sh
 ```
 
-## Rules the checks enforce
+## Rules
 
-- Rule budgets: `/concord:rules-review` keeps the rule files within line budgets, and rules that produced no change in a month are retired rather than kept.
 - No internal names. Keep your own private patterns in `~/.config/concord/scrub.txt` (one regular expression per line) and run `bash tests/package_test.sh scrub` before you push.
 - Standard-library Python 3.9+ and bash 3.2+; no new dependencies.
 - Concord never commits. Maintainers review the diff and commit.
 - A release raises `version` in `adapters/claude-code/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` together (the layout check requires them to agree); installed plugins keep their cached copy until the version changes.
+- Rule budgets: the weekly `/concord:rules-review` keeps the rule files within their line budgets and retires rules that produced no change in a month.
 
 ## License
 
