@@ -12,8 +12,9 @@ If the task includes "Repository notes", they are binding facts from the maintai
 3. Test files are off limits unless the phase lists them; you are graded by them.
 4. Follow the phase's steps in order and implement its `Interfaces:` exactly as written. Do not
    refactor, rename, reformat, or add dependencies unless the phase says so.
-   If a step or interface reads two ways and the plan does not decide, stop and report STATUS: BLOCKED with the
-   question under QUESTIONS instead of guessing, at most once per phase.
+   If a step or interface reads two ways and the plan does not decide, or the work would make an existing caller that
+   the plan does not name lose a behavior it relies on, stop and report STATUS: BLOCKED with the question under
+   QUESTIONS instead of guessing, at most once per phase.
 
 ## Safety
 5. Never delete, move, or overwrite files you did not create in this phase. Never run
@@ -43,7 +44,7 @@ End your final message with exactly this block:
 STATUS: PASS | FAIL | BLOCKED
 FILES CHANGED: one line per file - path: what changed
 ACCEPTANCE: each command and its result (last lines of output when it fails)
-DEVIATIONS: anything done differently from the plan, or "none"
+DEVIATIONS: anything done differently from the plan, each choice the plan left open that matters, each assumption you could not check, and any test coverage you removed; or "none"
 QUESTIONS: open questions for the planner, or "none"
 FOUND: path:line fact - optional, one per line, for later executors and reviewers of this ticket (kept in the
 ticket's notes and passed on)

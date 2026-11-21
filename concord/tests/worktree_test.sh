@@ -1,7 +1,8 @@
 #!/bin/bash
-# Worktree regression (53 checks, ~20 s, no network, fake qwen executor): wt.py new/list/done/fork/join, concord.py
-# locks per set of files (disjoint runs share a checkout), per-checkout "last", main-checkout snapshot ignoring nested worktrees, done refusals,
-# plan archive on done, OVERLAP and DRIFT lines in `wt.py list`.
+# Worktree regression (no network, fake qwen executor): wt.py new/list/done/fork/join, concord.py locks per set of
+# files (disjoint runs share a checkout), per-checkout "last", main-checkout snapshot ignoring nested worktrees, done
+# refusals (untracked and ignored files, edited copies), plan archive on done, join (committed work, the checkout it runs
+# in, staged and ignored work of the fork), OVERLAP and DRIFT lines in `wt.py list`.
 # Run: bash ~/.claude/concord/tests/worktree_test.sh   (exit 0 = all passed; temp repo under $TMPDIR, removed).
 # Tests the dispatcher this file belongs to, copied into the temp dir, so runs.jsonl stays untouched.
 set -u
@@ -16,6 +17,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH"
 DP="python3 $T/concord/concord.py"
 WT="python3 $T/concord/wt.py"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -52,7 +54,7 @@ W1="$M/.claude/worktrees/T1"
   || { bad "main status changed"; echo "before: $MAIN_BEFORE" | tr '\n' ' '; echo; echo "after:  $(mstat | tr '\n' ' ')"; }
 $WT new T2 --repo "$M" --no-fetch --base main --link data --link bench > /dev/null 2>&1; W2="$M/.claude/worktrees/T2"
 [ "$(grep -c '^/bench$' "$M/.git/info/exclude")" = 1 ] && ok "exclude patterns added once" || bad "duplicate patterns: $(tr '\n' ' ' < "$M/.git/info/exclude")"
-plan "$W1"; plan "$W2"; plan "$M"; mkdir -p "$T/orig"; plan "$T/orig"
+plan "$W1"; plan "$W2"; plan "$M"; mkdir -p "$T/orig"; plan "$T/orig"; approve PLAN_T.md "$M" || exit 1
 echo "== parallel runs: T1 and T2 at once, main too"
 # T1 holds its lock until $T/release exists (at most 30 s), so the same-checkout block does not depend on runner speed.
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
@@ -71,6 +73,7 @@ touch "$T/release"; wait $P1; R1=$?
 grep "OUT OF SCOPE" "$T/r3.txt" | grep -qv ": none" && bad "main run flagged out-of-scope files: $(grep -i 'out of scope' "$T/r3.txt")" || ok "main run saw no worktree files"
 echo "== lock per set of files: disjoint runs share a checkout (2026-11-15, kit-flow)"
 printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | none | ADD | b.py |\n| c | none | ADD | c.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py b.py c.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py, c.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"; printf 'c\n' > "$W1/c.py"
+approve PLAN_F.md "$W1" || exit 1
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release2' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
   $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f1.txt" 2>&1 & PF=$!
 i=0; until [ -e "$L1" ] || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done
@@ -86,6 +89,11 @@ touch "$T/release2"; wait $PF; F1=$?
   && ok "the long run leaves the concurrent run's b.py and deleted z.py out of OUT OF SCOPE, DELETED, ACCEPTANCE FILES CHANGED and its diff size; its change of c.py, there at the start, stays" \
   || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|acceptance|diff size" "$T/f1.txt"; }
 [ ! -e "$L1" ] && ok "the lock file is gone once both runs ended" || bad "lock file left: $(cat "$L1" 2>&1)"
+printf '{"pid": %s, "child": null, "run": "old-run", "manual": false, "repo": "%s"}\n' "$(sh -c 'echo $$')" "$W1" > "$L1"      # one holder (a dead pid), no files: written before 2026-11-15
+FAKE_ACTIONS='true' $DP 3 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f4.txt" 2>&1; F4=$?
+[ $F4 -ne 0 ] && grep -q "pre-3.0 format" "$T/f4.txt" && grep -q '"old-run"' "$L1" \
+  && ok "a concord.lock in the single-holder format (before 2026-11-15) is refused with the pre-3.0 explanation and left in place" || { bad "single-holder lock rc=$F4"; tail -3 "$T/f4.txt"; }
+rm -f "$L1"
 rm -f "$W1/b.py" "$W1/c.py" "$W1/PLAN_F.md"
 echo "== 'last' is per checkout"
 L1=$($DP --show last --repo "$W1" 2>&1 | grep -m1 "^DELEGATE RESULT"); L2=$($DP --show last --repo "$W2" 2>&1 | grep -m1 "^DELEGATE RESULT")
@@ -135,16 +143,30 @@ git -C "$W2" checkout -q -- a.py
 echo "== done refuses to drop ignored data, refuses on protected files, never half-removes"
 mkdir -p "$W2/build" "$W2/results" && printf 'o\n' > "$W2/build/out.o" && printf 'r\n' > "$W2/results/r.json"
 $WT done T2 --repo "$M" > "$T/d3.txt" 2>&1; D3=$?
-[ $D3 -ne 0 ] && grep -q "results/" "$T/d3.txt" && ! grep -q "build/" "$T/d3.txt" && [ -L "$W2/data" ] && [ -f "$W2/results/r.json" ] \
-  && ok "refused: lists ignored results/ (not build/), worktree intact" || { bad "ignored-data check rc=$D3"; cat "$T/d3.txt"; }
-rm -rf "$W2/results"; chmod 444 "$W2/.claude/settings.local.json"     # stands in for the sandbox's write protection
+[ $D3 -ne 0 ] && grep -q "results/" "$T/d3.txt" && grep -q "build/" "$T/d3.txt" && [ -L "$W2/data" ] && [ -f "$W2/results/r.json" ] && [ -f "$W2/build/out.o" ] \
+  && ok "refused: lists the ignored results/ and build/ (build output is no longer disposable), worktree intact" || { bad "ignored-data check rc=$D3"; cat "$T/d3.txt"; }
+rm -rf "$W2/results" "$W2/build"; chmod 444 "$W2/.claude/settings.local.json"     # stands in for the sandbox's write protection
 $WT done T2 --repo "$M" > "$T/d4.txt" 2>&1; D4=$?
-[ $D4 -ne 0 ] && grep -q "write-protects" "$T/d4.txt" && grep -q "settings.local.json" "$T/d4.txt" && [ -L "$W2/data" ] && [ -f "$W2/build/out.o" ] \
+[ $D4 -ne 0 ] && grep -q "write-protects" "$T/d4.txt" && grep -q "settings.local.json" "$T/d4.txt" && [ -L "$W2/data" ] \
   && ok "refused: protected file reported, nothing touched" || { bad "protected check rc=$D4"; cat "$T/d4.txt"; }
 [ ! -e "$M/.git/concord/plans/T2/PLAN_T.md" ] && ok "refused runs archive nothing" || bad "plan archived although done refused"
 chmod 644 "$W2/.claude/settings.local.json"
-$WT done T2 --repo "$M" > "$T/d5.txt" 2>&1 && [ ! -e "$W2" ] && ok "T2 removed (build/ output went with it)" || { bad "T2 remove"; cat "$T/d5.txt"; }
-[ -f "$M/.git/concord/plans/T2/PLAN_T.md" ] && ok "T2 plan archived" || bad "T2 plan not archived"
+$WT done T2 --repo "$M" > "$T/d5.txt" 2>&1 && [ ! -e "$W2" ] && ok "T2 removed (its copies of .claude files unchanged, no ignored output left)" || { bad "T2 remove"; cat "$T/d5.txt"; }
+$WT new T9 --repo "$M" --no-fetch --base main > /dev/null 2>&1; W9="$M/.claude/worktrees/T9"
+git -C "$M" config status.showUntrackedFiles no; printf 'mine\n' > "$W9/notes9.txt"
+$WT done T9 --repo "$M" > "$T/d9a.txt" 2>&1; D9A=$?; git -C "$M" config --unset status.showUntrackedFiles
+[ $D9A -ne 0 ] && grep -q "notes9.txt" "$T/d9a.txt" && [ -f "$W9/notes9.txt" ] \
+  && ok "an untracked file is user work even when status.showUntrackedFiles is no: done refuses and names it" || { bad "untracked under showUntrackedFiles=no rc=$D9A"; cat "$T/d9a.txt"; }
+$WT new T10 --repo "$M" --no-fetch --base main > /dev/null 2>&1; W10="$M/.claude/worktrees/T10"
+mkdir -p "$W10/build"; printf 'o\n' > "$W10/build/out.o"
+$WT done T10 --repo "$M" > "$T/d9b.txt" 2>&1; D9B=$?
+[ $D9B -ne 0 ] && grep -q "build/" "$T/d9b.txt" && [ -f "$W10/build/out.o" ] && ok "an ignored file under build/ makes done refuse and names it" || { bad "build/ output rc=$D9B"; cat "$T/d9b.txt"; }
+$WT new T11 --repo "$M" --no-fetch --base main > /dev/null 2>&1; W11="$M/.claude/worktrees/T11"
+printf '{"permissions": {"allow": ["Bash(ls)"]}}\n' > "$W11/.claude/settings.local.json"
+$WT done T11 --repo "$M" > "$T/d9c.txt" 2>&1; D9C=$?
+[ $D9C -ne 0 ] && grep -q "settings.local.json" "$T/d9c.txt" && [ -f "$W11/.claude/settings.local.json" ] && ok "an edited copy of .claude/settings.local.json is user work: done refuses and names it" || { bad "edited copy rc=$D9C"; cat "$T/d9c.txt"; }
+cp -p "$M/.claude/settings.local.json" "$W11/.claude/settings.local.json"; $WT done T11 --repo "$M" --force > /dev/null 2>&1
+rm -rf "$W9/notes9.txt"; $WT done T9 --repo "$M" --force > /dev/null 2>&1; rm -rf "$W10/build"; $WT done T10 --repo "$M" --force > /dev/null 2>&1
 echo "== done without a plan; done --force keeps the plan"
 $WT new T3 --repo "$M" --no-fetch --base main > /dev/null 2>&1; W3="$M/.claude/worktrees/T3"
 $WT done T3 --repo "$M" > "$T/d6.txt" 2>&1 && [ ! -e "$W3" ] && ! grep -q "^archived:" "$T/d6.txt" && [ -z "$(ls -A "$M/.git/concord/plans/T3" 2>/dev/null)" ] \
@@ -206,6 +228,107 @@ mkdir -p "$W8/sub"; printf 's\n' > "$W8/sub/s.txt"; F10="$M/.claude/worktrees/T8
 ( cd "$W8/sub" && $WT join T8 4 > "$T/j3.txt" 2>&1 ); RJ3=$?
 [ "$FA" = "x = 5" ] && [ -f "$W8/top2.txt" ] && [ ! -e "$F10" ] \
   && ok "fork and join from a subdirectory work on the whole checkout" || { bad "subdir join rc=$RJ3"; cat "$T/j3.txt"; }
-git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1; $WT done T8 --repo "$M" --force > /dev/null 2>&1
+echo "== join: committed work, the checkout it runs in, staged and ignored work of the fork"
+git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1
+printf 'x = 5\n' > "$W8/a.py"; $WT fork T8 5 --repo "$W8" > /dev/null 2>&1; F5="$M/.claude/worktrees/T8-p5"; [ -d "$F5" ] || { echo "setup failed: fork 5"; exit 1; }
+printf 'x = 7\n' > "$F5/a.py"; printf 'k = 1\n' > "$F5/kept.py"; git -C "$F5" add -A; git -C "$F5" -c user.email=t@t -c user.name=t commit -qm "work in the fork"
+$WT join T8 5 --repo "$W8" > "$T/j5.txt" 2>&1; RJ5=$?
+[ $RJ5 -eq 0 ] && [ "$(cat "$W8/a.py")" = "x = 7" ] && [ "$(cat "$W8/kept.py" 2>/dev/null)" = "k = 1" ] && [ ! -e "$F5" ] \
+  && ok "join applies work committed in the fork (an edit and a new file)" || { bad "committed work lost rc=$RJ5 a.py='$(cat "$W8/a.py")'"; cat "$T/j5.txt"; }
+$WT fork T8 6 --repo "$W8" > /dev/null 2>&1; F6="$M/.claude/worktrees/T8-p6"; [ -d "$F6" ] || { echo "setup failed: fork 6"; exit 1; }
+printf 'o = 1\n' > "$F6/only6.py"
+$WT join T8 6 --repo "$M" > "$T/j6.txt" 2>&1; RJ6=$?
+[ $RJ6 -ne 0 ] && [ -d "$F6" ] && [ ! -e "$M/only6.py" ] && ok "join from a checkout other than the fork's origin is refused, the fork kept, that checkout untouched" \
+  || { bad "join from another checkout rc=$RJ6"; cat "$T/j6.txt"; }
+$WT join T8 6 --repo "$W8" > /dev/null 2>&1
+printf 'x = 8\n' > "$W8/a.py"; $WT fork T8 7 --repo "$W8" > /dev/null 2>&1; F7="$M/.claude/worktrees/T8-p7"; [ -d "$F7" ] || { echo "setup failed: fork 7"; exit 1; }
+printf 'x = 10\n' > "$F7/a.py"; git -C "$F7" add a.py; printf 'x = 11\n' > "$F7/a.py"
+$WT join T8 7 --repo "$W8" > "$T/j7.txt" 2>&1; RJ7=$?
+[ $RJ7 -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && ok "join with staged content that differs from the working file is refused, the fork kept" \
+  || { bad "staged differs rc=$RJ7"; cat "$T/j7.txt"; }
+git -C "$F7" reset -q a.py; $WT join T8 7 --repo "$W8" > /dev/null 2>&1
+$WT fork T8 8 --repo "$W8" > /dev/null 2>&1; F8="$M/.claude/worktrees/T8-p8"; [ -d "$F8" ] || { echo "setup failed: fork 8"; exit 1; }
+printf 'x = 12\n' > "$F8/a.py"; mkdir -p "$F8/build"; printf 'o\n' > "$F8/build/only-here.o"
+$WT join T8 8 --repo "$W8" > "$T/j8.txt" 2>&1; RJ8=$?
+[ $RJ8 -ne 0 ] && [ -d "$F8" ] && [ -f "$F8/build/only-here.o" ] && grep -q "build" "$T/j8.txt" \
+  && ok "join with an ignored file only the fork holds (build/only-here.o) is refused, the fork kept, the file named" || { bad "ignored file only in the fork rc=$RJ8"; cat "$T/j8.txt"; }
+$WT join T8 8 --repo "$W8" --force > "$T/j8f.txt" 2>&1; RJ8F=$?
+[ $RJ8F -eq 0 ] && [ ! -e "$F8" ] && grep -q "^dropped (--force):" "$T/j8f.txt" && grep -q "only-here.o" "$T/j8f.txt" \
+  && ok "join --force joins anyway and prints 'dropped (--force):' naming the ignored file it dropped" || { bad "join --force rc=$RJ8F"; cat "$T/j8f.txt"; }
+$WT fork T8 9 --repo "$W8" > /dev/null 2>&1; F9B="$M/.claude/worktrees/T8-p9"; [ -d "$F9B" ] || { echo "setup failed: fork 9"; exit 1; }
+printf 'o9 = 1\n' > "$F9B/only9.py"; rm -f "$(git -C "$F9B" rev-parse --path-format=absolute --git-dir)/.wt-fork"
+$WT join T8 9 --repo "$W8" > "$T/j9.txt" 2>&1; RJ9=$?
+[ $RJ9 -ne 0 ] && [ -d "$F9B" ] && [ ! -e "$W8/only9.py" ] && grep -q "before 3.0" "$T/j9.txt" \
+  && ok "a fork without .wt-fork (made by an older wt.py) is refused and kept, with the reason" || { bad "fork without .wt-fork rc=$RJ9"; cat "$T/j9.txt"; }
+$WT join T8 9 --repo "$W8" --force > /dev/null 2>&1
+echo "== done and join do not over-refuse: tracked .claude files, cache folders, unchanged copies, copies of an older wt.py"
+# mkr DIR [TRACKED_CLAUDE]: a repo with mod.py, an ignored __pycache__/ and, with the argument, a tracked .claude/settings.json
+mkr(){ rm -rf "$1"; mkdir -p "$1"; ( cd "$1" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > mod.py; printf '__pycache__/\n' > .gitignore
+  if [ -n "${2:-}" ]; then mkdir -p .claude; printf '{}\n' > .claude/settings.json; else printf '.claude/\n' >> .gitignore; fi
+  git add -A && git commit -qm init ); }
+mkr "$T/r5" tracked; $WT new T5 --repo "$T/r5" --no-fetch > /dev/null 2>&1
+$WT done T5 --repo "$T/r5" > "$T/d5.txt" 2>&1; RD5=$?
+[ $RD5 -eq 0 ] && [ ! -e "$T/r5/.claude/worktrees/T5" ] \
+  && ok "done removes a clean worktree of a repo that tracks .claude/settings.json" || { bad "tracked .claude/settings.json rc=$RD5"; cat "$T/d5.txt"; }
+mkr "$T/r6"; $WT new T6 --repo "$T/r6" --no-fetch > /dev/null 2>&1; W6="$T/r6/.claude/worktrees/T6"
+$WT fork T6 1 --repo "$W6" > /dev/null 2>&1; F6B="$T/r6/.claude/worktrees/T6-p1"
+printf 'x = 2\n' > "$F6B/mod.py"; mkdir -p "$F6B/__pycache__"; printf 'pyc\n' > "$F6B/__pycache__/mod.cpython-39.pyc"
+$WT join T6 1 --repo "$W6" > "$T/j6b.txt" 2>&1; RJ6B=$?
+[ $RJ6B -eq 0 ] && [ "$(cat "$W6/mod.py")" = "x = 2" ] && [ ! -e "$F6B" ] \
+  && ok "join ignores an ignored __pycache__ folder of the fork (the folders done treats as disposable)" || { bad "join with __pycache__ rc=$RJ6B"; cat "$T/j6b.txt"; }
+mkr "$T/r7"; $WT new T7 --repo "$T/r7" --no-fetch > /dev/null 2>&1; W7="$T/r7/.claude/worktrees/T7"
+printf '# Plan\n' > "$W7/PLAN_T7.md"; $WT fork T7 1 --repo "$W7" > /dev/null 2>&1; F7B="$T/r7/.claude/worktrees/T7-p1"
+printf 'x = 3\n' > "$F7B/mod.py"; printf '# Plan\n## Passes\n- pass 1 done\n' > "$W7/PLAN_T7.md"
+$WT join T7 1 --repo "$W7" > "$T/j7b.txt" 2>&1; RJ7B=$?
+[ $RJ7B -eq 0 ] && [ "$(cat "$W7/mod.py")" = "x = 3" ] && grep -q "^## Passes" "$W7/PLAN_T7.md" && [ ! -e "$F7B" ] \
+  && ok "join: the fork's copy of the plan, unchanged, is not unique to the fork although the ticket's plan was edited since" || { bad "edited ticket plan blocks join rc=$RJ7B"; cat "$T/j7b.txt"; }
+mkr "$T/r8"; mkdir -p "$T/r8/.claude"; printf '{}\n' > "$T/r8/.claude/settings.local.json"; $WT new T8b --repo "$T/r8" --no-fetch > /dev/null 2>&1
+rm -f "$(git -C "$T/r8/.claude/worktrees/T8b" rev-parse --path-format=absolute --git-dir)/.wt-copies"      # a worktree an older wt.py made
+$WT done T8b --repo "$T/r8" > "$T/d8b.txt" 2>&1; RD8B=$?
+[ $RD8B -eq 0 ] && [ ! -e "$T/r8/.claude/worktrees/T8b" ] \
+  && ok "done on a worktree without .wt-copies: a .claude copy equal to the main checkout's file is disposable" || { bad "worktree without .wt-copies rc=$RD8B"; cat "$T/d8b.txt"; }
+echo "== join and done keep a symlink the user made: only the links wt.py made are exempt"
+# A fork holds an ignored symlink the user made (*.lnk is excluded) next to the link wt.py made (data). The origin's entry
+# is the same only when it is also a link with the same target text.
+mkr "$T/r9"; mkdir "$T/r9/data"; printf 'b\n' > "$T/r9/data/blob"; printf '*.lnk\n' >> "$T/r9/.git/info/exclude"
+printf 'elsewhere\n' > "$T/elsewhere.txt"; printf 'other\n' > "$T/other.txt"
+$WT new T9L --repo "$T/r9" --no-fetch --link data > /dev/null 2>&1; W9L="$T/r9/.claude/worktrees/T9L"
+# fork9 N: fork N of T9L holding an edit of mod.py and the user's ignored symlink; setup stops if either is missing
+fork9() { $WT fork T9L "$1" --repo "$W9L" > /dev/null 2>&1; F9L="$T/r9/.claude/worktrees/T9L-p$1"
+  printf 'x = 5\n' > "$F9L/mod.py"; ln -s "$T/elsewhere.txt" "$F9L/scratch.lnk"
+  { [ -L "$F9L/data" ] && [ -L "$F9L/scratch.lnk" ] && git -C "$F9L" status --porcelain --ignored | grep -q '^!! scratch.lnk$'; } \
+    || { echo "setup failed: fork $1 with an ignored user symlink"; exit 1; }; }
+fork9 1
+$WT join T9L 1 --repo "$W9L" > "$T/j9l1.txt" 2>&1; RJ9L1=$?
+[ $RJ9L1 -ne 0 ] && [ -d "$F9L" ] && [ -L "$F9L/scratch.lnk" ] && [ "$(cat "$W9L/mod.py")" = "x = 1" ] && grep -q "scratch.lnk" "$T/j9l1.txt" && ! grep -q "^  data" "$T/j9l1.txt" \
+  && ok "join with an ignored symlink only the fork holds (made by the user) is refused, the fork and the link kept, the link named and not wt.py's own data link" \
+  || { bad "join with a user symlink only in the fork rc=$RJ9L1"; cat "$T/j9l1.txt"; }
+[ -d "$F9L" ] || fork9 1
+$WT join T9L 1 --repo "$W9L" --force > /dev/null 2>&1; rm -f "$W9L/mod.py"; git -C "$W9L" checkout -q -- mod.py
+fork9 2; ln -sf "$T/other.txt" "$W9L/scratch.lnk"
+$WT join T9L 2 --repo "$W9L" > "$T/j9l2.txt" 2>&1; RJ9L2=$?
+[ $RJ9L2 -ne 0 ] && [ -d "$F9L" ] && grep -q "scratch.lnk" "$T/j9l2.txt" \
+  && ok "join: an origin entry that is a link with another target does not make the fork's link the same" || { bad "join with a link of another target rc=$RJ9L2"; cat "$T/j9l2.txt"; }
+[ -d "$F9L" ] || fork9 2
+$WT join T9L 2 --repo "$W9L" --force > /dev/null 2>&1; git -C "$W9L" checkout -q -- mod.py
+fork9 3; ln -sf "$T/elsewhere.txt" "$W9L/scratch.lnk"
+$WT join T9L 3 --repo "$W9L" > "$T/j9l3.txt" 2>&1; RJ9L3=$?
+[ $RJ9L3 -eq 0 ] && [ ! -e "$F9L" ] && [ "$(cat "$W9L/mod.py")" = "x = 5" ] && [ -L "$W9L/scratch.lnk" ] && [ -f "$T/r9/data/blob" ] \
+  && ok "join: the origin holds the same link (same target text): joins, removes the fork, keeps the link and the data folder" || { bad "join with the same link in the origin rc=$RJ9L3"; cat "$T/j9l3.txt"; }
+mkr "$T/r10"; mkdir "$T/extdir"; printf 'keep\n' > "$T/extdir/f"
+$WT new T10D --repo "$T/r10" --no-fetch > /dev/null 2>&1; W10D="$T/r10/.claude/worktrees/T10D"
+$WT new T10F --repo "$T/r10" --no-fetch > /dev/null 2>&1; W10F="$T/r10/.claude/worktrees/T10F"
+mkdir -p "$W10D/.claude" "$W10F/.claude"; ln -s "$T/extdir" "$W10D/.claude/extdir"; ln -s "$T/extdir/f" "$W10F/.claude/extfile"
+{ [ -L "$W10D/.claude/extdir" ] && [ -L "$W10F/.claude/extfile" ] && [ -z "$(git -C "$W10D" status --porcelain)" ]; } || { echo "setup failed: worktrees with a symlink under .claude"; exit 1; }
+$WT done T10D --repo "$T/r10" > "$T/d10d.txt" 2>&1; RD10D=$?
+[ $RD10D -ne 0 ] && [ -L "$W10D/.claude/extdir" ] && grep -q ".claude/extdir" "$T/d10d.txt" && [ -f "$T/extdir/f" ] \
+  && ok "done with a user symlink to a directory under an ignored .claude/ is refused without --force, the link kept and named" || { bad "done with a symlink to a directory under .claude rc=$RD10D"; cat "$T/d10d.txt"; }
+$WT done T10F --repo "$T/r10" > "$T/d10f.txt" 2>&1; RD10F=$?
+[ $RD10F -ne 0 ] && [ -L "$W10F/.claude/extfile" ] && grep -q ".claude/extfile" "$T/d10f.txt" \
+  && ok "done with a user symlink to a file under an ignored .claude/ is refused without --force, the link kept and named" || { bad "done with a symlink to a file under .claude rc=$RD10F"; cat "$T/d10f.txt"; }
+$WT done T10D --repo "$T/r10" --force > /dev/null 2>&1; $WT done T10F --repo "$T/r10" --force > /dev/null 2>&1
+$WT done T9L --repo "$T/r9" --force > /dev/null 2>&1
+$WT done T8 --repo "$M" --force > /dev/null 2>&1
 [ "$(git -C "$M" worktree list --porcelain | grep -c 'worktrees/T')" = 0 ] && ok "worktree list clean" || bad "worktrees left"
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

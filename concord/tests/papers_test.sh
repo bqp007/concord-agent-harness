@@ -1,9 +1,9 @@
 #!/bin/bash
 # concord.py regression for the 2026-10-18 nine-paper changes, lean revision 2026-10-23 (no network, fake qwen
 # executor, ~30 s): webfetch denied by default + tool-call parsing; acceptance files hashed (report line, PASS refused
-# with exit 7, --force, session runs exempt); post-run acceptance pass; NO CHANGES flag; review file
-# lists without generated files and the diff base of a committed run; reviewer-finding post-filters (outside diff,
-# TODO-as-fix, delete-only) on --review-record.
+# with exit 7, --force, session runs exempt, an executor that rewrites its run state); post-run acceptance pass and
+# what PASS needs of it (a result per command, the expected one, a note for an expected-red command); NO CHANGES flag;
+# review file lists without generated files and the diff base of a committed run; --review-record keeps every finding.
 # Run: bash ~/.claude/concord/tests/papers_test.sh   (exit 0 = all passed). Copies Concord into a temp dir with
 # HOME pointing at a temp home, so runs.jsonl and the real config stay untouched.
 set -u
@@ -18,6 +18,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 R="$T/repo"; export R
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -28,8 +29,10 @@ newrepo(){ rm -rf "$R"; mkdir -p "$R/tests"; (
   printf 'assert True\n' > tests/test_b.py; printf '.claude/\n' > .gitignore
   git add -A && git commit -qm init
   printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| a | test_a | KEEP | tests/test_a.py |\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `%s`\n' "$1" > PLAN_T.md
-); }
-run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1; }
+); approve PLAN_T.md "$R" || exit 1; }
+# run ACTIONS: one fake executor run of PLAN_T.md phase 1; a refused run is a broken fixture
+run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+  grep -q '^DELEGATE RESULT' "$T/out.txt" || { echo "setup failed: the run did not start"; cat "$T/out.txt"; exit 1; }; }
 has(){ grep -F -- "$1" "$T/out.txt" > /dev/null; }
 line(){ grep "^$1" "$T/out.txt" | grep -F -- "$2" > /dev/null; }
 rid(){ sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
@@ -83,8 +86,8 @@ $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 7 ] && grep -qi "acceptance files changed" "$T/v.txt" && [ "$(meta "$RID" verdict)" = "None" ] \
   && ok "PASS refused (exit 7), verdict not recorded" || { bad "PASS not refused rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
 $DP --verdict "$RID" PASS --force --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] && meta "$RID" verdict_note | grep -q "forced" \
-  && ok "--force records PASS with a 'forced' note" || { bad "--force rc=$RC note=$(meta "$RID" verdict_note)"; cat "$T/v.txt"; }
+[ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] && grep -qF "PASS (forced)" "$T/v.txt" \
+  && ok "--force over a changed acceptance file records PASS, and the verdict line reads PASS (forced)" || { bad "--force rc=$RC"; cat "$T/v.txt"; }
 newrepo 'python3 tests/test_a.py'; run 'echo y >> a.py'; RID=$(rid)
 ! has "ACCEPTANCE FILES CHANGED" && $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1 \
   && ok "untouched acceptance files: no line, PASS accepted" || { bad "clean run flagged or refused"; cat "$T/v.txt"; grep ACCEPT "$T/out.txt"; }
@@ -104,11 +107,44 @@ $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1
 [ $? -eq 7 ] && ok "implementer session run editing acceptance files -> PASS refused (only planner exempt)" \
   || { bad "implementer session not refused ($BID)"; cat "$T/v.txt"; }
 newrepo 'grep -q y a.py'
-printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | test_b | KEEP | tests/test_b.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py && date +%%N > tests/test_b.py` (characterization)\n' > "$R/PLAN_T.md"
-FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
-line "changed in scope:" "a.py" && ! has "ACCEPTANCE FILES CHANGED" \
-  && ok "files rewritten by the red run are not blamed on the executor" || { bad "red-run artifact blamed"; grep -e ACCEPT -e '^status' "$T/out.txt"; }
+# the characterization command rewrites a grading file (a Test plan home) only while a.py has no y, so only the red run before the change does
+printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | test_b | KEEP | tests/test_b.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py && { grep -q y a.py || date +%%N > tests/test_b.py; }` (characterization)\n' > "$R/PLAN_T.md"
+approve PLAN_T.md "$R" || exit 1
+FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RID=$(rid)
+[ -n "$RID" ] && [ -n "$(git -C "$R" status --porcelain -- tests/test_b.py)" ] && [ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] \
+  || { echo "setup failed: a run whose red run rewrote tests/test_b.py and whose acceptance then passed twice"; cat "$T/out.txt"; exit 1; }
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+line "changed in scope:" "a.py" && ! has "ACCEPTANCE FILES CHANGED" && ! has "ACCEPTANCE COMMAND CHANGED GRADING FILE" && [ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] \
+  && ok "a grading file rewritten only by the red run before the change is blamed on nobody: no ACCEPTANCE line, PASS accepted" \
+  || { bad "red-run artifact blamed rc=$RC"; grep -e ACCEPT -e '^status' "$T/out.txt"; cat "$T/v.txt"; }
 $DP --help 2>&1 | tr -s ' \n' ' ' | grep -q -- "--force.*acceptance files" && ok "--force help mentions the acceptance-file refusal" || bad "--force help text"
+cat > "$T/rig.py" <<'PY'
+import glob, hashlib, json, os, sys
+for f in glob.glob(os.environ["R"] + "/.git/concord/*/state.json"):    # the executor rewrites the hashes that grade it
+    st = json.load(open(f)); st["acceptance_hashes"] = {p: hashlib.sha256(open(os.environ["R"] + "/" + p, "rb").read()).hexdigest()
+                                                         for p in st["acceptance_hashes"]}
+    json.dump(st, open(f, "w"))
+PY
+newrepo 'python3 tests/test_a.py'
+run 'echo y >> a.py; echo "# rigged" >> tests/test_a.py; python3 '"$T"'/rig.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] \
+  && ok "an executor that rewrites its run state and a grading test: ACCEPTANCE FILES CHANGED, PASS refused (exit 7)" \
+  || { bad "rigged run: PASS rc=$RC"; grep -i accept "$T/out.txt" | head -3; }
+# S42: the grading file is rewritten by a post-run acceptance command (a snapshot test that refreshes its golden file)
+newrepo 'python3 tests/test_a.py && echo "# refreshed golden" >> tests/test_a.py'
+run 'echo y >> a.py'; RID=$(rid)
+if [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ "$(tail -1 "$R/tests/test_a.py")" = "# refreshed golden" ]; then
+  $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+  [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+    && ok "a post-run acceptance command that rewrites a grading file and exits 0: PASS refused (exit 7), the file named" \
+    || { bad "grading file rewritten by an acceptance command: PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
+  $DP --verdict "$RID" PASS --force --note "owner accepts the refreshed golden file" --repo "$R" > "$T/v.txt" 2>&1
+  $DP --report --plan PLAN_T.md --repo "$R" > "$T/rep.txt" 2>&1; REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1); [ -f "$REP" ] || REP="$T/none"
+  sed -n '/^## Overrides/,/^## [^O]/p' "$REP" | grep -qF "tests/test_a.py" \
+    && ok "the report's Overrides names the grading file that an acceptance command rewrote" \
+    || { bad "report does not name the rewritten grading file"; sed -n '/^## Overrides/,/^## [^O]/p' "$REP"; }
+else bad "S42 setup: the acceptance command did not rewrite tests/test_a.py (after rc $(meta "$RID" acceptance_after_rc))"; fi
 
 echo "== acceptance after run"
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
@@ -122,7 +158,41 @@ line "ACCEPTANCE AFTER RUN:" "0/1 pass" && ok "post-run acceptance failing -> up
 printf '\nacceptance_after = no\n' >> "$T/concord/executors.conf"
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'
 ! grep -qi "acceptance after run" "$T/out.txt" && ok "acceptance_after = no turns the pass off" || bad "conf flag ignored"
-cp -p "$SRC/executors.conf" "$T/concord/executors.conf"
+cp -p "$SRC/executors.conf" "$T/concord/executors.conf"; fake_env
+
+echo "== what PASS needs of the acceptance results"
+verdict_of(){ meta "$1" verdict; }
+newrepo 'grep -q y a.py'; run 'true'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[1]" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] \
+  && ok "PASS refused (exit 7) when a command's result after the run is not the expected green" || { bad "wrong result: rc=$RC verdict=$(verdict_of "$RID") after=$(meta "$RID" acceptance_after_rc)"; cat "$T/v.txt"; }
+$DP --verdict "$RID" PASS --force --note "owner accepts" --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && grep -qF "PASS (forced)" "$T/v.txt" \
+  && ok "--force records it, and the verdict line reads PASS (forced)" || { bad "forced PASS rc=$RC"; cat "$T/v.txt"; }
+printf '\nacceptance_after = no\n' >> "$T/concord/executors.conf"
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+cp -p "$SRC/executors.conf" "$T/concord/executors.conf"; fake_env
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ -z "$(grep -i 'acceptance after run' "$T/out.txt")" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] \
+  && ok "PASS refused (exit 7) when a command has no result from after the run (post-run acceptance off)" || { bad "missing result: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && ! grep -qF "(forced)" "$T/v.txt" \
+  && ok "every result from after the run is the expected one: PASS recorded, not forced" || { bad "green run: rc=$RC"; cat "$T/v.txt"; }
+newrepo 'true'
+printf '# Plan\n## Phase 1 - tests first\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `python3 tests/red.py` (fails until phase 2)\n' > "$R/PLAN_T.md"
+printf 'import sys\nsys.exit(1)\n' > "$R/tests/red.py"; approve PLAN_T.md "$R" || exit 1
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[1]" ] && [ $RC -ne 0 ] && [ "$(verdict_of "$RID")" = "None" ] \
+  && ok "an expected-red command that fails: PASS without --note is refused, nothing recorded" || { bad "expected-red, no note: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+$DP --verdict "$RID" PASS --note "tests/red.py fails: the feature lands in phase 2" --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && ok "with a --note naming the failing test and why, the PASS is recorded" || { bad "expected-red, note: rc=$RC"; cat "$T/v.txt"; }
+printf '# Plan\n## Phase 1 - tests first\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `no-such-command-zq7` (fails until phase 2)\n' > "$R/PLAN_T.md"; approve PLAN_T.md "$R" || exit 1
+run 'echo z >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --note "no-such-command-zq7 fails: not written yet" --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[127]" ] && [ $RC -ne 0 ] && [ "$(verdict_of "$RID")" = "None" ] \
+  && ok "an expected-red command that exits 127 (not runnable) is not red: PASS refused even with a --note" || { bad "exit 127: rc=$RC verdict=$(verdict_of "$RID") after=$(meta "$RID" acceptance_after_rc)"; cat "$T/v.txt"; }
 
 echo "== no changes"
 newrepo 'grep -q y a.py'; run 'true'
@@ -209,20 +279,7 @@ REVIEW-JSON
  ], "clauses": [], "tests": [], "verdict": "BLOCK"}
 END-REVIEW-JSON
 EOF
-$DP --review-record "$RID" --reviewer reviewer-opus48 --file "$T/rev.txt" --repo "$R" > "$T/rr.txt" 2>&1
-python3 -I - "$R/.git/concord/$RID/meta.json" <<'EOF'
-import json, sys
-rev = (json.load(open(sys.argv[1])).get("reviews") or [{}])[-1]
-report = open(rev["report"]).read() if rev.get("report") else ""
-ok = rev.get("downgraded") == {"outside_diff": 2, "todo": 1, "delete_only": 1} and rev.get("highs") == 1 \
-     and rev.get("blockers") == 0 and "(auto: outside diff, was HIGH)" in report
-print("  ok   --review-record stores filtered findings and downgrade counts" if ok
-      else f"  FAIL --review-record: downgraded={rev.get('downgraded')} highs={rev.get('highs')} blockers={rev.get('blockers')}")
-sys.exit(0 if ok else 1)
-EOF
-[ $? -eq 0 ] && pass=$((pass+1)) || { fail=$((fail+1)); cat "$T/rr.txt"; }
-
-rm "$R/a.py"; $DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/rev.txt" --repo "$R" > "$T/rr.txt" 2>&1
+record "$RID" reviewer-opus55 "$T/rev.txt" "$R" > /dev/null 2>&1; rm "$R/a.py"; record "$RID" reviewer-opus55 "$T/rev.txt" "$R" > "$T/rr.txt" 2>&1
 python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))['reviews'][-1]; sys.exit(0 if r.get('highs')==4 and r.get('blockers')==1 else 1)" "$R/.git/concord/$RID/meta.json" \
   && ok "review record on a run whose files are gone keeps findings as written" || { bad "no-files record downgraded"; cat "$T/rr.txt"; }
 

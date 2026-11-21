@@ -1,8 +1,8 @@
 #!/bin/bash
-# concord.py delta-review regression (2026-10-19, PLAN_kit-delta): after a fix commit, `--review-pr N --delta`
-# reviews only the fix (the fix diff with function context + the ledger), and `--pr-status` carries the evidence
-# of the previously reviewed head forward (2026-10-22, PLAN_kit-fixreview: whatever files the fix touches; only a
-# file rewritten past half of its lines needs a full review). No network: fake gh, bare origin, fake qwen reviewer.
+# concord.py delta reviews: `--review-pr N --delta` reviews only the fix (the delta with function context, the open
+# findings and the hunks, numbered) and a cheap delta can close a finding and cover a file. A finding closes only by a
+# resolution (fixed yes, with evidence) of a review of a later head; a hunk is covered only when it is explained by a
+# finding the same answer closes (closure follows the finding, not the file). No network: fake gh, bare origin, fake qwen.
 # Run: bash ~/.claude/concord/tests/delta_test.sh   (exit 0 = all passed).
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -13,6 +13,7 @@ cp -p "$SRC"/concord.py "$SRC"/wt.py "$SRC"/*.md "$SRC"/*.conf "$T/concord/" && 
 cat > "$T/bin/qwen" <<'EOF'
 #!/bin/sh
 echo ran >> "$T/qwen_calls"; printf '%s\n' "$1" > "$T/last_prompt.txt"
+if [ -n "${FAKE_ACTIONS:-}" ]; then sh -c "$FAKE_ACTIONS"; exit 0; fi
 if [ -n "${FAKE_GARBAGE:-}" ]; then echo 'not a review'; exit 0; fi
 if [ -n "${FAKE_CLEAN:-}" ]; then printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'; exit 0; fi
 printf 'REVIEW-JSON\n{"findings": [{"severity": "%s", "path": "%s",' "${FAKE_SEV:-HIGH}" "${FAKE_PATH:-a.py}"
@@ -25,7 +26,6 @@ n=$(printf '%s' "$3" | sed -E 's|.*/pull/||; s|.*#||')
 [ -f "$T/pr$n.json" ] && cat "$T/pr$n.json" && exit 0
 echo "no pull requests found for $3" >&2; exit 1
 EOF
-printf '%s\n' "open('big.py', 'w').write(''.join('v_%04d = %r\\n' % (i, 'x' * 30) for i in range(2000)))" > "$T/gen.py"
 chmod +x "$T/bin/qwen" "$T/bin/gh"
 # The /usr/bin git and python3 are xcrun shims; inside the macOS sandbox xcrun cannot write its cache and prints
 # "couldn't create cache file" on stderr, which pollutes captured output. Prefer the developer dir's real binaries.
@@ -33,269 +33,270 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 O="$T/origin.git"; R="$T/clone"; RUNS="$R/.git/concord"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
 has(){ grep -F -- "$1" "$T/out.txt" > /dev/null; }
+calls(){ [ -f "$T/qwen_calls" ] && wc -l < "$T/qwen_calls" | tr -d ' ' || echo 0; }
 rid(){ sed -n 's/^PR REVIEW \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
 mj(){ python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {"m": m}))' "$1" "$2" 2>&1; }
-prjson(){ printf '{"baseRefName": "main", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$2" > "$T/pr$1.json"; }
-head7(){ git -C "$O" rev-parse refs/pull/7/head; }
 headn(){ git -C "$O" rev-parse "refs/pull/$1/head"; }
-stn(){ $DP --pr-status "$1" --repo "$R" > "$T/out.txt" 2>&1; }
+prjson(){ printf '{"baseRefName": "main", "headRefName": "pr%s", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$1" "$(headn "$1")" > "$T/pr$1.json"; }
+st(){ $DP --pr-status "$1" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; }
 pushn(){ # pushn N 'shell' : commit a change on top of the PR N head and push it as the new head
   ( set -e; cd "$R"; git fetch -q origin "refs/pull/$1/head"; git checkout -q FETCH_HEAD; sh -c "$2"; git add -A; git commit -qm fix
     git push -q origin "HEAD:refs/pull/$1/head"; git checkout -q main ) || { echo "setup failed: pushn $1"; exit 1; }
-  prjson "$1" "$(headn "$1")"; }
+  prjson "$1"; }
 newpr(){ # newpr N 'shell' : a PR N branch off main with the given change
   ( set -e; cd "$R"; git checkout -q main; git checkout -qb "pr$1"; sh -c "$2"; git add -A; git commit -qm "pr$1"
     git push -qf origin "HEAD:refs/pull/$1/head"; git checkout -q main; git branch -qD "pr$1" ) || { echo "setup failed: newpr $1"; exit 1; }
-  prjson "$1" "$(headn "$1")"; }
-review(){ # review N [env...] : a full review of PR N at tier high by the fake reviewer; sets RD to its run dir
-  n=$1; shift; env "$@" $DP --review-pr "$n" --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"; }
-st(){ $DP --pr-status 7 --repo "$R" > "$T/out.txt" 2>&1; }
-push7(){ # push7 'shell' : commit a change on top of the PR 7 head and push it as the new head
-  ( set -e; cd "$R"; git fetch -q origin refs/pull/7/head; git checkout -q FETCH_HEAD; sh -c "$1"; git add -A; git commit -qm fix
-    git push -q origin HEAD:refs/pull/7/head; git checkout -q main ) || { echo "setup failed: push7"; exit 1; }
-  prjson 7 "$(head7)"; }
-JCLEAN='REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'
-rec(){ printf '%b' "$JCLEAN" > "$T/rev.txt"; $DP --review-record "$1" --reviewer "$2" --file "$T/rev.txt" --repo "$R" > /dev/null 2>&1; }
-
+  prjson "$1"; }
+# opus N TIER NAME ANSWER [ARGS]: an Opus packet (ARGS: --files, --delta, ...) answered with ANSWER and recorded as NAME
+opus(){ local n=$1 t=$2 name=$3 ans=$4; shift 4
+  $DP --review-pr "$n" --packet --tier "$t" "$@" --repo "$R" > "$T/out.txt" 2>&1
+  PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+  [ -n "$PK" ] || { echo "    (no packet for PR $n: $(tail -1 "$T/out.txt"))"; return 1; }
+  cp "$ans" "$T/ans.txt"; sign "$T/ans.txt" "$PK"
+  $DP --review-record "$(basename "$(dirname "$PK")")" --reviewer "$name" --file "$T/ans.txt" --repo "$R" > "$T/rec.txt" 2>&1; }
+review(){ # review N [env...] : a full review of PR N at tier medium by the fake reviewer; sets RC and RD (its run dir)
+  n=$1; shift; env "$@" $DP --review-pr "$n" --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"; }
+CLEAN='REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'
+printf '%b' "$CLEAN" > "$T/clean.txt"
+# hfinding PATH LINE... : a HIGH finding answer holding the given (path line problem) triples
+hfinding(){ python3 -I -c '
+import json, sys
+a = sys.argv[2:]; f = [{"severity": "HIGH", "path": a[i], "line": int(a[i + 1]), "problem": a[i + 2], "fix": "fix it",
+                        "repro": {"input": "in", "expected": "exp", "actual": "act"}} for i in range(0, len(a), 3)]
+open(sys.argv[1], "w").write("REVIEW-JSON\n" + json.dumps({"findings": f, "clauses": [], "tests": [], "verdict": "FIX"}) + "\nEND-REVIEW-JSON\n")' "$@"; }
+# dans FILE RESOLUTIONS HUNKS: a clean delta answer with the given resolutions and hunks (JSON)
+dans(){ printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN", "resolutions": %s, "hunks": %s}\nEND-REVIEW-JSON\n' "$2" "$3" > "$1"; }
 git init -q --bare -b main "$O" && git clone -q "$O" "$R" 2> /dev/null || { echo "setup failed: repos"; exit 1; }
 ( set -e; cd "$R" && git config user.email t@t && git config user.name t
-  printf 'x = 1\n' > a.py; printf 'q = 1\n' > b.py; printf '.claude/\n' > .gitignore; git add -A && git commit -qm init && git push -q origin main
-  git checkout -qb pr7; printf 'x = 2\n' > a.py; printf 'c = 3\n' > c.py; git add -A && git commit -qm pr7 && git push -q origin HEAD:refs/pull/7/head
-  git checkout -q main; git branch -qD pr7 ) || { echo "setup failed: pr7"; exit 1; }
-H0=$(head7); prjson 7 "$H0"
+  printf 'x = 1\n' > a.py; printf 'q = 1\n' > b.py; printf '.claude/\n' > .gitignore; git add -A && git commit -qm init && git push -q origin main ) || { echo "setup failed: main"; exit 1; }
 
-echo "== full review, then a fix commit"
-$DP --review-pr 7 --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-D0="$RUNS/$(rid)"; FL=$(mj "$D0/meta.json" 'm["reviews"][-1]["reviewer"]')
-[ $RC -eq 0 ] && [ -f "$RUNS/ledger/pr7.json" ] && ok "full review at H0 recorded; ledger pr7 has the finding on a.py" || { bad "full review rc=$RC"; tail -3 "$T/out.txt"; }
-rec "$(basename "$D0")" "$FL"; st
-has "CURRENT HEAD ${H0:0:8}: REVIEWED at high" && ok "H0 REVIEWED after the reviewer's clean follow-up" || { bad "H0 not reviewed"; cat "$T/out.txt"; }
-push7 "printf 'x = 3\n' > a.py"; H1=$(head7); st
-has "CURRENT HEAD ${H1:0:8}: UNREVIEWED (head moved; last reviewed ${H0:0:8}; changed since: a.py; delta review possible)" \
-  && ok "--pr-status: head moved, names the last reviewed head and the changed file, offers a delta" || { bad "moved hint"; cat "$T/out.txt"; }
-
-echo "== delta review"
-C0=$(wc -l < "$T/qwen_calls" | tr -d ' ')
-FAKE_CLEAN=1 $DP --review-pr 7 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-D1="$RUNS/$(rid)"
+echo "== a delta of a fix commit: meta, prompt, packet"
+newpr 7 "printf 'x = 2\n' > a.py; printf 'c = 3\n' > c.py"; H0=$(headn 7)
+opus 7 medium concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: full review"; cat "$T/out.txt"; exit 1; }
+pushn 7 "printf 'x = 3\n' > a.py"; H1=$(headn 7)
+C0=$(calls)
+FAKE_CLEAN=1 $DP --review-pr 7 --delta --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?; D1="$RUNS/$(rid)"
 [ $RC -eq 0 ] && [ "$(mj "$D1/meta.json" '(m["since"], m["delta_files"], m["head"])')" = "('$H0', ['a.py'], '$H1')" ] \
-  && [ "$(mj "$D1/meta.json" 'm["reviews"][-1]["since"]')" = "$H0" ] && [ "$(wc -l < "$T/qwen_calls" | tr -d ' ')" = $((C0 + 1)) ] \
+  && [ "$(calls)" = $((C0 + 1)) ] \
   && ok "--delta: meta carries since/delta_files, one model call" || { bad "delta rc=$RC: $(mj "$D1/meta.json" 'm' 2>&1 | head -c 300)"; tail -3 "$T/out.txt"; }
 P="$D1/prompt.txt"
-grep -q "^Delta review since ${H0:0:8}: files a.py$" "$P" && grep -q "^Changed since the last reviewed head ${H0:0:8}" "$P" \
-  && grep -q "^Review ledger pr7" "$P" && grep -q "^diff --git a/a.py" "$P" && ! grep -q "^diff --git a/c.py" "$P" && grep -q "^+x = 3$" "$P" \
-  && ok "delta prompt: delta line, fix-commit diff, ledger, only the touched file" || bad "delta prompt: $(grep -n 'Delta\|Changed since\|^diff --git' "$P" | head)"
-st; has "CURRENT HEAD ${H1:0:8}: REVIEWED at high (via delta from ${H0:0:8})" && ok "--pr-status: clean delta carries H0's evidence to H1" || { bad "carry"; cat "$T/out.txt"; }
-has "since ${H0:0:8}" && ok "recorded review lines show the delta's since head" || bad "no since in listing"
-
-echo "== chain, open delta, unreferenced file, rebase"
-push7 "printf 'x = 4\n' > a.py"; H2=$(head7)
-FAKE_CLEAN=1 $DP --review-pr 7 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; st
-has "CURRENT HEAD ${H2:0:8}: REVIEWED at high (via delta from ${H1:0:8})" && ok "a chain of deltas carries the evidence" || { bad "chain"; cat "$T/out.txt"; }
-push7 "printf 'x = 5\n' > a.py"; H3=$(head7)
-$DP --review-pr 7 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; D3="$RUNS/$(rid)"; st
-has "CURRENT HEAD ${H3:0:8}: FINDINGS OPEN ($FL: FIX, 1 HIGH)" && ok "a delta review with an open finding -> FINDINGS OPEN" || { bad "open delta"; cat "$T/out.txt"; }
-rec "$(basename "$D3")" "$FL"; st
-has "REVIEWED at high (via delta from ${H2:0:8})" && ok "clean follow-up on the delta head -> REVIEWED via the chain" || { bad "delta follow-up"; cat "$T/out.txt"; }
-push7 "printf 'q = 2\n' > b.py"; H4=$(head7)
-st; has "CURRENT HEAD ${H4:0:8}: UNREVIEWED (head moved; last reviewed ${H3:0:8}; changed since: b.py; delta review possible)" \
-  && ok "--pr-status: a fix touching a file no finding references still allows a delta" || { bad "unreferenced hint"; cat "$T/out.txt"; }
-FAKE_CLEAN=1 $DP --review-pr 7 --delta --via qwen --model fake/m --user-approved "test go-ahead" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && ok "fix touching a file no finding references: --delta runs" || { bad "unreferenced rc=$RC"; tail -3 "$T/out.txt"; }
-FAKE_CLEAN=1 $DP --review-pr 7 --via qwen --model fake/m --user-approved "test go-ahead" --tier medium --repo "$R" > "$T/out.txt" 2>&1; st
-has "CURRENT HEAD ${H4:0:8}: REVIEWED at medium" && ! has "via delta" && ok "a full review at the new head is REVIEWED directly" || { bad "full after delta"; cat "$T/out.txt"; }
-$DP --review-pr 7 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "nothing changed since" && ok "--delta with nothing changed since the reviewed head: exit 2" || { bad "no-change delta rc=$RC"; tail -2 "$T/out.txt"; }
-push7 "printf 'x = 6\n' > a.py"; H5=$(head7)
-$DP --review-pr 7 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-[ $RC -eq 0 ] && [ -f "$PK" ] && grep -q "^Delta review since ${H4:0:8}: files a.py$" "$PK" && grep -q "^Review ledger pr7" "$PK" \
+grep -q "^Delta review since ${H0:0:8}: files a.py$" "$P" && grep -q "^diff --git a/a.py" "$P" && ! grep -q "^diff --git a/c.py" "$P" && grep -q "^+x = 3$" "$P" \
+  && ok "delta prompt: delta line, fix-commit diff, only the touched file" || bad "delta prompt: $(grep -n 'Delta\|^diff --git' "$P" | head)"
+$DP --review-pr 7 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ $RC -eq 0 ] && [ -f "$PK" ] && grep -q "^Delta review since ${H0:0:8}: files a.py$" "$PK" \
   && ok "--delta --packet writes a delta packet for an Opus reviewer" || { bad "delta packet rc=$RC"; tail -2 "$T/out.txt"; }
+grep -qE '^H1\b' "$PK" && grep -qF '"hunks"' "$PK" && grep -qF "packet_sha" "$PK" \
+  && ok "the delta packet numbers its hunks (H1 ...) and its review task states the hunks and packet_sha answer fields" || bad "delta packet: no numbered hunk or answer fields"
+opus 7 medium concord:reviewer-opus55 "$T/clean.txt"; $DP --review-pr 7 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && has "nothing changed since" && ok "--delta with nothing changed since the reviewed head: exit 2" || { bad "no-change delta rc=$RC"; tail -2 "$T/out.txt"; }
+pushn 7 "printf 'x = 6\n' > a.py"
 for flt in "--files a.py" "--exclude c.py"; do
   $DP --review-pr 7 --delta --packet $flt --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-  [ $RC -eq 2 ] && has "--delta cannot be combined with --files/--exclude" && ok "--delta with $flt: exit 2 (a delta covers every changed file)" \
-    || { bad "--delta $flt rc=$RC"; tail -2 "$T/out.txt"; }
+  [ $RC -eq 2 ] && has "--delta cannot be combined with --files/--exclude" && ok "--delta with $flt: exit 2 (a delta covers every changed file)" || { bad "--delta $flt rc=$RC"; tail -2 "$T/out.txt"; }
 done
 ( set -e; cd "$R"; git checkout -q main; git checkout -qb pr7r; printf 'x = 9\n' > a.py; git add -A; git commit -qm rebuilt
   git push -qf origin HEAD:refs/pull/7/head; git checkout -q main; git branch -qD pr7r ) || { echo "setup failed: rebuild"; exit 1; }
-H6=$(head7); prjson 7 "$H6"; st
-has "CURRENT HEAD ${H6:0:8}: UNREVIEWED (head moved; no reviewed ancestor: full review needed)" \
-  && ok "rebuilt branch (no reviewed ancestor): full review needed" || { bad "no ancestor hint"; cat "$T/out.txt"; }
-$DP --review-pr 7 --delta --via qwen --model fake/m --user-approved "test go-ahead" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "no reviewed ancestor" && ok "--delta on a rebuilt branch: exit 2" || { bad "rebuilt delta rc=$RC"; tail -2 "$T/out.txt"; }
-mkdir -p "$RUNS/pr7-deadbeef-gone"; printf 'VERDICT: CLEAN\n' > "$RUNS/pr7-deadbeef-gone/report.md"
-printf '{"kind": "pr-review", "pr": 7, "head": "%s", "tier": "high", "run_id": "pr7-deadbeef-gone", "reviews": [{"reviewer": "reviewer-opus55", "verdict": "CLEAN", "blockers": 0, "highs": 0, "report": "%s", "at": "2999-01-01T00:00:00+00:00"}]}\n' \
-  "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$RUNS/pr7-deadbeef-gone/report.md" > "$RUNS/pr7-deadbeef-gone/meta.json"
-st; RC=$?
-[ $RC -eq 0 ] && has "CURRENT HEAD ${H6:0:8}: UNREVIEWED (head moved; last reviewed deadbeef not available locally: full review needed)" \
-  && ok "--pr-status: a reviewed head missing from this clone gets a status line, exit 0" || { bad "missing head rc=$RC"; cat "$T/out.txt"; }
+prjson 7; $DP --review-pr 7 --delta --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && has "no reviewed ancestor" && ok "--delta on a rebuilt branch (no reviewed ancestor): exit 2" || { bad "rebuilt delta rc=$RC"; tail -2 "$T/out.txt"; }
 
-echo "== an open head between the reviewed head and the fix is never skipped"
-newpr 8 "printf 'x = 2\n' > a.py; printf 'z = 1\n' > z.py"; P0=$(headn 8)
-review 8; rec "$(basename "$RD")" "$FL"; stn 8
-has "CURRENT HEAD ${P0:0:8}: REVIEWED at high" || { bad "setup: P0 not reviewed"; cat "$T/out.txt"; }
-pushn 8 "printf 'z = 2\n' > z.py"; P1=$(headn 8)
-review 8 FAKE_PATH=z.py; stn 8
-has "CURRENT HEAD ${P1:0:8}: FINDINGS OPEN" || { bad "setup: P1 not open"; cat "$T/out.txt"; }
-pushn 8 "printf 'x = 3\n' > a.py"; P2=$(headn 8)
-C0=$(wc -l < "$T/qwen_calls" | tr -d ' ')
-FAKE_CLEAN=1 $DP --review-pr 8 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "delta review not sufficient for PR 8: open findings at ${P1:0:8} on z.py are not touched since; fix them or run a full review" \
-  && [ "$(wc -l < "$T/qwen_calls" | tr -d ' ')" = "$C0" ] \
-  && ok "--delta: base = the open intermediate head; its open finding's file untouched -> exit 2, no model call" || { bad "open base rc=$RC"; tail -3 "$T/out.txt"; }
-stn 8
-has "CURRENT HEAD ${P2:0:8}: UNREVIEWED (head moved; last reviewed ${P1:0:8} (findings open on: z.py); changed since: a.py; full review needed (open findings not touched: z.py))" \
-  && ! has "REVIEWED at" && ok "--pr-status: the open head is the base, the fix must touch z.py" || { bad "open base status"; cat "$T/out.txt"; }
-pushn 8 "printf 'z = 3\n' > z.py"; P3=$(headn 8); stn 8
-has "CURRENT HEAD ${P3:0:8}: UNREVIEWED (head moved; last reviewed ${P1:0:8} (findings open on: z.py); changed since: a.py, z.py; delta review possible)" \
-  && ok "--pr-status: fix touches the open finding's file -> delta review possible" || { bad "open base fixed status"; cat "$T/out.txt"; }
+echo "== the delta prompt keeps no color codes, a quoted file name and a pathspec-looking file name"
+newpr 13 "printf 't = 1\n' > 'q\"t.py'"; opus 13 medium concord:reviewer-opus55 "$T/clean.txt"
+pushn 13 "printf 't = 2\n' > 'q\"t.py'"
 git -C "$R" config color.diff always; git -C "$R" config color.ui always
-FAKE_CLEAN=1 $DP --review-pr 8 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; D8="$RUNS/$(rid)"
+FAKE_CLEAN=1 $DP --review-pr 13 --delta --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?; D13="$RUNS/$(rid)"
 git -C "$R" config --unset color.diff; git -C "$R" config --unset color.ui
-[ $RC -eq 0 ] && [ "$(mj "$D8/meta.json" '(m["since"], m["delta_files"])')" = "('$P1', ['a.py', 'z.py'])" ] \
-  && ok "--delta since the open head: since = P1, both files" || { bad "delta from open base rc=$RC"; tail -3 "$T/out.txt"; }
-! grep -q "$(printf '\033')" "$D8/prompt.txt" && grep -q "^+z = 3$" "$D8/prompt.txt" && ok "delta prompt has no color codes under color.ui=always" || bad "color codes in the delta prompt"
-stn 8; has "CURRENT HEAD ${P3:0:8}: REVIEWED at high (via delta from ${P1:0:8}; light fix at low)" && ok "review finds a HIGH, fix lands, clean delta -> REVIEWED via the open head" || { bad "main flow"; cat "$T/out.txt"; }
-echo "== a delta never clears a full review at the same head"
-# --force-review: a clean delta already covers this head; force the full review this case deliberately re-runs
-$DP --review-pr 8 --via qwen --model fake/m --user-approved "test go-ahead" --tier high --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"
-F8="$RD"; rec "$(basename "$D8")" "$FL"; stn 8
-has "CURRENT HEAD ${P3:0:8}: FINDINGS OPEN" && ok "open full review + newer clean delta entry by the same reviewer -> FINDINGS OPEN" || { bad "delta cleared full"; cat "$T/out.txt"; }
-rec "$(basename "$F8")" "$FL"; stn 8
-has "CURRENT HEAD ${P3:0:8}: REVIEWED at high" && ! has "via delta" && ok "clean follow-up on the full review -> REVIEWED directly" || { bad "full follow-up"; cat "$T/out.txt"; }
+[ $RC -eq 0 ] && ! grep -q "$(printf '\033')" "$D13/prompt.txt" && grep -q '^+t = 2$' "$D13/prompt.txt" \
+  && ok "delta: a file name with a double quote keeps its diff and the prompt has no color codes under color.ui=always" || { bad "quoted name or color rc=$RC"; tail -2 "$T/out.txt"; }
+newpr 17 "printf 'evil = 1\n' > ':(top)a.py'"; review 17 FAKE_CLEAN=1
+grep -q '^+evil = 1$' "$RD/prompt.txt" && ok "a PR file named ':(top)a.py' is diffed literally (no pathspec magic)" || bad "pathspec magic hid a file from the review"
 
-echo "== renames list both paths"
-pushn 8 "git mv z.py y.py"; P4=$(headn 8); stn 8
-has "changed since: y.py, z.py; delta review possible)" && ok "--no-renames: a rename lists the old and the new path" || { bad "rename"; cat "$T/out.txt"; }
+echo "== a finding path is stored without ./ so a resolution finds the file"
+newpr 18 "printf 'w = 1\n' > w2.py"; review 18 FAKE_PATH=./w2.py
+[ "$(mj "$RUNS/ledger/pr18.json" '[f["path"] for f in m["findings"]]')" = "['w2.py']" ] && ok "a finding reported as ./w2.py is stored as w2.py" || bad "./ path: $(mj "$RUNS/ledger/pr18.json" '[f["path"] for f in m["findings"]]')"
+
+echo "== a delta closes a finding only by a resolution; a hunk is covered only when a closed finding explains it"
+# s23 N: PR N holds a.py with one policy() line; an opus55 review at the first head opens F1 on it; the fix changes the line as the caller says
+s23(){ n=$1; to=$2
+  newpr "$n" "printf 'policy(retries=2, timeout=10)\n' > a.py"; hfinding "$T/f1.txt" a.py 1 "retries too low"
+  opus "$n" medium concord:reviewer-opus55 "$T/f1.txt" || { echo "setup failed: PR $n review"; cat "$T/out.txt"; exit 1; }
+  st "$n"; has "FINDINGS OPEN" || { echo "setup failed: PR $n has no open finding"; cat "$T/out.txt"; exit 1; }
+  pushn "$n" "printf '%s\n' '$to' > a.py"; }
+YES='[{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 retries is now 3"}]'
+s23 81 'policy(retries=3, timeout=60)'
+dans "$T/d.txt" "$YES" '[{"hunk": "H1", "explained_by": "", "change": "timeout 10 to 60"}]'; opus 81 medium reviewer-delta "$T/d.txt" --delta; st 81
+has "UNREVIEWED" && has "a.py" && ! has "FINDINGS OPEN" && [ $RC -eq 1 ] \
+  && ok "same-line delta (retries=2 -> 3 and timeout 10 -> 60): F1 closes, the hunk is unexplained, a.py stays uncovered (UNREVIEWED, no open finding)" || { bad "unexplained hunk rc=$RC"; tail -4 "$T/out.txt"; }
+s23 82 'policy(retries=3, timeout=60)'
+dans "$T/d.txt" "$YES" '[]'; opus 82 medium reviewer-delta "$T/d.txt" --delta; st 82
+has "UNREVIEWED" && has "a.py" && ! has "FINDINGS OPEN" && [ $RC -eq 1 ] \
+  && ok "an answer that omits the hunk: F1 closes, the file stays uncovered" || { bad "omitted hunk rc=$RC"; tail -4 "$T/out.txt"; }
+s23 83 'policy(retries=3, timeout=60)'
+dans "$T/d.txt" '[]' '[{"hunk": "H1", "explained_by": "F1"}]'; opus 83 medium reviewer-delta "$T/d.txt" --delta; st 83
+has "FINDINGS OPEN" && has "F1" && [ $RC -eq 1 ] && ok "no resolution for F1: it stays open, and a hunk naming it is unexplained" || { bad "missing resolution rc=$RC"; tail -4 "$T/out.txt"; }
+s23 84 'policy(retries=3, timeout=60)'
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 ok"}, {"finding": "F1", "fixed": "no", "evidence": "a.py:1 still 3 but timeout moved"}]' '[]'; opus 84 medium reviewer-delta "$T/d.txt" --delta; st 84
+has "FINDINGS OPEN" && has "F1" && [ $RC -eq 1 ] && ok "two resolutions of F1 that disagree: F1 stays open" || { bad "disagreeing resolutions rc=$RC"; tail -4 "$T/out.txt"; }
+s23 85 'policy(retries=3, timeout=60)'
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "unsure", "evidence": "a.py:1 maybe"}]' '[]'; opus 85 medium reviewer-delta "$T/d.txt" --delta; st 85
+has "FINDINGS OPEN" && has "F1" && [ $RC -eq 1 ] && ok "an unsure resolution leaves F1 open" || { bad "unsure rc=$RC"; tail -4 "$T/out.txt"; }
+s23 86 'policy(retries=2, timeout=10) # x'
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": ""}]' '[]'; opus 86 medium reviewer-delta "$T/d.txt" --delta; st 86
+has "FINDINGS OPEN" && has "F1" && [ $RC -eq 1 ] && ok "a resolution with empty evidence leaves F1 open" || { bad "empty evidence rc=$RC"; tail -4 "$T/out.txt"; }
+s23 87 'policy(retries=3, timeout=10)'
+dans "$T/d.txt" "$YES" '[{"hunk": "H1", "explained_by": "F1"}]'; opus 87 medium reviewer-delta "$T/d.txt" --delta; st 87
+has "REVIEWED at" && ! has "UNREVIEWED" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
+  && ok "a fix that changes only retries: F1 closes, the hunk is explained by it, the file is covered (REVIEWED, exit 0)" || { bad "explained hunk rc=$RC"; tail -4 "$T/out.txt"; }
+
+echo "== a cheap delta closes F1 and leaves F2 open; a later full review covers the file but closes nothing"
+newpr 88 "printf 'retries = 2\ntimeout = 10\n' > f.py; printf 'g = 1\n' > g.py"
+hfinding "$T/f12.txt" f.py 1 "retries too low" f.py 2 "timeout too short"
+opus 88 medium concord:reviewer-opus55 "$T/f12.txt" || { echo "setup failed: PR 88 review"; cat "$T/out.txt"; exit 1; }
+pushn 88 "printf 'retries = 3\ntimeout = 99\n' > f.py"
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "f.py:1 retries is 3"}]' '[{"hunk": "H1", "explained_by": "", "change": "retries 2 to 3 and timeout 10 to 99"}]'
+opus 88 medium reviewer-delta "$T/d.txt" --delta; opus 88 medium concord:reviewer-opus55 "$T/clean.txt" --files f.py; st 88
+has "FINDINGS OPEN" && has "F2" && ! grep "FINDINGS OPEN" "$T/out.txt" | grep -q "F1" && [ $RC -eq 1 ] \
+  && ok "F1 stays closed, F2 is open, and the later review of f.py (same head) resolves neither" || { bad "two findings rc=$RC"; tail -5 "$T/out.txt"; }
+grep -qE '^  f\.py: medium by reviewer-opus55$' "$T/out.txt" \
+  && ok "the status lines say the later review of f.py covers f.py at its tier, by its reviewer" || { bad "f.py coverage line"; cat "$T/out.txt"; }
 
 echo "== the fix block is the whole delta context; a rewrite needs a full review"
+printf '%s\n' "open('big.py', 'w').write(''.join('v_%04d = %r\\n' % (i, 'x' * 30) for i in range(2000)))" > "$T/gen.py"
 newpr 9 "python3 $T/gen.py; printf 's = 1\\n' > s.py"; Q0=$(headn 9)
-FAKE_PATH=big.py $DP --review-pr 9 --exclude big.py --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RD="$RUNS/$(rid)"
-rec "$(basename "$RD")" "$FL"; stn 9
-has "CURRENT HEAD ${Q0:0:8}: REVIEWED at high" || { bad "setup: Q0 not reviewed"; cat "$T/out.txt"; }
+opus 9 medium concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: PR 9 review"; cat "$T/out.txt"; exit 1; }
 pushn 9 "sed -i.bak 's/^v_1999 = .*/v_1999 = 0/' big.py && rm big.py.bak"; Q1=$(headn 9)
-FAKE_CLEAN=1 $DP --review-pr 9 --delta --dry-run --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+FAKE_CLEAN=1 $DP --review-pr 9 --delta --dry-run --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 DR=$(sed -n 's/^DRY RUN PR REVIEW \([^:]*\):.*/\1/p' "$T/out.txt" | head -1)
 SP=$(grep -l "^Changed since the last reviewed head ${Q0:0:8}" "$RUNS/$DR/prompt.txt" 2> /dev/null | head -1)
 if [ $RC -eq 0 ] && [ -n "$SP" ] && grep -q "^+v_1999 = 0$" "$SP"; then
   LC=$(grep -n "^Changed since the last reviewed head" "$SP" | head -1 | cut -d: -f1); LD=$(grep -n "^diff --git a/big.py" "$SP" | head -1 | cut -d: -f1)
-  [ "$LC" -lt "$LD" ] && ! grep -q "truncated at the cap" "$SP" && [ "$(grep -c '^diff --git a/big.py' "$SP")" = 1 ] \
-    && ok "big PR file: one prompt, the fix block alone, no full-change context" || bad "full-change context in the delta prompt ($LC >= $LD)"
+  [ "$LC" -lt "$LD" ] && ! grep -q "truncated at the cap" "$SP" && [ "$(grep -c '^diff --git a/big.py' "$SP")" = 1 ] && grep -qE '^H1 big.py @@' "$SP" \
+    && ok "big PR file: one prompt, the fix block alone with its numbered hunk, no full-change context" || bad "full-change context in the delta prompt ($LC >= $LD)"
 else bad "fix block lost over the cap rc=$RC prompt=${SP:-none}"; tail -3 "$T/out.txt"; fi
 $DP --review-pr 9 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ $RC -eq 0 ] && [ -f "$PK" ] && grep -q "^+v_1999 = 0$" "$PK" && ! grep -q "truncated at the cap" "$PK" \
   && ok "--delta --packet on a big PR file: packet written, fix block whole" || { bad "delta packet cap rc=$RC"; tail -3 "$T/out.txt"; }
 pushn 9 "sed -i.bak 's/x/y/g' big.py && rm big.py.bak"
-FAKE_CLEAN=1 $DP --review-pr 9 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+FAKE_CLEAN=1 $DP --review-pr 9 --delta --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && has "big.py rewritten since ${Q0:0:8} (2000+/2000- of 2000 lines); run a full review" && ok "every line of big.py rewritten: --delta refuses (exit 2)" || { bad "rewrite rc=$RC"; tail -3 "$T/out.txt"; }
 
-echo "== ledger paths: non-ASCII names, a/ b/ prefixes, open review without paths"
-newpr 10 "printf 'e = 1\n' > é.py; printf 'w = 1\n' > w.py"; U0=$(headn 10)
-review 10 FAKE_PATH=é.py; review 10 FAKE_PATH=b/w.py; rec "$(basename "$RD")" "$FL"; stn 10
-has "CURRENT HEAD ${U0:0:8}: REVIEWED at high" || { bad "setup: U0 not reviewed"; cat "$T/out.txt"; }
-pushn 10 "printf 'e = 2\n' > é.py; printf 'w = 2\n' > w.py"; U1=$(headn 10); stn 10
-has "CURRENT HEAD ${U1:0:8}: UNREVIEWED (head moved; last reviewed ${U0:0:8}; changed since: w.py, é.py; delta review possible)" \
-  && ok "quotePath off + b/ prefix: é.py and w.py are referenced" || { bad "path matching"; cat "$T/out.txt"; }
-review 10 FAKE_GARBAGE=1; stn 10
-has "CURRENT HEAD ${U1:0:8}: FINDINGS OPEN" || { bad "setup: unparsed review not open"; cat "$T/out.txt"; }
-pushn 10 "printf 'w = 3\n' > w.py"; U2=$(headn 10)
-FAKE_CLEAN=1 $DP --review-pr 10 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "the open review at ${U1:0:8} records no finding paths; run a full review" && ok "open base without finding paths: --delta refuses" || { bad "unknown open rc=$RC"; tail -3 "$T/out.txt"; }
-stn 10; has "full review needed (open review without finding paths))" && ok "--pr-status: open review without finding paths -> full review" || { bad "unknown open status"; cat "$T/out.txt"; }
-echo "== first review finds a HIGH, the fix lands, a delta confirms (no earlier reviewed head)"
-newpr 11 "mkdir -p a; printf 'k = 1\n' > a/k.py; printf 'm = 1\n' > m.py"; V0=$(headn 11)
-review 11 FAKE_PATH=a/k.py; stn 11
-has "CURRENT HEAD ${V0:0:8}: FINDINGS OPEN" || { bad "setup: V0 not open"; cat "$T/out.txt"; }
-pushn 11 "printf 'k = 9\n' > k.py"; V1=$(headn 11); stn 11
-has "CURRENT HEAD ${V1:0:8}: UNREVIEWED (head moved; last reviewed ${V0:0:8} (findings open on: a/k.py); changed since: k.py; full review needed (open findings not touched: a/k.py))" \
-  && ok "first review open, fix adds a root k.py: a/k.py (real folder) is NOT touched" || { bad "first open base"; cat "$T/out.txt"; }
-pushn 11 "rm k.py; printf 'k = 2\n' > a/k.py"; V2=$(headn 11); stn 11
-has "CURRENT HEAD ${V2:0:8}: UNREVIEWED (head moved; last reviewed ${V0:0:8} (findings open on: a/k.py); changed since: a/k.py; delta review possible)" \
-  && ok "fix touches a/k.py: delta review possible from the first (open) review" || { bad "first open fixed"; cat "$T/out.txt"; }
-FAKE_CLEAN=1 $DP --review-pr 11 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?; stn 11
-[ $RC -eq 0 ] && has "CURRENT HEAD ${V2:0:8}: REVIEWED at high (via delta from ${V0:0:8}; light fix at low)" \
-  && ok "main flow from the first review: open -> fix -> clean delta -> REVIEWED via the open head" || { bad "first-review main flow rc=$RC"; cat "$T/out.txt"; }
+echo "== a delta chain: a delta that raises a new HIGH, then a delta that resolves it"
+# dfind FILE RESOLUTIONS HUNKS PATH LINE PROBLEM: a delta answer that resolves and explains as given and raises one HIGH
+dfind(){ python3 -I -c '
+import json, sys
+f, res, hk, path, line, prob = sys.argv[1:7]
+a = {"findings": [{"severity": "HIGH", "path": path, "line": int(line), "problem": prob, "fix": "fix it", "repro": {"input": "in", "expected": "exp", "actual": "act"}}],
+     "clauses": [], "tests": [], "verdict": "FIX", "resolutions": json.loads(res), "hunks": json.loads(hk)}
+open(f, "w").write("REVIEW-JSON\n" + json.dumps(a) + "\nEND-REVIEW-JSON\n")' "$@"; }
+newpr 91 "printf 'policy(retries=2)\n' > a.py"; hfinding "$T/f1.txt" a.py 1 "retries too low"
+opus 91 medium concord:reviewer-opus55 "$T/f1.txt" || { echo "setup failed: PR 91 review"; cat "$T/out.txt"; exit 1; }
+pushn 91 "printf 'policy(retries=3)\n' > a.py"
+dfind "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 retries is 3"}]' '[{"hunk": "H1", "explained_by": "F1"}]' a.py 1 "no timeout at all"
+opus 91 medium reviewer-delta "$T/d.txt" --delta; st 91
+has "FINDINGS OPEN" && has "F2" && ! grep "FINDINGS OPEN" "$T/out.txt" | grep -q "F1" && [ $RC -eq 1 ] \
+  && ok "a delta answer that closes F1 and raises a new HIGH: FINDINGS OPEN naming the new finding (F2), not F1" || { bad "new HIGH in a delta rc=$RC"; tail -4 "$T/out.txt"; }
+pushn 91 "printf 'policy(retries=3, timeout=30)\n' > a.py"
+dans "$T/d.txt" '[{"finding": "F2", "fixed": "yes", "evidence": "a.py:1 the timeout is 30"}]' '[{"hunk": "H1", "explained_by": "F2"}]'
+opus 91 medium reviewer-delta "$T/d.txt" --delta; st 91
+has "REVIEWED at" && ! has "UNREVIEWED" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
+  && ok "full review at H0, a delta at H1 and a delta at H2, each explaining every hunk by a finding it closes: REVIEWED at H2 (exit 0)" || { bad "delta chain rc=$RC"; tail -4 "$T/out.txt"; }
 
-echo "== a delta that fixes open findings runs at low on a cheap model; the full review's tier carries (2026-10-25)"
-newpr 71 "printf 'n = 1\n' > n.py"; U0=$(headn 71)
-review 71 FAKE_PATH=n.py; stn 71
-has "CURRENT HEAD ${U0:0:8}: FINDINGS OPEN" || { bad "setup: U0 not open"; cat "$T/out.txt"; }
-pushn 71 "printf 'n = 2\n' > n.py"; U1=$(headn 71)
-FAKE_CLEAN=1 $DP --review-pr 71 --delta --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-grep -qF "tier lowered to low" "$T/out.txt"; LOW=$?; stn 71
-[ $RC -eq 0 ] && [ $LOW -eq 0 ] && has "CURRENT HEAD ${U1:0:8}: REVIEWED at high" \
-  && ok "open -> fix -> cheap delta at low without a go-ahead -> REVIEWED at high" || { bad "cheap open delta rc=$RC"; cat "$T/out.txt"; }
+echo "== a delta covers only what its answer explains: a file uncovered at H0 stays uncovered; a hunk listed twice is unexplained; hunks split on header lines only"
+newpr 93 "printf 'x = 2\n' > a.py; printf 'q = 2 # not read by the first review\n' > b.py"
+hfinding "$T/f93.txt" a.py 1 "x must be 3"
+opus 93 medium concord:reviewer-opus55 "$T/f93.txt" --files a.py || { echo "setup failed: PR 93 review"; cat "$T/out.txt"; exit 1; }
+pushn 93 "printf 'x = 3\n' > a.py; printf 'q = 3 # still not read\n' > b.py"
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 x is 3"}]' '[{"hunk": "H1", "explained_by": "F1"}, {"hunk": "H2", "explained_by": "F1"}]'
+opus 93 medium reviewer-delta "$T/d.txt" --delta; st 93
+grep -qE '^  b\.py: needs medium$' "$T/out.txt" && [ $RC -eq 1 ] \
+  && ok "a file that was in the PR at H0 and that no review read stays uncovered after a delta that explains its hunk" || { bad "b.py covered by a delta rc=$RC"; cat "$T/out.txt"; }
+s23 94 'policy(retries=3, timeout=60)'
+dans "$T/d.txt" "$YES" '[{"hunk": "H1", "explained_by": "F1"}, {"hunk": "H1", "explained_by": "", "change": "timeout 10 to 60"}]'; opus 94 medium reviewer-delta "$T/d.txt" --delta; st 94
+has "UNREVIEWED" && has "a.py" && ! has "REVIEWED at" && [ $RC -eq 1 ] \
+  && ok "a hunk listed twice (once explained by F1, once unexplained) is unexplained: the file stays uncovered" || { bad "double-listed hunk rc=$RC"; tail -4 "$T/out.txt"; }
+cat > "$T/gen_h.py" <<'PY'
+import codecs, sys
+fix, other = codecs.decode(sys.argv[1], "unicode_escape"), sys.argv[2]      # \f and \r in the argument are the control characters
+lines = ["def f():", f"    s = '{fix}'", "    return s", ""] + ["def h():"] + [f"    v{i} = {i}" for i in range(30)] + ["    return 0", ""]
+lines += ["def g():", f"    t = {other}", "    return t", ""]
+open("h.py", "w", newline="").write("\n".join(lines))
+PY
+# a changed line holding the text of a file header, alone, after a form feed and after a lone CR: both hunks of the fix are numbered,
+# and an answer that explains only H1 leaves the file uncovered
+for spec in "95|diff --git a/x b/x|the text 'diff --git a/x b/x'" "96|\\fdiff --git a/x b/x|a form feed and then 'diff --git a/x b/x'" "97|\\rdiff --git a/x b/x|a lone CR and then 'diff --git a/x b/x'"; do
+  n=${spec%%|*}; rest=${spec#*|}; txt=${rest%%|*}; label=${rest#*|}
+  newpr "$n" "python3 $T/gen_h.py old 1"; hfinding "$T/f$n.txt" h.py 2 "s must be changed"
+  opus "$n" medium concord:reviewer-opus55 "$T/f$n.txt" || { echo "setup failed: PR $n review"; cat "$T/out.txt"; exit 1; }
+  pushn "$n" "python3 $T/gen_h.py '$txt' 999"
+  $DP --review-pr "$n" --delta --packet --repo "$R" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+  [ -f "$PK" ] && [ "$(mj "$(dirname "$PK")/meta.json" 'sorted(m["hunks"])')" = "['H1', 'H2']" ] \
+    && ok "a changed line that holds $label does not split the fix block: both hunks are numbered" || { bad "hunks numbered for $label: $(mj "$(dirname "$PK")/meta.json" 'sorted(m["hunks"])' 2>&1 | head -c 200)"; }
+  dans "$T/dh.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "h.py:2 s is changed"}]' '[{"hunk": "H1", "explained_by": "F1"}]'
+  if [ -f "$PK" ]; then sign "$T/dh.txt" "$PK"; $DP --review-record "$(basename "$(dirname "$PK")")" --reviewer reviewer-delta --file "$T/dh.txt" --repo "$R" > "$T/rec.txt" 2>&1; fi
+  st "$n"
+  has "UNREVIEWED" && ! has "REVIEWED at" && [ $RC -eq 1 ] \
+    && ok "an answer that explains only H1 stays UNREVIEWED (exit 1) for $label" || { bad "H1-only answer for $label rc=$RC"; tail -3 "$T/out.txt"; }
+done
 
-echo "== merged reviewed lineages, quoted file names, rebuilt head with only open reviews"
-newpr 12 "printf 'x = 2\n' > a.py"; X0=$(headn 12); review 12; rec "$(basename "$RD")" "$FL"
-newpr 12 "printf 'z = 1\n' > z.py"; Y0=$(headn 12); review 12 FAKE_PATH=z.py
-( set -e; cd "$R"; git fetch -q origin refs/pull/12/head; git checkout -q FETCH_HEAD; git merge -q --no-edit "$X0" > /dev/null
-  git push -q origin HEAD:refs/pull/12/head; git checkout -q main ) || { echo "setup failed: merge"; exit 1; }
-Z0=$(headn 12); prjson 12 "$Z0"; stn 12
-has "CURRENT HEAD ${Z0:0:8}: UNREVIEWED (head moved; merged reviewed heads: ${X0:0:8}, ${Y0:0:8}: full review needed)" \
-  && ok "--pr-status: two reviewed lineages merged -> no delta base, full review" || { bad "merged lineages status"; cat "$T/out.txt"; }
-FAKE_CLEAN=1 $DP --review-pr 12 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "several reviewed heads are merged into ${Z0:0:8} (${X0:0:8}, ${Y0:0:8}); run a full review" \
-  && ok "--delta over merged reviewed lineages: exit 2" || { bad "merged lineages delta rc=$RC"; tail -3 "$T/out.txt"; }
-newpr 13 "printf 't = 1\n' > 'q\"t.py'"; G0=$(headn 13); review 13 'FAKE_PATH=q\"t.py'
-grep -q '^+t = 1$' "$RD/prompt.txt" && ok "full review: a file name with a double quote keeps its diff (-z)" || bad "quoted file name lost from the full review"
-rec "$(basename "$RD")" "$FL"; pushn 13 "printf 't = 2\n' > 'q\"t.py'"; G1=$(headn 13); stn 13
-has "CURRENT HEAD ${G1:0:8}: UNREVIEWED (head moved; last reviewed ${G0:0:8}; changed since: q\"t.py; delta review possible)" \
-  && ok "delta: a quoted file name is listed verbatim and referenced" || { bad "quoted name delta"; cat "$T/out.txt"; }
-newpr 14 "printf 'x = 2\n' > a.py"; W0=$(headn 14); review 14
-newpr 14 "printf 'x = 7\n' > a.py"; W1=$(headn 14); stn 14
-has "CURRENT HEAD ${W1:0:8}: UNREVIEWED (head moved; no reviewed ancestor: full review needed)" \
-  && ok "rebuilt head whose only recorded head is open: no reviewed ancestor, full review" || { bad "rebuilt open"; cat "$T/out.txt"; }
-echo "== open head without a reviewed basis, a late review at a skipped head, pathspec magic, ./ paths"
-jhigh(){ printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "%s", "line": 1, "problem": "late finding", "fix": "fix it", "repro": {"input": "x", "expected": "2", "actual": "1"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$1" > "$T/late.txt"; }
-newpr 15 "printf 'x = 2\n' > a.py; printf 'c = 1\n' > c.py; printf 'z = 1\n' > z.py"; S0=$(headn 15)
-review 15; review 15 FAKE_PATH=c.py; S0RUN="$RD"; rec "$(basename "$RD")" "$FL"
-pushn 15 "printf 'x = 3\n' > a.py; printf 'c = 2\n' > c.py"; S1=$(headn 15)
-FAKE_PATH=c.py $DP --review-pr 15 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1
-jhigh z.py; $DP --review-record "$(basename "$S0RUN")" --reviewer late-opus --file "$T/late.txt" --repo "$R" > /dev/null 2>&1
-pushn 15 "printf 'x = 4\n' > a.py; printf 'z = 2\n' > z.py"; S2=$(headn 15); stn 15
-has "CURRENT HEAD ${S2:0:8}: UNREVIEWED (head moved; last reviewed ${S1:0:8} has open findings without a reviewed basis: full review needed)" \
-  && ok "nearest base is an open head whose basis broke (late review at its base): no delta" || { bad "basis-false base status"; cat "$T/out.txt"; }
-FAKE_CLEAN=1 $DP --review-pr 15 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && has "delta review not sufficient for PR 15: the open head ${S1:0:8} has no reviewed basis; run a full review" \
-  && ok "--delta from an open head without a reviewed basis: exit 2" || { bad "basis-false delta rc=$RC"; tail -3 "$T/out.txt"; }
-newpr 16 "printf 'x = 2\n' > a.py; printf 'y = 1\n' > y.py"; Q0=$(headn 16)
-review 16; review 16 FAKE_PATH=y.py; rec "$(basename "$RD")" "$FL"
-pushn 16 "printf 'x = 3\n' > a.py"; Q1=$(headn 16)
-pushn 16 "printf 'y = 2\n' > y.py"; Q2=$(headn 16)
-FAKE_CLEAN=1 $DP --review-pr 16 --delta --via qwen --model fake/m --user-approved "test go-ahead" --tier high --repo "$R" > "$T/out.txt" 2>&1; stn 16
-has "CURRENT HEAD ${Q2:0:8}: REVIEWED at high (via delta from ${Q0:0:8})" || { bad "setup: Q2 not reviewed via Q0"; cat "$T/out.txt"; }
-mkdir -p "$RUNS/pr16-late-q1"; printf '[HIGH] a.py:L1: late finding. fix it.\nVERDICT: FIX\n' > "$RUNS/pr16-late-q1/report.md"
-printf '{"kind": "pr-review", "pr": 16, "head": "%s", "tier": "high", "run_id": "pr16-late-q1", "reviews": [{"reviewer": "late-opus", "verdict": "FIX", "blockers": 0, "highs": 1, "report": "%s", "unreviewed": ["a.py"], "at": "2999-01-01T00:00:00+00:00"}]}\n' \
-  "$Q1" "$RUNS/pr16-late-q1/report.md" > "$RUNS/pr16-late-q1/meta.json"; stn 16
-has "CURRENT HEAD ${Q2:0:8}: UNREVIEWED" && has "open findings not touched: a.py" && ! has "REVIEWED at" \
-  && ok "a review recorded later at a skipped intermediate head reopens the delta head" || { bad "late intermediate"; cat "$T/out.txt"; }
-newpr 17 "printf 'evil = 1\n' > ':(top)a.py'"; review 17 FAKE_CLEAN=1
-grep -q '^+evil = 1$' "$RD/prompt.txt" && ok "a PR file named ':(top)a.py' is diffed literally (no pathspec magic)" || bad "pathspec magic hid a file from the review"
-newpr 18 "printf 'w = 1\n' > w2.py"; R0=$(headn 18); review 18 FAKE_PATH=./w2.py
-pushn 18 "printf 'w = 2\n' > w2.py"; R1=$(headn 18); stn 18
-has "CURRENT HEAD ${R1:0:8}: UNREVIEWED (head moved; last reviewed ${R0:0:8} (findings open on: w2.py); changed since: w2.py; delta review possible)" \
-  && ok "a finding reported as ./w2.py is stored as w2.py and counts as touched by a change to w2.py" || { bad "./ open path"; cat "$T/out.txt"; }
-python3 -I - "$T/concord/concord.py" <<'PYR'
-import importlib.util, sys
-sys.dont_write_bytecode = True
-sp = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(sp); sp.loader.exec_module(d)
-L = {"key": "k", "next_finding": 1, "next_decision": 1, "findings": [], "decisions": []}
-f = {"severity": "HIGH", "path": "./a.py", "line": 1, "problem": "wrong constant in a", "fix": "use 2", "repro": {"input": "x", "expected": "2", "actual": "1"}}
-clean = d.validate_review({"findings": [f], "clauses": [], "tests": [], "verdict": "FIX"})
-d.ledger_add(L, clean[0]["findings"] if isinstance(clean, tuple) else clean["findings"], "r", "run1")
-L["findings"][0]["status"] = "declined"
-again = dict(f, path="a.py")
-c2 = d.validate_review({"findings": [again], "clauses": [], "tests": [], "verdict": "FIX"})
-out = d.ledger_add(L, c2[0]["findings"] if isinstance(c2, tuple) else c2["findings"], "r", "run2")
-sys.exit(0 if L["findings"][0]["path"] == "a.py" and out[0]["severity"] == "NOTE" else 1)
-PYR
-[ $? -eq 0 ] && ok "a declined finding reported as ./a.py stays declined when re-raised as a.py (stored stripped)" || bad "re-raise of a ./ ledger entry"
+echo "== a delta that deletes a file shows its removed lines"
+newpr 98 "printf 'k = 1\n' > keep.py; printf 'g = 1\ng2 = 2\n' > gone.py"; opus 98 medium concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: PR 98 review"; cat "$T/out.txt"; exit 1; }
+pushn 98 "git rm -q gone.py; printf 'k = 2\n' > keep.py"
+$DP --review-pr 98 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ $RC -eq 0 ] && [ -f "$PK" ] && [ "$(mj "$(dirname "$PK")/meta.json" 'sorted(m["delta_files"])')" = "['gone.py', 'keep.py']" ] && grep -qxF '+k = 2' "$PK" \
+  || { echo "setup failed: PR 98 delta packet rc=$RC"; tail -3 "$T/out.txt"; exit 1; }
+grep -qx -- '-g = 1' "$PK" && grep -qx -- '-g2 = 2' "$PK" \
+  && ok "the delta packet shows the lines a deleted file lost (the reviewer sees what was removed)" || bad "deleted file's lines missing from the delta packet: $(grep -n 'gone.py' "$PK" | head -3)"
+
+echo "== a low-tier delta review is approve-only like a low-tier full review"
+mkdir -p "$R/.claude"; printf '# Plan\n## Phase 1 - low run\nExecutor: deepseek-flash\nRisk: low\nPurpose: PLAN-MARK-99\nFiles: a.py\nAcceptance:\n- `true`\n' > "$R/.claude/PLAN_99.md"
+( set -e; cd "$R"; git checkout -q main; git checkout -qb pr99 ) || { echo "setup failed: branch pr99"; exit 1; }
+approve .claude/PLAN_99.md "$R" || exit 1
+FAKE_ACTIONS='printf "x = 99\n" > a.py' $DP 1 --plan .claude/PLAN_99.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+[ -n "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" ] || { echo "setup failed: run for PR 99"; cat "$T/out.txt"; exit 1; }
+( set -e; cd "$R"; git add -A; git commit -qm "run 99"; git push -qf origin HEAD:refs/pull/99/head; git checkout -q main; git branch -qD pr99 ) || { echo "setup failed: commit 99"; exit 1; }
+prjson 99; opus 99 low concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: PR 99 low review"; cat "$T/out.txt"; exit 1; }
+pushn 99 "printf 'x = 100\n' > a.py"
+FAKE_SEV=MEDIUM FAKE_PATH=a.py $DP --review-pr 99 --delta --via qwen --model fake/m --tier low --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"
+[ $RC -eq 0 ] && [ "$(mj "$RD/meta.json" 'm["tier"]')" = low ] && [ -n "$(mj "$RD/meta.json" 'm.get("since") or ""')" ] \
+  || { echo "setup failed: low-tier delta review rc=$RC"; tail -3 "$T/out.txt"; exit 1; }
+REP=$(mj "$RD/meta.json" 'm["reviews"][-1]["report"]')
+grep -qxF "VERDICT: CLEAN at low (BLOCKER and HIGH only)" "$REP" && grep -q 'wrong constant' "$REP" \
+  && ok "a low-tier delta review's MEDIUM is kept as a note and the verdict reads CLEAN at low (BLOCKER and HIGH only)" || { bad "low-tier delta MEDIUM: verdict line or note missing"; cat "$REP"; }
+
+echo "== a delta covers only a file that was covered at its base: a file new since H0 needs a review at its own tier"
+newpr 100 "printf 'a = 1\n' > a.py; printf 'c = 1\n' > c.py"
+hfinding "$T/f100.txt" a.py 1 "a must be 2" c.py 1 "c must be 2"
+opus 100 medium concord:reviewer-opus55 "$T/f100.txt" || { echo "setup failed: PR 100 review"; cat "$T/out.txt"; exit 1; }
+st 100; has "FINDINGS OPEN" && has "F1" && has "F2" || { echo "setup failed: PR 100 findings not open"; cat "$T/out.txt"; exit 1; }
+pushn 100 "printf 'a = 2\n' > a.py; printf 'c = 2\n' > c.py; printf 'n = 1\n' > n.py"
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 a is 2"}, {"finding": "F2", "fixed": "yes", "evidence": "c.py:1 c is 2"}]' \
+  '[{"hunk": "H1", "explained_by": "F1"}, {"hunk": "H2", "explained_by": "F2"}, {"hunk": "H3", "explained_by": "F1"}]'
+opus 100 medium reviewer-delta "$T/d.txt" --delta; st 100
+has "FINDINGS OPEN" && { echo "setup failed: the delta did not close F1 and F2"; cat "$T/out.txt"; exit 1; }
+grep -qE '^  n\.py: needs medium$' "$T/out.txt" && has "UNREVIEWED" && [ $RC -eq 1 ] \
+  && ok "n.py, new in the fix commit with its hunk tied to a closed finding, stays 'needs medium' after the delta (UNREVIEWED, exit 1)" || { bad "new file covered by the delta rc=$RC"; cat "$T/out.txt"; }
+grep -qE '^  a\.py: medium by ' "$T/out.txt" && grep -qE '^  c\.py: medium by ' "$T/out.txt" \
+  && ok "a.py and c.py, covered at H0 with every hunk explained by a closed finding, stay covered" || { bad "files covered at H0 lost their coverage"; cat "$T/out.txt"; }
+opus 100 medium concord:reviewer-opus55 "$T/clean.txt" --files n.py; st 100
+grep -qE '^  n\.py: medium by reviewer-opus55$' "$T/out.txt" && has "REVIEWED at medium" && ! has "UNREVIEWED" && [ $RC -eq 0 ] \
+  && ok "a review of n.py at medium covers it: REVIEWED at medium (exit 0)" || { bad "review of the new file rc=$RC"; cat "$T/out.txt"; }
+
+echo "== a rename lists both paths; a head missing from this clone still gets a status; no temporary refs are left"
+newpr 20 "printf 'q = 2\n' > b.py"; opus 20 medium concord:reviewer-opus55 "$T/clean.txt"
+pushn 20 "git mv b.py bb.py"; st 20
+grep -qE '^  b\.py: ' "$T/out.txt" && grep -qE '^  bb\.py: ' "$T/out.txt" \
+  && ok "--no-renames: a rename lists the old and the new path, each with its own status line" || { bad "rename status lines"; cat "$T/out.txt"; }
+newpr 14 "printf 'm = 14\n' > m14.py"
+mkdir -p "$RUNS/pr14-deadbeef-gone"; printf 'VERDICT: CLEAN\n' > "$RUNS/pr14-deadbeef-gone/report.md"
+printf '{"kind": "pr-review", "pr": 14, "head": "%s", "tier": "medium", "run_id": "pr14-deadbeef-gone", "reviews": [{"reviewer": "reviewer-opus55", "verdict": "CLEAN", "blockers": 0, "highs": 0, "report": "%s", "at": "2999-01-01T00:00:00+00:00"}]}\n' \
+  "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$RUNS/pr14-deadbeef-gone/report.md" > "$RUNS/pr14-deadbeef-gone/meta.json"
+st 14
+has "UNREVIEWED" && ! has "Traceback" && [ $RC -eq 1 ] && ok "--pr-status: a reviewed head missing from this clone gets a status, no traceback, exit 1" || { bad "missing head rc=$RC"; cat "$T/out.txt"; }
 [ -z "$(git -C "$R" for-each-ref refs/review/)" ] && ok "no temp refs left behind by status or delta reviews" || bad "refs left: $(git -C "$R" for-each-ref refs/review/)"
 
 echo "passed $pass, failed $fail"

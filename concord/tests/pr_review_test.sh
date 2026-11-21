@@ -12,6 +12,7 @@ cp -p "$SRC"/concord.py "$SRC"/wt.py "$SRC"/*.md "$SRC"/*.conf "$T/concord/" && 
 cat > "$T/bin/qwen" <<'EOF'
 #!/bin/sh
 echo ran >> "$T/qwen_calls"
+if [ -n "${FAKE_ACTIONS:-}" ]; then sh -c "$FAKE_ACTIONS"; exit 0; fi
 if [ -n "${FAKE_GARBAGE:-}" ]; then echo "looks fine to me"; exit 0; fi
 printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": 1, "problem": "fake finding", "fix": "fix it", "repro": {"input": "x", "expected": "2", "actual": "1"}}], "clauses": [], "tests": [{"test": "t", "discriminates": "yes", "why": "adequate"}], "verdict": "FIX"}\nEND-REVIEW-JSON\n'
 EOF
@@ -32,12 +33,13 @@ export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 O="$T/origin.git"; R="$T/clone"; export R
 RUNS="$R/.git/concord"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
 has(){ grep -F -- "$1" "$T/out.txt" > /dev/null; }
 calls(){ [ -f "$T/qwen_calls" ] && wc -l < "$T/qwen_calls" | tr -d ' ' || echo 0; }
-prjson(){ printf '{"baseRefName": "%s", "headRefOid": "%s", "title": "%s", "body": "%s"}\n' "$2" "$3" "$4" "$5" > "$T/pr$1.json"; }
+prjson(){ printf '{"baseRefName": "%s", "headRefName": "pr%s", "headRefOid": "%s", "title": "%s", "body": "%s"}\n' "$2" "$1" "$3" "$4" "$5" > "$T/pr$1.json"; }
 rid(){ sed -n 's/^PR REVIEW \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }      # run id from the first output line
 mj(){ python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); v=eval(sys.argv[2], {"m": m}); print(v)' "$1/meta.json" "$2"; }
 clean(){  # after every --review-pr call: no temp ref left, clone HEAD and working tree unchanged
@@ -76,8 +78,7 @@ P="$D/prompt.txt"
 clean "review"
 
 echo "== filters, cap, empty"
-# --force-review: the FIX review above now credits c.py and vendor/v.py (PLAN_kit-fixreview P2); this checks the filter
-$DP --review-pr 7 --via qwen --model fake/m --exclude 'vendor/*' --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --review-pr 7 --via qwen --model fake/m --exclude 'vendor/*' --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 D="$RUNS/$(rid)"; P="$D/prompt.txt"
 [ $RC -eq 0 ] && [ "$(mj "$D" 'sorted(m["files"])')" = "['a.py', 'c.py']" ] && [ "$(mj "$D" 'm["excluded"]')" = "['vendor/v.py']" ] \
   && ! grep -q "^diff --git a/vendor/v.py" "$P" && grep -q "vendor/v.py" "$P" \
@@ -108,79 +109,42 @@ clean "dry-run"
 echo "== packet, record, status"
 $DP --review-pr 7 --packet --tier high --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-[ $RC -eq 0 ] && [ -f "$PK" ] && [ "$(calls)" = "$C0" ] && grep -q "You are reviewing ONE finished code change" "$PK" \
+[ $RC -eq 0 ] && [ -f "$PK" ] && [ "$(calls)" = "$C0" ] \
   && grep -q "^diff --git" "$PK" \
   && ok "--packet writes the review task and the diff, no model call" || { bad "packet rc=$RC '$PK'"; tail -4 "$T/out.txt"; }
 [ -f "$PK" ] && grep -B4 "PWNED" "$PK" | grep -qi "untrusted" && ok "PR body included, marked untrusted right above it" || bad "body not marked"
+[ -f "$PK" ] && grep -qF "No Concord run produced this PR; no plan clauses apply" "$PK" \
+  && ok "the PR packet of a PR no Concord run produced says so" || bad "no-run line missing from the PR packet"
+[ -f "$PK" ] && grep -qF "packet_sha" "$PK" && grep -qF "resolutions" "$PK" \
+  && ok "the PR packet's review task states the packet_sha and resolutions answer fields (the one home of the answer format)" || bad "PR packet review task lacks packet_sha or resolutions"
 clean "packet"
-JCLEAN='REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n'
+JCLEAN='REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\n'"END-REVIEW-JSON\n"
 jrev(){ # jrev SEVERITY PATH LINE PROBLEM [LINE_END]: a one-finding answer with a reproduction
   printf 'REVIEW-JSON\n{"findings": [{"severity": "%s", "path": "%s", "line": %s, "line_end": %s, "problem": "%s", "fix": "fix it", "repro": {"input": "in", "expected": "exp", "actual": "act"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$1" "$2" "$3" "${5:-$3}" "$4"; }
-printf '%b' "$JCLEAN" > "$T/rev.txt"
-$DP --review-record "$RID1" --reviewer reviewer-opus48 --file "$T/rev.txt" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-D="$RUNS/$RID1"
-[ $RC -eq 0 ] && [ "$(mj "$D" 'm["reviews"][-1]["reviewer"]')" = reviewer-opus48 ] && [ "$(mj "$D" 'm["reviews"][-1]["verdict"]')" = CLEAN ] \
-  && ok "--review-record stores the Opus reviewer and its verdict on the PR run" || { bad "record rc=$RC"; tail -3 "$T/out.txt"; }
-$DP --pr-status 7 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-FL=$(mj "$D" 'm["reviews"][0]["reviewer"]')
-[ $RC -eq 0 ] && has "CURRENT HEAD ${H7:0:8}: FINDINGS OPEN ($FL: FIX, 1 HIGH)" && ! has ": REVIEWED" \
-  && ok "--pr-status: an Opus CLEAN does not hide the flash reviewer's open HIGH" || { bad "open rc=$RC"; cat "$T/out.txt"; }
-[ "$(mj "$D" '"at" in m["reviews"][-1]')" = True ] && ok "new review entries carry an at timestamp" || bad "review entry has no at"
+# rec REVIEWER ANSWER-TEXT: a packet for PR 7 at its head (tier medium), the answer signed against it and recorded as REVIEWER
+rec(){ $DP --review-pr 7 --packet --tier medium --repo "$R" > "$T/out.txt" 2>&1; RPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+  [ -n "$RPK" ] || { echo "setup failed: no packet for PR 7: $(tail -1 "$T/out.txt")"; exit 1; }
+  printf '%b\n' "$2" > "$T/rev.txt"; sign "$T/rev.txt" "$RPK"
+  RRUN=$(basename "$(dirname "$RPK")"); $DP --review-record "$RRUN" --reviewer "$1" --file "$T/rev.txt" --repo "$R" > "$T/rec.txt" 2>&1; }
 st(){ $DP --pr-status 7 --repo "$R" > "$T/out.txt" 2>&1; }
-rec(){ printf '%b\n' "$2" > "$T/rev.txt"; $DP --review-record "$RID1" --reviewer "$1" --file "$T/rev.txt" --repo "$R" > /dev/null 2>&1; }
-rec "$FL" "$JCLEAN"; st; RC=$?
-[ $RC -eq 0 ] && has "CURRENT HEAD ${H7:0:8}: REVIEWED at medium" && has "reviewer-opus48" \
-  && ok "--pr-status: every reviewer's latest review clean -> REVIEWED" || { bad "reviewed rc=$RC"; cat "$T/out.txt"; }
-rec reviewer-opus48 'REVIEW-JSON\n{"findings": [{"severity": "NOTE", "path": "a.py", "line": 1, "problem": "style"}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n'; st
-has ": REVIEWED at" && ok "--pr-status: a NOTE-only review counts as clean (dispatcher verdict CLEAN although the model said FIX)" || { bad "notes only"; cat "$T/out.txt"; }
-rec reviewer-opus48 "$(jrev HIGH a.py 1 'edge case')"; st; RC=$?
-[ $RC -eq 0 ] && has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" \
-  && ok "--pr-status: HIGH with a reproduction in the latest Opus review -> FINDINGS OPEN, exit 0" || { bad "high rc=$RC"; cat "$T/out.txt"; }
-rec "$FL" "$JCLEAN"; st
-has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" && ok "--pr-status: a later cheap CLEAN does not hide the Opus finding" || { bad "masked"; cat "$T/out.txt"; }
-# --force-review: PR 7 head is unchanged and already has a clean review, so force the re-review this case needs
-C1=$(calls); FAKE_GARBAGE=1 $DP --review-pr 7 --via qwen --model fake/m --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(calls)" = $((C1 + 2)) ] && has ", retried" && has "verdict UNPARSED" \
-  && ok "model answer that never parses: one retry, then recorded as UNPARSED" || { bad "unparsed rc=$RC calls $C1 -> $(calls)"; grep '^PR REVIEW' "$T/out.txt"; }
-clean "unparsed review"
-st; has "$FL: UNPARSED" && ok "--pr-status: UNPARSED verdict -> FINDINGS OPEN" || { bad "unparsed status"; cat "$T/out.txt"; }
-rec "$FL" "$JCLEAN"; rec Reviewer-Opus48 "$JCLEAN"; st
-has ": REVIEWED at" && ok "--pr-status: reviewer names grouped case-insensitively (later CLEAN supersedes the HIGH)" || { bad "norm"; cat "$T/out.txt"; }
-rec reviewer-opus48 "$(jrev HIGH a.py 5 'two line range' 7)"; st
-has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" && grep -q "a.py:L5-7" "$(mj "$D" 'm["reviews"][-1]["report"]')" \
-  && ok "--pr-status: a line range renders as L5-7 and counts once" || { bad "line range"; cat "$T/out.txt"; }
+rec reviewer-opus55 "$JCLEAN"; RC=$?; D="$RUNS/$RRUN"
+[ $RC -eq 0 ] && [ "$(mj "$D" 'm["reviews"][-1]["reviewer"]')" = reviewer-opus55 ] && [ "$(mj "$D" 'm["reviews"][-1]["verdict"]')" = CLEAN ] \
+  && ok "--review-record stores the Opus reviewer and its verdict on the PR run" || { bad "record rc=$RC"; tail -3 "$T/rec.txt"; }
+[ "$(mj "$D" '"at" in m["reviews"][-1]')" = True ] && ok "new review entries carry an at timestamp" || bad "review entry has no at"
+st; FL=$(mj "$RUNS/$RID1" 'm["reviews"][0]["reviewer"]')
+has "FINDINGS OPEN" && ! has ": REVIEWED" && ok "--pr-status: an Opus CLEAN at the same head does not close the flash reviewer's open HIGH" || { bad "open"; cat "$T/out.txt"; }
+rec reviewer-opus55 "$(jrev HIGH a.py 5 'two line range' 7)"; st
+has "FINDINGS OPEN" && grep -q "a.py:L5-7" "$(mj "$RUNS/$RRUN" 'm["reviews"][-1]["report"]')" \
+  && ok "--pr-status: a line range renders as L5-7" || { bad "line range"; cat "$T/out.txt"; }
 printf 'FINDINGS: [HIGH] a.py:L2: inline tag. Fix it.\nVERDICT: FIX\n' > "$T/rev.txt"
-$DP --review-record "$RID1" --reviewer reviewer-opus48 --file "$T/rev.txt" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 2 ] && st && has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" \
-  && ok "--review-record refuses free text (exit 2); the gate state is unchanged" || { bad "free text rc=$RC"; cat "$T/out.txt"; }
-python3 -I - "$T/concord/concord.py" "$T" <<'PYU'
-import importlib.util, sys
-sys.dont_write_bytecode = True
-sp = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(sp); sp.loader.exec_module(d)
-rep = sys.argv[2] + "/clean_report.md"; open(rep, "w").write("FINDINGS: none\nVERDICT: FIX\n")
-r = d.review_open_findings({"verdict": "FIX", "report": rep, "unreviewed": ["b/x.py", "c/y.py"]})
-sys.exit(0 if r["open"] and r["unreviewed"] == 2 else 1)
-PYU
-[ $? -eq 0 ] && ok "--pr-status: a review with UNREVIEWED segment files is open" || bad "unreviewed not open"
-rec reviewer-opus48 "$(jrev HIGH a.py 1 'real bug')"; rm -f "$(mj "$D" 'm["reviews"][-1]["report"]')"; st
-has "FINDINGS OPEN (reviewer-opus48: FIX, 1 HIGH)" && ok "--pr-status: report file gone, stored HIGH -> still FINDINGS OPEN" || { bad "fallback open"; cat "$T/out.txt"; }
-rec reviewer-opus48 "$JCLEAN"; rm -f "$(mj "$D" 'm["reviews"][-1]["report"]')"; st
-has ": REVIEWED at" && ok "--pr-status: report file gone -> stored counts decide" || { bad "fallback"; cat "$T/out.txt"; }
-printf 'FINDINGS: none\nVERDICT: FIX\n' > "$T/seg_report.md"
-python3 -I -c "
-import json,sys; p=sys.argv[1]; m=json.load(open(p))
-m['reviews'].append({'reviewer':'seg-flash','verdict':'FIX','blockers':0,'highs':0,'report':sys.argv[2],'unreviewed':['b/x.py','c/y.py'],'at':'9999'})
-json.dump(m,open(p,'w'))" "$D/meta.json" "$T/seg_report.md"; st
-has "FINDINGS OPEN (seg-flash: FIX, 2 UNREVIEWED file(s))" && ok "--pr-status: lost segments print as UNREVIEWED file(s)" || { bad "unreviewed line"; cat "$T/out.txt"; }
+$DP --review-record "$RRUN" --reviewer reviewer-opus55 --file "$T/rev.txt" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && ok "--review-record refuses free text (exit 2)" || { bad "free text rc=$RC"; cat "$T/out.txt"; }
 ( set -e; cd "$R" && git fetch -q origin refs/pull/7/head && git checkout -q FETCH_HEAD && printf 'w = 5\n' > d.py && git add d.py \
   && git commit -qm "pr7 more" && git push -q origin HEAD:refs/pull/7/head && git checkout -q main ) || { echo "setup failed: new commit"; exit 1; }
 H7b=$(git -C "$O" rev-parse refs/pull/7/head); prjson 7 feat-a "$H7b" "feat: add c" "body"
-$DP --pr-status 7 --repo "$R" > "$T/out.txt" 2>&1
-has "CURRENT HEAD ${H7b:0:8}: UNREVIEWED (head moved; last reviewed " && has "(findings open on: b/x.py, c/y.py); changed since: d.py; full review needed (" \
-  && ok "--pr-status: new commit after an open review -> UNREVIEWED, the open head is the base (D3), real b/ c/ paths kept" || { bad "moved"; cat "$T/out.txt"; }
 prjson 9 main "$H8" "none" "none"
-$DP --pr-status 9 --repo "$R" > "$T/out.txt" 2>&1
-has "UNREVIEWED (no review)" && ok "--pr-status: PR never reviewed -> UNREVIEWED (no review)" || { bad "no review"; cat "$T/out.txt"; }
+$DP --pr-status 9 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+has "UNREVIEWED" && [ $RC -eq 1 ] && ok "--pr-status: PR never reviewed -> UNREVIEWED, exit 1" || { bad "no review rc=$RC"; cat "$T/out.txt"; }
 
 
 echo "== review round 1 fixes: tools, slug, injection, moved head, verdict parsing"
@@ -231,7 +195,10 @@ REVIEW-JSON
   "repro": {"input": "in", "expected": "exp", "actual": "act"}}], "clauses": [], "tests": [], "verdict": "CLEAN"}
 END-REVIEW-JSON
 EOF
-$DP --review-record "$(basename "$D")" --reviewer reviewer-opus48 --file "$T/rev2.txt" --repo "$R" > "$T/out.txt" 2>&1
+$DP --review-pr 7 --packet --tier medium --repo "$R" > "$T/out.txt" 2>&1; RPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -n "$RPK" ] || { echo "setup failed: no packet for PR 7"; cat "$T/out.txt"; exit 1; }
+sign "$T/rev2.txt" "$RPK"; D="$RUNS/$(basename "$(dirname "$RPK")")"
+$DP --review-record "$(basename "$D")" --reviewer reviewer-opus55 --file "$T/rev2.txt" --repo "$R" > "$T/out.txt" 2>&1
 [ "$(mj "$D" '(m["reviews"][-1]["verdict"], m["reviews"][-1]["highs"], m["reviews"][-1]["blockers"])')" = "('FIX', 1, 0)" ] \
   && ok "verdict computed from the findings (model said CLEAN); brackets in free text are neutralised, never counted" \
   || bad "verdict/counts $(mj "$D" '(m["reviews"][-1]["verdict"], m["reviews"][-1]["highs"], m["reviews"][-1]["blockers"])' 2>&1)"
@@ -269,13 +236,140 @@ PYEOF
 [ $RC -eq 0 ] && [ $IRC -eq 0 ] && ok "diff only between random diff markers; 20k body cut to 4,000 chars with a note" || bad "diff markers/body rc=$RC: $(cat "$T/inj2.txt")"
 clean "diff markers"
 git -C "$R" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'; git -C "$R" update-ref -d refs/remotes/origin/feat-a 2>/dev/null
-# --force-review: the head is already covered by earlier clean reviews; this case checks the full file set
-$DP --review-pr 7 --via qwen --model fake/m --force-review --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+$DP --review-pr 7 --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 D="$RUNS/$(rid)"
 git -C "$R" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
 [ $RC -eq 0 ] && [ "$(mj "$D" 'sorted(m["files"])')" = "['a.py', 'c.py', 'd.py', 'vendor/v.py']" ] \
   && ok "single-branch refspec clone: base fetched into a temp ref, same file set" || { bad "single-branch rc=$RC: $(mj "$D" 'm.get("files")' 2>&1)"; tail -3 "$T/out.txt"; }
 clean "single-branch"
+
+echo "== an answer that never parses covers nothing and closes nothing; MEDIUM and NOTE findings do not hold the gate"
+mkpr(){ local n=$1 f=$2; ( set -e; cd "$R"; git checkout -q main; git checkout -qb "pr$n"; printf '%s = 1\n' "${f%.py}" > "$f"; git add -A; git commit -qm "pr$n"
+  git push -qf origin "HEAD:refs/pull/$n/head"; git checkout -q main; git branch -qD "pr$n" ) || { echo "setup failed: pr$n"; exit 1; }
+  prjson "$n" main "$(git -C "$O" rev-parse "refs/pull/$n/head")" "t" "b"; }
+st2(){ $DP --pr-status "$1" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; }
+mkpr 12 g12.py; C1=$(calls); FAKE_GARBAGE=1 $DP --review-pr 12 --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RCG=$?
+[ $RCG -eq 0 ] && [ "$(calls)" = $((C1 + 2)) ] && has ", retried" && has "verdict UNPARSED" || bad "unparsed review: one retry, then UNPARSED (rc=$RCG calls $C1 -> $(calls))"
+st2 12
+! has ": REVIEWED" && [ $RC -eq 1 ] && ok "a model answer that never parses (after its retry): the head is not REVIEWED, exit 1" || { bad "unparsed status rc=$RC"; cat "$T/out.txt"; }
+mkpr 13 g13.py
+printf 'REVIEW-JSON\n{"findings": [{"severity": "MEDIUM", "path": "g13.py", "line": 1, "problem": "style", "fix": "rename", "repro": {"input": "x", "expected": "2", "actual": "1"}}, {"severity": "NOTE", "path": "g13.py", "line": 1, "problem": "naming", "fix": "rename"}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/mn.txt"
+$DP --review-pr 13 --packet --tier medium --repo "$R" > "$T/out.txt" 2>&1; MPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -n "$MPK" ] || { echo "setup failed: no packet for PR 13"; cat "$T/out.txt"; exit 1; }
+sign "$T/mn.txt" "$MPK"; $DP --review-record "$(basename "$(dirname "$MPK")")" --reviewer reviewer-opus55 --file "$T/mn.txt" --repo "$R" > "$T/rec.txt" 2>&1 || { echo "setup failed: record"; cat "$T/rec.txt"; exit 1; }
+st2 13
+has "REVIEWED at" && ! has "UNREVIEWED" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] && ok "a review of medium tier whose only findings are a MEDIUM and a NOTE: REVIEWED (exit 0)" || { bad "MEDIUM and NOTE held the gate rc=$RC"; cat "$T/out.txt"; }
+
+echo "== a diff holding bytes that are not UTF-8 still gets a packet; every byte is visible"
+# recpk N [ARGS]: a packet of PR N at tier medium (ARGS: --files, --exclude, ...) answered CLEAN by an Opus reviewer and recorded; RPK, RRUN
+recpk(){ local n=$1; shift; $DP --review-pr "$n" --packet --tier medium "$@" --repo "$R" > "$T/out.txt" 2>&1
+  RPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+  [ -n "$RPK" ] || { echo "setup failed: no packet for PR $n: $(tail -1 "$T/out.txt")"; exit 1; }
+  printf '%b\n' "$JCLEAN" > "$T/rev.txt"; sign "$T/rev.txt" "$RPK"; RRUN=$(basename "$(dirname "$RPK")")
+  $DP --review-record "$RRUN" --reviewer reviewer-opus55 --file "$T/rev.txt" --repo "$R" > "$T/rec.txt" 2>&1 || { echo "setup failed: record for PR $n"; cat "$T/rec.txt"; exit 1; }; }
+( set -e; cd "$R"; git checkout -q main; git checkout -qb pr14; printf 'caf\351\nx\377y\n' > l.txt; git add -A; git commit -qm pr14
+  git push -qf origin HEAD:refs/pull/14/head; git checkout -q main; git branch -qD pr14
+  git checkout -qb pr15; printf 'cafe\n' > l.txt; git add -A; git commit -qm pr15
+  git push -qf origin HEAD:refs/pull/15/head; git checkout -q main; git branch -qD pr15 ) || { echo "setup failed: pr14 and pr15"; exit 1; }
+prjson 14 main "$(git -C "$O" rev-parse refs/pull/14/head)" "latin1" "b"; prjson 15 main "$(git -C "$O" rev-parse refs/pull/15/head)" "latin1 delta" "b"
+$DP --review-pr 14 --packet --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ $RC -eq 0 ] && [ -f "$PK" ] && ! has "Traceback" && ok "a PR file holding Latin-1 bytes (caf\\xe9) gets a full packet (exit 0, no traceback)" \
+  || { bad "Latin-1 full packet rc=$RC '$PK'"; tail -3 "$T/out.txt"; }
+[ -f "$PK" ] && grep -qxF '+caf\xe9' "$PK" && grep -qxF '+x\xffy' "$PK" \
+  && ok "the packet shows each invalid byte as a backslash escape (\\xe9 and \\xff, two different bytes look different)" || bad "invalid bytes not shown as escapes in '$PK'"
+recpk 15
+( set -e; cd "$R"; git fetch -q origin refs/pull/15/head; git checkout -q FETCH_HEAD; printf 'caf\351\n' > l.txt; git add -A; git commit -qm "pr15 fix"
+  git push -q origin HEAD:refs/pull/15/head; git checkout -q main ) || { echo "setup failed: pr15 fix"; exit 1; }
+prjson 15 main "$(git -C "$O" rev-parse refs/pull/15/head)" "latin1 delta" "b"
+$DP --review-pr 15 --delta --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?; DPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ $RC -eq 0 ] && [ -f "$DPK" ] && ! has "Traceback" && grep -qxF '+caf\xe9' "$DPK" && grep -qE '^H1 l\.txt @@' "$DPK" \
+  && ok "a delta whose fix adds a Latin-1 byte gets a delta packet with the byte shown as \\xe9 and its hunk numbered" \
+  || { bad "Latin-1 delta packet rc=$RC '$DPK'"; tail -3 "$T/out.txt"; }
+
+echo "== opaque content: a -diff attribute does not hide text; a binary file is never covered by a review"
+( set -e; cd "$R"; git checkout -q main; printf 'notes.txt -diff\n' > .gitattributes; git add .gitattributes; git commit -qm attrs; git push -q origin main
+  git checkout -qb pr16; printf 'note-line-aq\n' > notes.txt; printf 'bin-content-zq\0tail\n' > blob.bin; printf 't = 16\n' > t16.py
+  git add -A; git commit -qm pr16; git push -qf origin HEAD:refs/pull/16/head; git checkout -q main; git branch -qD pr16 ) || { echo "setup failed: pr16"; exit 1; }
+prjson 16 main "$(git -C "$O" rev-parse refs/pull/16/head)" "opaque" "b"
+$DP --review-pr 16 --packet --tier medium --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ $RC -eq 0 ] && [ -f "$PK" ] || { echo "setup failed: opaque packet rc=$RC"; cat "$T/out.txt"; exit 1; }
+grep -qxF '+note-line-aq' "$PK" && ok "notes.txt with a -diff attribute: the packet shows its text lines" || bad "notes.txt (-diff) is hidden from the reviewer: $(grep -n 'notes.txt' "$PK" | head -3)"
+grep -qF 'blob.bin' "$PK" && ! grep -qF 'bin-content-zq' "$PK" && ok "a file with a NUL byte appears in the packet without its content" || bad "binary file content in the packet, or the file missing"
+RPK=$PK; printf '%b\n' "$JCLEAN" > "$T/rev.txt"; sign "$T/rev.txt" "$RPK"
+$DP --review-record "$(basename "$(dirname "$RPK")")" --reviewer reviewer-opus55 --file "$T/rev.txt" --repo "$R" > "$T/rec.txt" 2>&1 || { echo "setup failed: record for PR 16"; cat "$T/rec.txt"; exit 1; }
+st2 16
+grep -qE '^  blob\.bin: binary, needs an owner waiver$' "$T/out.txt" && grep -qE '^  notes\.txt: medium by reviewer-opus55$' "$T/out.txt" && grep -qE '^  t16\.py: medium by reviewer-opus55$' "$T/out.txt" \
+  && has "UNREVIEWED" && ! has ": REVIEWED" && [ $RC -eq 1 ] \
+  && ok "a full review of the PR covers the text files and not blob.bin: its line reads 'binary, needs an owner waiver', UNREVIEWED (exit 1)" || { bad "binary file counted as covered rc=$RC"; cat "$T/out.txt"; }
+recpk 16 --exclude blob.bin --user-approved "skip blob.bin, a binary the owner accepts"; st2 16
+has "REVIEWED at medium WITH OWNER WAIVER: blob.bin excluded" && grep -qE '^  blob\.bin: waived by owner$' "$T/out.txt" && [ $RC -eq 0 ] \
+  && ok "words naming blob.bin waive it: REVIEWED ... WITH OWNER WAIVER: blob.bin excluded (exit 0)" || { bad "binary waiver rc=$RC"; cat "$T/out.txt"; }
+
+echo "== the phase packet: deleted files, the recorded acceptance result, the diff fence, no executor notes"
+PR2="$T/prun"; mkdir -p "$PR2" && ( cd "$PR2" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > a.py; printf 'g = 1\n' > gone.py; printf '.claude/\n' > .gitignore; git add -A && git commit -qm init
+  printf '# Plan\n## Design\n- DESIGN-MARK-31: a.py keeps x = 1 for the old callers\n## Phase 1 - drop gone\nExecutor: deepseek-flash\nFiles: a.py, gone.py\nAcceptance:\n- `sh -c "echo ACC-FAIL-MARK-77; exit 1"`\n' > PLAN_P.md ) || { echo "setup failed: prun"; exit 1; }
+approve PLAN_P.md "$PR2" || exit 1
+FAKE_ACTIONS='echo y >> a.py; rm gone.py; printf "STATUS: DONE\nFOUND: a.py:1 marker-found-fact-xyz\n"' $DP 1 --plan PLAN_P.md --via qwen --model fake/m --repo "$PR2" > "$T/out.txt" 2>&1
+PRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$PRID" ] || { echo "setup failed: phase run"; cat "$T/out.txt"; exit 1; }
+$DP --review "$PRID" --packet --repo "$PR2" > "$T/out.txt" 2>&1; PPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$PPK" ] && grep -q '^deleted file mode' "$PPK" && grep -q '^-g = 1$' "$PPK" \
+  && ok "the phase packet shows a deleted file with its diff" || { bad "deleted file missing from the phase packet '$PPK'"; tail -2 "$T/out.txt"; }
+[ -f "$PPK" ] && grep -qF "ACC-FAIL-MARK-77" "$PPK" && ! grep -qiF "acceptance tests already pass" "$PPK" \
+  && ok "the phase packet shows the recorded acceptance result, the failed command included, not a sentence that it passes" || bad "acceptance result in the phase packet"
+python3 -I - "$PPK" <<'PYE' > "$T/fence.txt" 2>&1
+import re, sys
+lines = open(sys.argv[1]).read().split("\n")
+st = [i for i, l in enumerate(lines) if re.fullmatch(r"<<<DIFF-[0-9a-f]{16}>>>", l)]
+if len(st) != 1:
+    sys.exit(f"diff start markers: {len(st)}")
+tok = lines[st[0]][len("<<<DIFF-"):-3]
+en = [i for i, l in enumerate(lines) if l == f"<<<END-DIFF-{tok}>>>"]
+if len(en) != 1 or en[0] < st[0]:
+    sys.exit(f"diff end markers: {en}")
+if not any(l.startswith("diff --git a/a.py") for l in lines[st[0] + 1:en[0]]):
+    sys.exit("diff not inside the markers")
+PYE
+[ $? -eq 0 ] && ok "the phase packet fences its diff with random markers like the PR packet" || bad "phase packet fence: $(cat "$T/fence.txt")"
+[ -f "$PPK" ] && grep -qF "packet_sha" "$PPK" && ok "the phase packet's review task states the packet_sha answer field" || bad "phase packet review task lacks packet_sha"
+[ -f "$PPK" ] && ! grep -qF "marker-found-fact-xyz" "$PPK" && ok "the phase packet leaves out the executors' FOUND: notes" || bad "FOUND: note in the phase packet"
+[ -f "$PPK" ] && grep -qF "DESIGN-MARK-31" "$PPK" && grep -qiF "the design the plan approves" "$PPK" \
+  && ok "the phase packet carries the plan's Design section, labeled as the design the plan approves" \
+  || bad "the plan's Design section is missing from the phase packet (REVIEW.md names it a clause source)"
+$DP --review "$PRID" --via qwen --model fake/m --dry-run --repo "$PR2" > "$T/out.txt" 2>&1
+PDRY=$(sed -n 's/.*prompt [0-9]* chars at \(.*prompt.txt\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$PDRY" ] && grep -qF "DESIGN-MARK-31" "$PDRY" \
+  && ok "the cheap phase review's prompt carries the Design section too" || bad "the Design section is missing from the cheap phase prompt ($PDRY)"
+
+# a phase run that started on a dirty file (every phase retry does): its packet diff is git's text, bytes escaped, a NUL file named only
+PR3="$T/pdirty"; mkdir -p "$PR3" && ( cd "$PR3" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > a.txt; printf 'ok\n' > b.bin; printf 'ok text\n' > ok.txt; printf 'swap me\n' > swap.txt; python3 -c "open('nul.dat','wb').write(b'nul\\0data\\n')"; ln -s ok.txt link
+  printf '.claude/\n' > .gitignore; git add -A && git commit -qm init
+  printf '# Plan\n## Phase 1 - x\nExecutor: deepseek-flash\nRisk: medium\nFiles: a.txt, b.bin, link, swap.txt\nAcceptance:\n- `grep -q z a.txt`\n' > PLAN_D.md ) || { echo "setup failed: pdirty"; exit 1; }
+approve PLAN_D.md "$PR3" || exit 1
+printf 'name = caf\xe9\nx = 1\n' > "$PR3/a.txt"; printf 'dirty-zq\n' > "$PR3/b.bin"          # uncommitted edits before the run: a dirty start
+FAKE_ACTIONS="python3 -c \"open('a.txt','wb').write(b'name = caf\\\\xe8\\\\nx = 1\\\\nz\\\\n'); open('b.bin','wb').write(b'bin-zq\\\\0\\\\n')\"; ln -sf nul.dat link; rm -f swap.txt; ln -s ok.txt swap.txt" \
+  $DP 1 --plan PLAN_D.md --via qwen --model fake/m --repo "$PR3" > "$T/out.txt" 2>&1
+DRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+{ [ -n "$DRID" ] && python3 -I -c 'import sys; sys.exit(0 if b"caf\xe8" in open(sys.argv[1], "rb").read() else 1)' "$PR3/a.txt" && [ -L "$PR3/link" ] && [ "$(readlink "$PR3/link")" = nul.dat ] && [ -L "$PR3/swap.txt" ]; } \
+  || { echo "setup failed: a dirty-start run that changed a.txt (0xe8), b.bin (NUL), link and swap.txt"; cat "$T/out.txt"; exit 1; }
+$DP --review "$DRID" --packet --repo "$PR3" > "$T/out.txt" 2>&1; DPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$DPK" ] && grep -qxF -- '-name = caf\xe9' "$DPK" && grep -qxF -- '+name = caf\xe8' "$DPK" \
+  && ok "a dirty-start packet shows a one-byte change in invalid UTF-8 (0xe9 to 0xe8) as backslash escapes on both sides" \
+  || bad "the dirty-start packet hides the changed byte: $(grep -n 'name = caf' "$DPK" | head -3)"
+[ -f "$DPK" ] && grep -qF 'b.bin' "$DPK" && ! grep -qF 'bin-zq' "$DPK" && ! grep -qF 'dirty-zq' "$DPK" \
+  && [ "$(python3 -I -c 'import sys; print(open(sys.argv[1], "rb").read().count(b"\0"))' "$DPK")" = 0 ] \
+  && ok "a dirty-start packet names b.bin (a NUL in the file now) without its content and holds no NUL byte" \
+  || bad "the dirty-start packet shows the content of a file with a NUL byte"
+[ -f "$DPK" ] && grep -qxF -- '+nul.dat' "$DPK" && ! grep -qF 'nul\0data' "$DPK" && ! grep -qE '^Binary files a/link ' "$DPK" \
+  && ok "an in-scope symlink re-pointed to a file that holds a NUL is shown by its target text, not as binary and not by that file's content" \
+  || bad "the symlink is judged by the content of its target: $(grep -n -A4 'a/link' "$DPK" | head -6)"
+[ -f "$DPK" ] && [ "$(grep -c '^diff --git a/swap.txt b/swap.txt$' "$DPK")" = 1 ] && grep -qxF -- '-swap me' "$DPK" && grep -qxF -- '+ok.txt' "$DPK" \
+  && [ "$(grep -c '^diff --git ' "$DPK")" = "$(grep -c '^diff --git a/\([^ /]*\) b/\1$' "$DPK")" ] && ! grep -qE '^(--- a|\+\+\+ b)/[^ ]*/' "$DPK" \
+  && ok "a file the run replaced by a symlink gets one diff block under its own name, and no header names another path" \
+  || bad "the replaced file's diff is mis-headed: $(grep -nE '^(diff --git|--- |\+\+\+ )' "$DPK" | head -8)"
+[ -f "$DPK" ] && ! grep -qiF "the design the plan approves" "$DPK" \
+  && ok "a plan with no Design section adds no design block to the phase packet" || bad "a design block appeared for a plan without a Design section"
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]

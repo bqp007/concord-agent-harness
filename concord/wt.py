@@ -31,6 +31,7 @@ join  applies the fork's changes (binary diff of its working tree, untracked inc
       naming the files and keeps the fork. Prints the files applied.
 """
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -43,12 +44,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CONF = HERE / "worktrees.conf"
 MARK = ".wt-links"          # inside the worktree's git dir: the links this tool created
+COPIES = ".wt-copies"       # inside the worktree's git dir: `<sha256> <path>` for each file this tool copied in
+FORK = ".wt-fork"           # inside a fork's git dir: `snapshot <sha>`, `origin <path>`, `branch <name>`, `head <sha>`
 PLAN_GLOB = "PLAN_*.md"     # untracked plan files at the worktree top level; archived on `done`
 
 
 def die(msg, code=2):
     print(f"wt: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def file_sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def git(repo, *args, check=True):
@@ -174,17 +181,19 @@ def cmd_new(args):
         dst.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(src, dst)
         made.append(rel)
-    copied = []
+    copied, copy_hashes = [], []
     for f in sorted((repo / ".claude").glob("hookify.*.local.md")) + [repo / ".claude" / "settings.local.json"]:
         if f.is_file() and not f.is_symlink():
             try:
                 (wt / ".claude").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, wt / ".claude" / f.name)
                 copied.append(f.name)
+                copy_hashes.append(f"{file_sha(wt / '.claude' / f.name)} .claude/{f.name}")
             except OSError as e:
                 skipped.append(f".claude/{f.name} (not copied: {e.strerror}; a sandbox protects it, copy it unsandboxed)")
     gitdir = Path(git(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
     (gitdir / MARK).write_text("\n".join(made + [f".claude/{c}" for c in copied]) + "\n")
+    (gitdir / COPIES).write_text("".join(h + "\n" for h in copy_hashes))
     exclude_add(repo, [".claude/worktrees/", "/PLAN_*.md"] + link_patterns(repo, made))
     state = f"existing at {sha[:7]}" if exists else f"new from {base} at {sha[:7]}"
     print(f"WORKTREE {wt}\nbranch {branch} ({state})\n"
@@ -353,18 +362,31 @@ def cmd_done(args):
     made = [rel for rel in mark_path.read_text(errors="replace").splitlines() if rel.strip()] \
         if mark_path.exists() else []
     plans = plan_files(wt)                 # untracked plans are ours to archive, not uncommitted work to commit
+    copies = read_copies(gitdir)           # the copies `new` made, disposable only while their content still matches
+    if not (gitdir / COPIES).exists():     # a worktree an older wt.py made: a copy equal to the main checkout's file
+        copies = {rel: file_sha(repo / rel) for rel in made          # is the copy it made
+                  if rel.startswith(".claude/") and (repo / rel).is_file() and not (repo / rel).is_symlink()}
+    unedited = {rel for rel, sha in copies.items() if (wt / rel).is_file() and file_sha(wt / rel) == sha}
     # A link counts as ours only while it is still a symlink; a real file or folder the user put at that path is
     # their work and goes through the uncommitted and ignored-file checks (which refuse, or need --force).
-    ours = {rel for rel in made if rel.startswith(".claude/") or (wt / rel).is_symlink()} | set(plans)
+    ours = {rel for rel in made if not rel.startswith(".claude/") and (wt / rel).is_symlink()} | set(plans) | unedited
     # Every check runs before anything is touched, so a refusal leaves the worktree fully working.
-    dirty = [line for line in git(wt, "status", "--porcelain", check=False).splitlines()
+    dirty = [line for line in git(wt, "status", "--porcelain", "--untracked-files=all", check=False).splitlines()
              if line.strip() and line[3:].rstrip("/") not in ours]
     if dirty and not args.force:
         die(f"{wt} has uncommitted changes ({len(dirty)}): commit or push them first; nothing removed.\n  "
             + "\n  ".join(dirty[:10]))
-    lost = [p for p in (line[3:] for line in git(wt, "status", "--porcelain", "--ignored", check=False).splitlines()
-                        if line.startswith("!! "))
-            if p.rstrip("/") not in ours and not DISPOSABLE.intersection(p.rstrip("/").split("/"))]
+    lost = [p for p in (line[3:] for line in git(wt, "status", "--porcelain", "--ignored", "--untracked-files=all",
+                                                  check=False).splitlines() if line.startswith("!! "))
+            if p.rstrip("/") not in ours and not p.startswith(".claude/")
+            and not DISPOSABLE.intersection(p.rstrip("/").split("/"))]
+    tracked = names_of(wt, "ls-files", "--", ".claude")     # an ignored .claude folder: only the unedited copies go
+    for dirpath_, dirs, names in os.walk(wt / ".claude"):
+        # os.walk lists a symlink to a directory among the dirs and never enters it: it is an entry like any file
+        for name in names + [d for d in dirs if (Path(dirpath_) / d).is_symlink()]:
+            rel = str((Path(dirpath_) / name).relative_to(wt))
+            if name != ".wt-probe" and rel not in unedited and rel not in tracked and rel not in ours:
+                lost.append(rel)
     if lost and not args.force:
         die(f"{wt} holds ignored files that `git worktree remove` would delete; move what you need, then rerun "
             f"(--force deletes them):\n  " + "\n  ".join(f"{du_mb(wt / p):6d} MB  {p}" for p in lost[:15]))
@@ -486,6 +508,10 @@ def cmd_fork(args):
         shutil.copy2(dirpath / name, wt / name)
     gitdir = Path(git(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
     (gitdir / MARK).write_text("\n".join(made) + "\n")
+    head = git(dirpath, "rev-parse", "HEAD").strip()
+    branch = git(dirpath, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip() or "(detached)"
+    (gitdir / COPIES).write_text("".join(f"{file_sha(wt / name)} {name}\n" for name in plans))
+    (gitdir / FORK).write_text(f"snapshot {sha}\norigin {dirpath.resolve()}\nbranch {branch}\nhead {head}\n")
     exclude_add(repo, [".claude/worktrees/"] + link_patterns(repo, made))
     print(f"{wt}")
     if skipped:
@@ -493,20 +519,85 @@ def cmd_fork(args):
     return 0
 
 
-def fork_patch(fork):
-    """(patch bytes, file names) for the fork's working tree against its HEAD, untracked files included."""
+def fork_record(fork):
+    """{"snapshot", "origin", "branch", "head"} from the fork's .wt-fork file; {} for a fork an older wt.py made."""
+    gitdir = Path(git(fork, "rev-parse", "--path-format=absolute", "--git-dir"))
+    out = {}
+    try:
+        for line in (gitdir / FORK).read_text(errors="replace").splitlines():
+            key, _, value = line.partition(" ")
+            out[key] = value.strip()
+    except OSError:
+        pass
+    return out
+
+
+def fork_patch(fork, base):
+    """(patch bytes, file names) for the fork's working tree against `base` (its snapshot, so work committed in the
+    fork is carried), untracked files included, ignored ones not."""
     tmp = Path(tempfile.mkdtemp(prefix="wt-join-index-"))
     try:
         env = dict(os.environ, GIT_INDEX_FILE=str(tmp / "index"))
         git_bytes(fork, "read-tree", "HEAD", env=env)
         git_bytes(fork, "add", "-A", "--", ".", env=env)
         names = [p.decode(errors="replace") for p in
-                 git_bytes(fork, "diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD",
+                 git_bytes(fork, "diff", "--cached", "--name-only", "-z", "--no-renames", base,
                            env=env).split(b"\0") if p]
-        patch = git_bytes(fork, "diff", "--cached", "--binary", "--no-renames", "HEAD", env=env)
+        patch = git_bytes(fork, "diff", "--cached", "--binary", "--no-renames", base, env=env)
         return patch, names
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def names_of(dirpath, *args):
+    """The names `git <args>` prints, NUL-separated (-z goes right after the subcommand, before any `--`)."""
+    return {p.decode(errors="replace") for p in git_bytes(dirpath, args[0], "-z", *args[1:]).split(b"\0") if p}
+
+
+def read_copies(gitdir):
+    """{path: sha256} of the files this tool copied into the worktree (its .wt-copies file); {} when there is none."""
+    out = {}
+    try:
+        for line in (Path(gitdir) / COPIES).read_text(errors="replace").splitlines():
+            sha, _, rel = line.partition(" ")
+            out[rel] = sha
+    except OSError:
+        pass
+    return out
+
+
+def join_blockers(fork, origin, record):
+    """What `join` would lose or get wrong: a path whose staged content differs from its working file; a fork whose
+    HEAD moved and a path whose committed content differs from its working file; an ignored file of the fork, outside
+    the linked folders, that the origin lacks or holds differently (a symlink only counts as held when the origin has
+    a link with the same target text). An unchanged copied plan is not unique to the fork."""
+    out = []
+    staged = names_of(fork, "diff", "--cached", "--name-only", "HEAD")
+    unstaged = names_of(fork, "diff", "--name-only")
+    out += [f"{p}: staged content differs from the working file" for p in sorted(staged & unstaged)]
+    snap = record.get("snapshot")
+    head = git(fork, "rev-parse", "HEAD")
+    if snap and head != snap:
+        committed = names_of(fork, "diff", "--name-only", snap, head)
+        differs = names_of(fork, "diff", "--name-only", head) & committed
+        out += [f"{p}: committed content differs from the working file" for p in sorted(differs)]
+    links = marked_links(fork)
+    copies = read_copies(git(fork, "rev-parse", "--path-format=absolute", "--git-dir"))
+    for p in sorted(names_of(fork, "ls-files", "--others", "--ignored", "--exclude-standard")):
+        if any(p == rel or p.startswith(rel + "/") for rel in links):       # a link wt.py made
+            continue
+        if DISPOSABLE.intersection(p.split("/")):
+            continue
+        here, there = fork / p, Path(origin) / p
+        if here.is_symlink():          # any other link is compared as a link: same kind, same target text
+            if not (there.is_symlink() and os.readlink(there) == os.readlink(here)):
+                out.append(f"{p}: an ignored symlink only the fork holds (join would delete it)")
+            continue
+        if p in copies and file_sha(fork / p) == copies[p]:       # a copy this tool made and nobody changed
+            continue
+        if there.is_symlink() or not there.is_file() or file_sha(there) != file_sha(here):
+            out.append(f"{p}: an ignored file only the fork holds (join would delete it)")
+    return out
 
 
 def cmd_join(args):
@@ -516,7 +607,19 @@ def cmd_join(args):
     fork = repo / ".claude" / "worktrees" / f"{ticket}-p{args.n}"
     if not fork.exists():
         die(f"no fork {fork}")
-    patch, names = fork_patch(fork)
+    record = fork_record(fork)
+    if not record and not args.force:
+        die(f"the fork {fork.name} has no {FORK} record: it was made by wt.py before 3.0, so its snapshot and origin are "
+            "unknown and join could lose work committed in it; join it with that version, or pass --force (it then joins "
+            "from the fork's HEAD in this checkout); fork kept")
+    origin = record.get("origin")
+    if origin and Path(origin).resolve() != dirpath.resolve():
+        die(f"the fork {fork.name} was made from {origin}, and this is {dirpath}: run join there; fork kept")
+    blockers = join_blockers(fork, origin or dirpath, record)
+    if blockers and not args.force:
+        die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "
+            + "\n  ".join(blockers[:15]))
+    patch, names = fork_patch(fork, record.get("snapshot") or "HEAD")
     if patch.strip():
         res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
                              capture_output=True)
@@ -531,10 +634,12 @@ def cmd_join(args):
         die(f"git worktree remove --force {fork} failed: {res.stderr.strip()}")
     git(repo, "worktree", "prune", check=False)
     print(f"applied: {', '.join(names) or 'nothing'}")
+    if blockers:
+        print("dropped (--force): " + "; ".join(blockers))
     return 0
 
 
-DISPOSABLE = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "build", ".DS_Store", ".claude"}
+DISPOSABLE = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".DS_Store"}
 
 
 def protected(wt):
@@ -589,6 +694,7 @@ def main():
     d = sub.add_parser("done"); d.add_argument("ticket"); d.add_argument("--repo"); d.add_argument("--force", action="store_true")
     f = sub.add_parser("fork"); f.add_argument("ticket"); f.add_argument("n", type=int); f.add_argument("--repo")
     j = sub.add_parser("join"); j.add_argument("ticket"); j.add_argument("n", type=int); j.add_argument("--repo")
+    j.add_argument("--force", action="store_true")
     args = ap.parse_args()
     return {"new": cmd_new, "list": cmd_list, "done": cmd_done, "fork": cmd_fork, "join": cmd_join}[args.cmd](args)
 

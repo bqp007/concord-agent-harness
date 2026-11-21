@@ -1,6 +1,6 @@
 # Contributing to Concord
 
-Changes to Concord follow Concord. Every change is a small ticket with a plan, tests written before the code, an independent review and a recorded verdict, the same loop Concord enforces for any other repository.
+Changes to Concord do not run through Concord itself: a process under repair should not grade its own repair. Every change has a short plain plan, tests written before the code, an independent review of the whole diff and a maintainer's acceptance.
 
 ## Before you start
 
@@ -9,9 +9,9 @@ Changes to Concord follow Concord. Every change is a small ticket with a plan, t
 
 ## Making a change
 
-1. Write `PLAN_<ticket>.md` from the template: phases with exact files, acceptance commands and a risk level.
+1. Write a short plain plan: the decisions, what each change does, and the scenarios that must fail before the change and pass after it.
 2. Add or extend a suite under `concord/tests/` that fails before the change (bash, a fake HOME, no network). Tests are written before the implementation and are not edited by whoever implements it.
-3. Implement the phase, by hand or through `concord.py`.
+3. Implement the change by hand or with an agent, without `concord.py` runs on this repository.
 4. Get an independent review: someone or something that did not write the change.
 5. Run the checks; all three must pass:
 
@@ -23,7 +23,7 @@ bash tests/demo_test.sh
 
 ## Rules the checks enforce
 
-- Line budgets (`tests/package_test.sh budgets`). A change that needs more lines raises the budget in the same pull request and says why. Rules that produced no change in a month are retired rather than kept.
+- Rule budgets: `/concord:rules-review` keeps the rule files within line budgets, and rules that produced no change in a month are retired rather than kept.
 - No internal names. Keep your own private patterns in `~/.config/concord/scrub.txt` (one regular expression per line) and run `bash tests/package_test.sh scrub` before you push.
 - Standard-library Python 3.9+ and bash 3.2+; no new dependencies.
 - Concord never commits. Maintainers review the diff and commit.

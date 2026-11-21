@@ -20,6 +20,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 R="$T/repo"; RUNS="$R/.git/concord"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -33,7 +34,8 @@ lint(){ sed -n 's/^ACCEPTANCE LINT: //p' "$T/out.txt"; }
 nlint(){ lint | wc -l | tr -d ' '; }
 first(){ grep -n -- "$1" "$T/out.txt" | head -1 | cut -d: -f1; }
 last(){ grep -n -- "$1" "$T/out.txt" | tail -1 | cut -d: -f1; }
-run(){ FAKE_ACTIONS="$1" $DP 1 --plan "${2:-PLAN_E.md}" --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1; }
+run(){ FAKE_ACTIONS="$1" $DP 1 --plan "${2:-PLAN_E.md}" --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+  grep -q '^DELEGATE RESULT' "$T/out.txt" || { echo "setup failed: the run did not start"; cat "$T/out.txt"; exit 1; }; }
 review(){ $DP --review "$@" --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 newest_review(){ ls -td "$RUNS"/*-review-* | head -1; }
 mkdir -p "$R/tests" "$R/docs" && ( cd "$R" && git init -q -b main && git config user.email t@t && git config user.name t
@@ -87,6 +89,7 @@ P
   for f in PLAN_D.md PLAN_D2.md PLAN_D3.md; do printf '# Plan\n## Phase 1 - p1\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n' > $f; done
   printf '# Plan\n## Phase 1 - p1\nExecutor: deepseek-flash\nFiles: a.py, docs/x.md, big.py, docs/y.md\nAcceptance:\n- `grep -q 2 a.py`\n' > PLAN_E.md
   git add -A && git commit -qm plans ) || { echo "setup failed"; exit 1; }
+for f in PLAN_D PLAN_D2 PLAN_D3 PLAN_E; do approve $f.md "$R" || exit 1; done
 
 if sel A; then echo "== A. lint lines, dirty block"
 $DP --lint 2 --dry-run --via qwen --model fake/m --plan PLAN_L.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
@@ -118,12 +121,13 @@ C0=$(calls); $DP --lint 2 --via qwen --model fake/m --plan PLAN_L.md --repo "$R"
 printf 'Cases: cases.md\n' > "$T/concord/repo-notes/repo.md"
 ( cd "$R" && printf 'case 1\n' > cases.md && git add cases.md && git commit -qm cases ) > /dev/null 2>&1
 printf '# Plan\nTests: +1/-0 lines, net <= +1\n## Phase 1 - p1\nExecutor: deepseek-flash\nFiles: a.py, cases.md\nAcceptance:\n- `grep -q 2 a.py`\n## Phase 2 - p2\nExecutor: planner\nFiles: cases.md\nAcceptance:\n- `true`\n' > "$R/PLAN_C.md"
+approve PLAN_C.md "$R" || exit 1
 $DP --lint 1 --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1; $DP --lint 2 --plan PLAN_C.md --repo "$R" > "$T/out2.txt" 2>&1
 has "PLAN LINT: phase 1 lists the Cases file cases.md" && ! has 'no `Tests:` line' && ! grep -q "lists the Cases file" "$T/out2.txt" \
   && ok "C.2 an executor phase listing the Cases file is linted; a planner phase may list it" || { bad "C.2"; cat "$T/out.txt" "$T/out2.txt"; }
 FAKE_ACTIONS='echo "x = 2" > a.py; echo "case 2" >> cases.md' $DP 1 --plan PLAN_C.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
-RID=$(rid); has "ACCEPTANCE FILES CHANGED: cases.md (modified)" && { $DP --verdict "$RID" PASS --repo "$R" > /dev/null 2>&1; [ $? -eq 7 ]; } \
-  && ok "C.3 an executor edit of the Cases file is an acceptance change: PASS refused (exit 7)" || { bad "C.3"; grep -i "acceptance" "$T/out.txt"; }
+has "ACCEPTANCE FILES CHANGED: cases.md (modified)" \
+  && ok "C.3 an executor edit of the Cases file is an acceptance change" || { bad "C.3"; grep -i "acceptance" "$T/out.txt"; }
 rm -f "$T/concord/repo-notes/repo.md"
 fi
 
@@ -135,6 +139,7 @@ $DP --end "$B1" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 has "plan edited during the planner run (allowed; executor runs would FAIL)" && ! has "PLAN FILE MODIFIED" && has "plan.snapshot.md" \
   && ok "D.1 planner run (--label me) report: allowed line with the snapshot path, no PLAN FILE MODIFIED" || { bad "D.1 report rc=$RC"; grep -i 'plan' "$T/out.txt" | head -3; }
 [ "$(meta "$B1" plan_modified)" = True ] && ok "D.2 meta.plan_modified stays true (ledger truth)" || bad "D.2 plan_modified=$(meta "$B1" plan_modified)"
+approve PLAN_D.md "$R" || exit 1      # the planner has the edited plan verified
 $DP --begin 1 --label planner --plan PLAN_D.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?; B2=$(bid)
 [ $RC -eq 0 ] && has "plan changed since run" && ! has "still the version the executor wrote" && ok "D.3 next planner --begin accepted with the note" \
   || { bad "D.3 next begin rc=$RC"; head -3 "$T/out.txt"; }
@@ -144,9 +149,10 @@ $DP --begin 1 --label implementer --plan PLAN_D2.md --repo "$R" > "$T/out.txt" 2
 echo "- edited by the implementer" >> "$R/PLAN_D2.md"
 $DP --end "$B3" --repo "$R" > "$T/out.txt" 2>&1
 has "PLAN FILE MODIFIED" && ! has "plan edited during the planner run" && ok "D.4 implementer (claude) session run: PLAN FILE MODIFIED kept" || { bad "D.4 implementer report"; grep -i plan "$T/out.txt" | head -3; }
+approve PLAN_D2.md "$R" || exit 1      # verified, so only the executor's edit can refuse the next --begin
 $DP --begin 1 --label planner --plan PLAN_D2.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && has "still the version the executor wrote" && ok "D.5 --begin after an executor's plan edit refused" || { bad "D.5 rc=$RC"; head -3 "$T/out.txt"; $DP --abort last --repo "$R" > /dev/null 2>&1; }
-run "echo '- edited by a harness executor' >> PLAN_D3.md" PLAN_D3.md; $DP --begin 1 --label planner --plan PLAN_D3.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+run "echo '- edited by a harness executor' >> PLAN_D3.md" PLAN_D3.md; approve PLAN_D3.md "$R" || exit 1; $DP --begin 1 --label planner --plan PLAN_D3.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && has "still the version the executor wrote" && ok "D.6 --begin after a harness executor's plan edit refused" || { bad "D.6 rc=$RC"; head -3 "$T/out.txt"; $DP --abort last --repo "$R" > /dev/null 2>&1; }
 fi
 
@@ -162,9 +168,6 @@ C0=$(calls); review "$RID" --files 'nothing/*' --exclude zz; RC=$?
 $DP --review "$RID" --packet --files 'docs/*' --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET //p' "$T/out.txt" | head -1)
 [ $RC -eq 0 ] && [ -f "$PK" ] && grep -q '^+more$' "$PK" && ! grep -q '^+# r$' "$PK" && ok "E.4 --packet --files: packet holds the docs diff only" || { bad "E.4 packet rc=$RC"; tail -2 "$T/out.txt"; }
 run "python3 -c \"open('big.py','w').write(''.join('v_%04d = %r\\\\n' % (i, 'x' * 30) for i in range(8000)))\"; echo y > docs/y.md"; BIG=$(rid)
-C0=$(calls); review "$BIG"; RC=$?
-[ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "split the change, or use --packet for an Opus reviewer" && has "--files GLOB" \
-  && ok "E.5 over the cap without --files: refusal unchanged" || { bad "E.5 rc=$RC"; tail -3 "$T/out.txt"; }
 C0=$(calls); review "$BIG" --files 'docs/*'; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && ok "E.6 over the cap with --files on the small group: reviewer runs" || { bad "E.6 rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
 fi

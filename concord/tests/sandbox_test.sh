@@ -4,9 +4,10 @@
 # P = the generated profile text (open network, write-confinement, credential deny-reads); F = the profile
 # actually blocks (functional — needs a real sandbox-exec, so SKIPped when nested Seatbelt refuses apply, as it
 # does inside the Claude Code sandbox). No network, no real OpenCode binary.
-# Run: bash ~/.claude/concord/tests/sandbox_test.sh [WPF]   (exit 0 = every selected check passed).
+# E = the executor's environment: an allow-list of names, not the parent's whole environment.
+# Run: bash ~/.claude/concord/tests/sandbox_test.sh [WPSFE]   (exit 0 = every selected check passed).
 set -u
-SEL="${1:-WPSF}"
+SEL="${1:-WPSFE}"
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/sandbox-test.XXXXXX")" && pwd -P)"; export T
 trap 'rm -rf "$T"' EXIT
@@ -22,6 +23,7 @@ export PATH="$T/bin:$PATH" HOME="$T/home"
 export TMPDIR="$T/octmp"
 DP="python3 $T/concord/concord.py"
 R="$T/repo"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0; skip=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -48,6 +50,7 @@ Acceptance:
 - `grep -q x a.py`
 P
   git add -A && git commit -qm init ) || { echo "setup failed"; exit 1; }
+approve PLAN_OC.md "$R" || exit 1
 
 dry(){ $DP 1 --plan PLAN_OC.md --via opencode --model opencode/flash --dry-run --no-baseline --repo "$R" "$@" > "$T/out.txt" 2>&1; }
 
@@ -70,6 +73,12 @@ dry --no-sandbox
 [ "$(has_sbx)" = N ] && ok "W.3 --no-sandbox: argv is the bare OpenCode command" || { bad "W.3 --no-sandbox still wrapped"; cmdjson; }
 CONCORD_NO_SANDBOX=1 $DP 1 --plan PLAN_OC.md --via opencode --model opencode/flash --dry-run --no-baseline --repo "$R" > "$T/out.txt" 2>&1
 [ "$(has_sbx)" = N ] && ok "W.4 CONCORD_NO_SANDBOX=1: not wrapped" || { bad "W.4 env off-switch ignored"; cmdjson; }
+if [ "$SBX_ACTIVE" = 1 ]; then
+  CONCORD_NO_SANDBOX=0 $DP 1 --plan PLAN_OC.md --via opencode --model opencode/flash --dry-run --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+  [ "$(has_sbx)" = Y ] && ok "W.4b CONCORD_NO_SANDBOX=0 is not an off-switch: the run is still sandboxed" || { bad "W.4b CONCORD_NO_SANDBOX=0 turned the sandbox off"; cmdjson; }
+else
+  skp "W.4b CONCORD_NO_SANDBOX=0 stays sandboxed: wrapper inactive here (nested Seatbelt or no sandbox-exec); run outside the Claude Code sandbox"
+fi
 # executors.conf opencode.sandbox = no
 sed -i.bak 's/^opencode.model =.*/&\nopencode.sandbox = no/' "$T/concord/executors.conf" 2>/dev/null || \
   printf '\nopencode.sandbox = no\n' >> "$T/concord/executors.conf"
@@ -133,6 +142,29 @@ else
     sandbox-exec -f "$SB" /bin/sh -c "cat '$HOME/.claude.json'" >/dev/null 2>&1 && bad "F.7 ~/.claude.json read was ALLOWED" || ok "F.7 ~/.claude.json read: blocked"
   fi
 fi
+fi
+
+if sel E; then echo "== E. the executor's environment is an allow-list"
+printf '#!/bin/sh\nenv > "$T/seen_qwen"\n' > "$T/bin/qwen"; printf '#!/bin/sh\nenv > "$T/seen_pi"\n' > "$T/bin/pi"; chmod +x "$T/bin/qwen" "$T/bin/pi"
+AWS_SECRET_ACCESS_KEY=leak-aws-7 MY_PRIVATE_TOKEN=leak-tok-8 LC_ALL=C XDG_CACHE_HOME="$T/xdg" \
+  $DP 1 --plan PLAN_OC.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+grep -q '^DELEGATE RESULT' "$T/out.txt" && [ -f "$T/seen_qwen" ] || { echo "setup failed: the qwen run did not start"; cat "$T/out.txt"; exit 1; }
+RQ=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+! grep -q 'leak-aws-7\|leak-tok-8' "$T/seen_qwen" && ok "E.1 an executor started with AWS_SECRET_ACCESS_KEY and another secret in the parent does not see either" || bad "E.1 the executor saw a parent secret: $(grep -c 'leak-' "$T/seen_qwen") line(s)"
+miss=""; for want in PATH HOME LC_ALL XDG_CACHE_HOME; do grep -q "^$want=" "$T/seen_qwen" || miss="$miss $want"; done
+[ -z "$miss" ] && ok "E.2 it still sees the base names (PATH, HOME, LC_*, XDG_*)" || bad "E.2 base names missing:$miss"
+( cd "$R" && git checkout -q -- . ) 2> /dev/null
+$DP 1 --plan PLAN_OC.md --via pi --model opencode-go/x --no-baseline --no-sandbox --repo "$R" > "$T/out.txt" 2>&1
+[ -f "$T/seen_pi" ] && grep -q '^PI_OFFLINE=1$' "$T/seen_pi" && grep -q '^PI_CODING_AGENT_DIR=' "$T/seen_pi" \
+  && ok "E.3 a pi executor still sees the names concord.py sets for pi (PI_OFFLINE, PI_CODING_AGENT_DIR)" || { bad "E.3 pi names missing"; tail -3 "$T/out.txt"; cat "$T/seen_pi" 2> /dev/null | head -3; }
+# E.4: the report lists a run of a harness with no sandbox wrapper (the stub qwen) beside a pi run started with --no-sandbox
+RP=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+for r in "$RQ" "$RP"; do $DP --verdict "$r" PASS --repo "$R" > "$T/v.txt" 2>&1 || { echo "setup failed: PASS of run '$r'"; cat "$T/v.txt"; exit 1; }; done
+$DP --report --plan PLAN_OC.md --repo "$R" > "$T/rep.txt" 2>&1; REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1); [ -f "$REP" ] || { echo "setup failed: --report"; cat "$T/rep.txt"; exit 1; }
+OV=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP")
+echo "$OV" | grep -F "$RP" | grep -qi "unsandboxed executor run" || { echo "setup failed: the pi --no-sandbox run is not listed under Overrides"; echo "$OV"; exit 1; }
+echo "$OV" | grep -F "$RQ" | grep -qi "unsandboxed executor run" \
+  && ok "E.4 a run of a harness with no sandbox wrapper (qwen) is listed under Overrides as an unsandboxed executor run" || { bad "E.4 the qwen run is missing from Overrides"; echo "$OV"; }
 fi
 
 echo "passed $pass, failed $fail, skipped $skip"

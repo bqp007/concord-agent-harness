@@ -12,13 +12,15 @@ Only the latest release on the default branch receives fixes.
 
 Concord is a workflow harness, not a sandbox. The agents it starts (the planning session, the executors and the reviewers) run with your user account's permissions: they can run shell commands, read what your account can read and reach the network through their harness. Plans, prompts, diffs and repository notes are sent to the model providers you configure.
 
-The dispatcher enforces the red run, the out-of-scope report, the attempt cap, the review tier and the billing guard. Everything else it relies on (the executor contract, the hook rules) is an instruction that a model can ignore.
+The dispatcher enforces the plan approval, the red run, the out-of-scope report, the PASS rule, the review tier, the billing guard and an allow-list of the environment variables an executor receives. Everything else it relies on (the executor contract, the hook rules) is an instruction that a model can ignore, and the hook rules catch only common spellings of the commands they name.
 
 ## Known limitations
 
 - File scope is enforced for an executor's edit tools on OpenCode only. A shell command, such as a redirection, can still write outside the phase's files. Changes inside the repository show up in the out-of-scope report after the run; changes outside it are not tracked.
-- On OpenCode, executors may run any shell command except a short deny list (deleting files, changing branches or git state, committing, pushing, `sudo`); other harnesses apply their own permission settings. Concord adds no operating-system sandbox of its own.
-- Concord hashes its own files and your agent configuration before and after each run. This detects tampering after the fact; it does not prevent it, and it does not yet cover the plugin's files or the run records under `.git/concord/`, which the review-tier check reads.
+- On OpenCode, executors may run any shell command except a short deny list (deleting files, changing branches or git state, committing, pushing, `sudo`); other harnesses apply their own permission settings.
+- On macOS, Concord runs the OpenCode and pi executors under a Seatbelt profile (`concord/opencode.sandbox.sb`) that hides credential stores such as `~/.ssh` and `~/.aws` and limits writes. It is skipped on Linux and inside another Seatbelt sandbox, such as a Claude Code shell, and `--no-sandbox` or `CONCORD_NO_SANDBOX=1` turn it off. The network stays open; OpenCode's cache folder and other tickets' worktrees stay writable; and the acceptance commands that run after an executor, like every later test run, execute the code it wrote as your user, unsandboxed.
+- Concord hashes its own files and your agent configuration before and after each run, and keeps the start state that grades a run in its own memory. This detects tampering after the fact; it does not prevent it, and it does not yet cover the plugin's files or the review records under `.git/concord/`, which the PR gate reads.
+- `install.sh` adds `sandbox.excludedCommands` entries to `~/.claude/settings.json`, so `gh`, `git push`, `git fetch`, `git pull` and `git clone` run outside Claude Code's sandbox in every project. Remove them if you do not want that.
 
 ## Recommendations
 

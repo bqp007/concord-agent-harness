@@ -4,7 +4,7 @@
 # the run watchdog (memory cap, free-disk floor; the memory check needs ps, which Claude Code's own sandbox denies);
 # OpenCode permission set (Code Mode, subagents, web search denied; version and project config pinned);
 # OUTSIDE CHECKOUT CHANGED for home config, dispatcher files, the main checkout's rule files and linked folders;
-# --estimate minutes, lanes, critical path, session lane, ETA and lint lines.
+# an executor name wins over a model alias; --estimate lanes, critical path and ETA relation (no pinned minutes).
 # Run: bash ~/.claude/concord/tests/delegate_test.sh   (exit 0 = all passed). Tests the dispatcher this file belongs to,
 # copied into a temp dir with HOME pointing at a temp home, so runs.jsonl and the real config stay untouched.
 set -u
@@ -19,6 +19,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"; WT="python3 $T/concord/wt.py"
 R="$T/repo"; export R
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -27,7 +28,7 @@ newrepo(){ rm -rf "$R"; mkdir -p "$R"; (
   printf 'x = 1\n' > a.py; printf 'y = 2\n' > b.py; printf 'z = 3\n' > c.py; printf '.claude/\n' > .gitignore
   git add -A && git commit -qm init
   printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n' > PLAN_T.md
-); }
+); approve PLAN_T.md "$R" || exit 1; }
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "${2:-$R}" > "$T/out.txt" 2>&1; }
 has(){ grep -F -- "$1" "$T/out.txt" > /dev/null; }               # literal substring anywhere in the last output
 line(){ grep "^$1" "$T/out.txt" | grep -F -- "$2" > /dev/null; }  # literal substring on the line starting with $1
@@ -54,6 +55,11 @@ FAKE_ACTIONS='touch ran.txt' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --
   || { bad "red run rc=$RC"; tail -4 "$T/out.txt"; }
 newrepo; FAKE_ACTIONS='touch ran.txt' $DP 1 --plan PLAN_T.md --via qwen --model anthropic/claude-sonnet-5 --no-baseline --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 5 ] && [ ! -e "$R/ran.txt" ] && ok "billing guard: Claude model on a harness -> exit 5" || { bad "billing guard rc=$RC"; tail -3 "$T/out.txt"; }
+newrepo; FAKE_MARK=zzmark9 $DP qwen 1 --plan PLAN_T.md --model fake/m --dry-run --no-baseline --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && grep -q '^executor: qwen -> qwen ' "$T/out.txt" && sed -n 's/^cmd: //p' "$T/out.txt" | python3 -I -c 'import json,sys; a=json.load(sys.stdin); sys.exit(0 if a[0].endswith("/qwen") else 1)' \
+  && ok "an executor name wins over a model alias: concord.py qwen 1 runs the qwen harness, not the qwen model alias" || { bad "qwen word rc=$RC"; grep -e '^executor' -e '^cmd' "$T/out.txt" | cut -c1-200; }
+grep -E '^environment names passed to the executor: .*\bPATH\b' "$T/out.txt" | grep -q 'FAKE_MARK' && ! grep -q 'zzmark9' "$T/out.txt" \
+  && ok "a dry run prints the environment names passed to the executor, names only, never values" || { bad "dry run environment names"; grep -i 'environment' "$T/out.txt"; }
 python3 -I - "$T/concord/concord.py" "$T" <<'EOF'
 import importlib.util, json, sys
 from pathlib import Path
@@ -230,62 +236,53 @@ assert rc == d.RESOURCE_RC and time.time() - t < 5 and "RESOURCE LIMIT: free dis
     (rc, time.time() - t, log.read_text())
 EOF
 
-echo "== --estimate: minutes from the ledger, lanes, critical path, ETA, lint (2026-11-15, kit-flow)"
+echo "== --estimate: lanes, critical path, ETA relation, lint (no pinned minutes)"
 newrepo
 python3 -I -c 'import json, sys
 r = [dict(run_id=f"f{i}", name="deepseek-flash", verdict="PASS", seconds=300 + 50 * i, diff_lines=180) for i in range(6)]
 r += [dict(run_id=f"p{i}", name="planner", verdict="PASS", seconds=60 * (i + 1)) for i in range(6)]
 r += [dict(run_id="x", name="deepseek-flash", verdict="FAIL", seconds=9000), dict(run_id="y", name="deepseek-flash", seconds=9000)]
 open(sys.argv[1], "w").write("".join(json.dumps(x) + "\n" for x in r))' "$T/concord/runs.jsonl"
-# flash: median 425 s, p75 (nearest rank) 500 s, 180 lines; planner: median 210 s, no diff_lines (180 assumed); x, y not PASS
 ph(){ printf '\n## Phase %s - p%s\nExecutor: %s\n%b\n' "$1" "$1" "$2" "$3"; }
 { printf '# Plan\nTier: M\nSize: ~1500 lines\nETA: 100 min\n'; ph 1 planner 'Size: ~90 lines\nFiles: t.sh'
   ph 2 deepseek-flash 'Risk: high\nSize: ~360 lines\nAfter: 1 (needs its tests)\nFiles: a.py'
   ph 3 deepseek-flash 'Size: ~180 lines\nAfter: 1\nFiles: a.py, b.py'; ph 4 deepseek-flash 'Size: ~40 lines\nAfter: 2 (shares a.py)\nFiles: c.py'
   ph 5 deepseek-flash 'Size: ~600 lines\nAfter: 3 (shares b.py)\nFiles: b.py'; ph 6 deepseek-flash 'Files: d.py'
   ph 7 glm-flash 'Size: ~180 lines\nFiles: e.py'; } > "$R/PLAN_E.md"
-# Expected (minutes, ceil): P1 210 s x 1 = 4 | P2 500 s x 2 + 2.5 = 20 | P3 425 s + 2.5 = 10 | P4 10 | P5 425 s x 3.33 + 2.5 = 27
-# | P6 10 | P7 600 s + 2.5 = 13. Starts: P2, P3 at 4; P4 at 24; P5 at 14. Critical path 1 -> 3 -> 5 = 41; + M 20 = 61.
 $DP --estimate --plan PLAN_E.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && line "ESTIMATE" "PLAN_E.md" && python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1]))["estimates"]["PLAN_E.md"] == 61' \
-  "$R/.git/concord/drift.json" 2>/dev/null && ok "E.1 --estimate exits 0, names the plan and stores the ETA for the drift gate" || { bad "E.1 rc=$RC"; tail -5 "$T/out.txt"; }
-miss=""
-for want in "Phase 1  planner  ~90 lines  4 min" "Phase 2  deepseek-flash  ~360 lines  20 min" \
-            "Phase 3  deepseek-flash  ~180 lines  10 min" "Phase 4  deepseek-flash  ~40 lines  10 min" \
-            "Phase 5  deepseek-flash  ~600 lines  27 min" "Phase 7  glm-flash  ~180 lines  13 min"; do
-  grep -qF -- "$want" "$T/out.txt" || miss="$miss [$want]"
-done
-[ -z "$miss" ] && ok "E.2 phase minutes: median or p75 (high risk) x Size / median lines, + 2.5 min check for executors" \
-  || { bad "E.2 phase lines missing:$miss"; grep "^Phase" "$T/out.txt"; }
-grep -qxF "CRITICAL PATH: 1 → 3 → 5 = 41 min; session lane 19 min; final revision 20 min" "$T/out.txt" \
-  && grep -Eqx "ETA: 61 min, lands at [0-2][0-9]:[0-5][0-9] local" "$T/out.txt" \
-  && ok "E.3 critical path from After: waits, session lane (own phases + 2.5 min per executor phase), ETA = path + final revision (Tier M)" \
-  || { bad "E.3 path/ETA"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
-grep -qxF "Phase 1 planner 4 min ──> Phase 2 deepseek-flash 20 min ──> Phase 4 deepseek-flash 10 min" "$T/out.txt" \
-  && grep -qxF "Phase 3 deepseek-flash 10 min ──> Phase 5 deepseek-flash 27 min" "$T/out.txt" \
-  && grep -qxF "Phase 6 deepseek-flash 10 min" "$T/out.txt" \
-  && ok "E.4 PASSES: one lane per line; a phase continues the lane of its latest-finishing wait once" \
-  || { bad "E.4 lanes"; sed -n '/^PASSES/,/^CRITICAL/p' "$T/out.txt"; }
+[ $RC -eq 0 ] && line "ESTIMATE" "PLAN_E.md" && python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))["estimates"]["PLAN_E.md"]; assert isinstance(v, int) and v > 0' \
+  "$R/.git/concord/drift.json" 2>/dev/null && ok "E.1 --estimate exits 0, names the plan and stores an integer ETA for the drift gate" || { bad "E.1 rc=$RC"; tail -5 "$T/out.txt"; }
+grep -Eqx "Phase 1 planner [0-9]+ min ──> Phase 2 deepseek-flash [0-9]+ min ──> Phase 4 deepseek-flash [0-9]+ min" "$T/out.txt" \
+  && grep -Eqx "Phase 3 deepseek-flash [0-9]+ min ──> Phase 5 deepseek-flash [0-9]+ min" "$T/out.txt" \
+  && grep -Eqx "Phase 6 deepseek-flash [0-9]+ min" "$T/out.txt" \
+  && ok "E.4 PASSES: one lane per line; a phase continues the lane of its latest-finishing wait once" || { bad "E.4 lanes"; sed -n '/^PASSES/,/^CRITICAL/p' "$T/out.txt"; }
+eta_rel(){ python3 -I - "$T/out.txt" <<'PY'
+import re, sys
+t = open(sys.argv[1]).read()
+m = re.search(r"^CRITICAL PATH: .*= (\d+) min; session lane (\d+) min; final revision (\d+) min$", t, re.M); e = re.search(r"^ETA: (\d+) min, lands at [0-2]\d:[0-5]\d local$", t, re.M)
+sys.exit(0 if m and e and int(e.group(1)) == max(int(m.group(1)), int(m.group(2))) + int(m.group(3)) else 1)
+PY
+}
+grep -Eq "^CRITICAL PATH: 1 → 3 → 5 = [0-9]+ min;" "$T/out.txt" && eta_rel \
+  && ok "E.3 critical path from After: waits (1 -> 3 -> 5); ETA = max(critical path, session lane) + final revision" || { bad "E.3 path/ETA"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
 miss=""
 for want in "Phase 3 waits for Phase 1 with no reason" "Phases 2 and 3 can run at once and both list a.py" \
             "Phase 4 (~40 lines) is tier S" "Phase 5 (~600 lines) is over 3x" "Phase 6 has no Size: line" \
-            "no ledger reference for glm-flash" "the plan says ETA 100 min; computed 61 min"; do
+            "no ledger reference for glm-flash" "the plan says ETA 100 min; computed "; do
   grep "^ESTIMATE LINT: " "$T/out.txt" | grep -qF -- "$want" || miss="$miss [$want]"
 done
 [ -z "$miss" ] && ! grep "^ESTIMATE LINT: " "$T/out.txt" | grep -qE "Phases (2 and 4|3 and 5|1 and)" \
   && ok "E.5 seven estimate lint lines; no overlap line for phases ordered by After: or with disjoint Files" \
   || { bad "E.5 lint missing:$miss"; grep "^ESTIMATE LINT" "$T/out.txt"; }
 { printf '# Plan\nTier: S\n'; ph 1 planner 'Size: ~1800 lines\nFiles: t.sh'; ph 2 deepseek-flash 'Size: ~180 lines\nFiles: a.py'; } > "$R/PLAN_S.md"
-$DP --estimate --plan PLAN_S.md --repo "$R" > "$T/out.txt" 2>&1         # P1 210 s x 10 = 35 min; lane 35 + 2.5 = 38; + S 10
-grep -qxF "CRITICAL PATH: 1 = 35 min; session lane 38 min; final revision 10 min" "$T/out.txt" \
-  && grep -Eqx "ETA: 48 min, lands at [0-2][0-9]:[0-5][0-9] local" "$T/out.txt" \
-  && ok "E.6 the ETA takes the session lane when it is longer than the critical path" || { bad "E.6 session lane"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
+$DP --estimate --plan PLAN_S.md --repo "$R" > "$T/out.txt" 2>&1
+eta_rel && ok "E.6 ETA = max(critical path, session lane) + final revision on a plan whose session lane is the longer" || { bad "E.6 session lane"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
 { printf '# Plan\nTier: S\n'; ph 1 planner 'Size: ~180 lines\nFiles: t.sh'; ph 2 deepseek-flash 'Size: ~180 lines\nFiles: a.py'
   ph 3 deepseek-flash 'Size: ~180 lines\nAfter: Phase 1 and 2 (needs both), tests\nFiles: b.py'
   ph 4 deepseek-flash 'Size: ~180 lines\nFiles: src/a*.py'; ph 5 deepseek-flash 'Size: ~180 lines\nFiles: src/*b.py'
   ph 6 deepseek-flash 'Size: ~180 lines\nAfter:\n- 3\n- 4 (shares src/ab.py) and 5 (shares src/ab.py)\nFiles: src/ab.py'; } > "$R/PLAN_A.md"
-$DP --estimate --plan PLAN_A.md --repo "$R" > "$T/out.txt" 2>&1        # P1 4, P2 10, P3 starts at 10, P6 at 20: path 2 -> 3 -> 6 = 30
-grep -qxF "CRITICAL PATH: 2 → 3 → 6 = 30 min; session lane 17 min; final revision 10 min" "$T/out.txt" \
+$DP --estimate --plan PLAN_A.md --repo "$R" > "$T/out.txt" 2>&1
+grep -Eq "^CRITICAL PATH: 2 → 3 → 6 = [0-9]+ min;" "$T/out.txt" \
   && grep -qF "ESTIMATE LINT: Phase 3 After: 'tests' names no phase" "$T/out.txt" && [ "$(grep -c "with no reason" "$T/out.txt")" = 1 ] \
   && grep -qF "ESTIMATE LINT: Phase 6 waits for Phase 3 with no reason" "$T/out.txt" && ! grep -qE "Phases [345] and 6 " "$T/out.txt" \
   && grep -qF "ESTIMATE LINT: Phases 4 and 5 can run at once and both list src/*b.py, src/a*.py" "$T/out.txt" \

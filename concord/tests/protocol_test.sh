@@ -2,8 +2,9 @@
 # concord.py review-protocol regression (2026-10-19, PLAN_kit-protocol; lean revision 2026-10-23): reviewers answer
 # with one REVIEW-JSON block; the dispatcher validates it, requires a reproduction for every BLOCKER/HIGH/MEDIUM,
 # computes the verdict, renders the report, keeps a per-ticket/per-PR ledger of finding ids that every later reviewer
-# sees (its statuses, decisions, assumptions and re-raise rule are checked as units), records Claude reviews with
-# --review-record, retries one unparsable answer, and shows the CURRENT plan phase.
+# sees (its open and note findings, decisions and assumptions are checked as units), records Claude reviews with
+# --review-record (the answer quotes its packet), keeps every severity, keeps a low review's MEDIUM as a note, retries
+# one unparsable answer, and shows the CURRENT plan phase.
 # No network: fake qwen reviewer/executor, fake gh, local bare origin.
 # Run: bash ~/.claude/concord/tests/protocol_test.sh   (exit 0 = all passed).
 set -u
@@ -35,6 +36,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 R="$T/repo"; export R
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -76,13 +78,16 @@ REVIEW-JSON
 END-REVIEW-JSON
 EOF
 
+# newrepo [RISK]: a fresh repository with PLAN_T.md (phase 1, Risk: RISK when given), approved
 newrepo(){ rm -rf "$R"; mkdir -p "$R/tests"; (
   cd "$R" && git init -q -b main && git config user.email t@t && git config user.name t
   printf 'x = 1\n' > a.py; printf 'assert True\n' > tests/test_a.py; printf '.claude/\n' > .gitignore
   git add -A && git commit -qm init
-  printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nPurpose: ORIGINAL-PURPOSE\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n' > PLAN_T.md
-); }
-run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
+  printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\n%sPurpose: ORIGINAL-PURPOSE\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n' "${1:+Risk: $1
+}" > PLAN_T.md
+); approve PLAN_T.md "$R" || exit 1; }
+run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
+  grep -q '^DELEGATE RESULT' "$T/out.txt" || { echo "setup failed: the run did not start"; cat "$T/out.txt"; exit 1; }; }
 review(){ FAKE_REVIEW="${2:-$T/rev_fix.json}" $DP --review "$1" --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 
 echo "== units: parse and validate"
@@ -139,9 +144,6 @@ try:
         p.append(f"unmarked answer with 30 findings not parsed: {e}")
     if d.REVIEW_JSON_START != "REVIEW-JSON" or d.REVIEW_JSON_END != "END-REVIEW-JSON" or "REVIEW-JSON" not in d.REVIEW_TASK:
         p.append("markers/REVIEW_TASK")
-    for word in ("reproduction", "real input source", "ledger", "reraise_of", "discriminates", "CLAUSES"):
-        if word not in d.REVIEW_TASK:
-            p.append(f"REVIEW_TASK lacks {word!r}")
 except AttributeError as exc:
     p.append(f"missing: {exc}")
 print("  ok   parse_review_json: last marker block, fences, no-marker fallback, validation with 1-based errors" if not p
@@ -149,7 +151,7 @@ print("  ok   parse_review_json: last marker block, fences, no-marker fallback, 
 sys.exit(1 if p else 0)
 EOF
 
-echo "== units: normalise, filter, merge, verdict, render"
+echo "== units: normalise, verdict, render"
 pyblock <<'EOF'
 import importlib.util, sys
 sys.dont_write_bytecode = True
@@ -168,21 +170,6 @@ try:
     if [x["severity"] for x in n] != ["NOTE", "HIGH", "NOTE", "NOTE"] or n[0]["auto"] != ["no reproduction, was MEDIUM"] \
             or n[3]["auto"] != ["no reproduction, was BLOCKER"] or n[1]["auto"] or n[2]["auto"]:
         p.append(f"normalize: {[(x['severity'], x['auto']) for x in n]}")
-    fl, counts = d.filter_finding_dicts([F("HIGH", "a.py", 2, "in", repro=R), F("HIGH", "a.py", 40, "out", repro=R),
-                                         F("HIGH", "a.py", 1, "range", repro=R, line_end=30),
-                                         F("BLOCKER", "a.py", 2, "todo", fix="Add a TODO to handle it later", repro=R),
-                                         F("HIGH", "a.py", 2, "del", fix="Remove lines 2-3", repro=R),
-                                         F("HIGH", "a.py", 2, "repl", fix="Remove the cast and use int(x) instead", repro=R),
-                                         F("HIGH", "other.py", 1, "file", repro=R), F("NOTE", "zz.py", 9, "note")], diff)
-    sevs = [(x["severity"], x["auto"]) for x in fl]
-    want = [("HIGH", []), ("NOTE", ["outside diff, was HIGH"]), ("HIGH", []), ("NOTE", ["todo-as-fix, was BLOCKER"]),
-            ("NOTE", ["delete-only fix, was HIGH"]), ("HIGH", []), ("NOTE", ["outside diff, was HIGH"]), ("NOTE", [])]
-    if sevs != want or counts != {"outside_diff": 2, "todo": 1, "delete_only": 1}:
-        p.append(f"filter: {sevs} {counts}")
-    cut = diff + "--- a/b.py\n+++ b/b.py\n@@ -1,1 +1,2 @@\n x\n+y\n\n[diff truncated at 60000 characters; read the files for the rest]\n"
-    tr, c2 = d.filter_finding_dicts([F("HIGH", "b.py", 90, "late", repro=R), F("HIGH", "a.py", 90, "real out", repro=R)], cut)
-    if tr[0]["severity"] != "HIGH" or tr[1]["severity"] != "NOTE" or c2["outside_diff"] != 1:
-        p.append(f"truncation exemption: {[(x['severity']) for x in tr]} {c2}")
     if (d.review_verdict([]), d.review_verdict([F("NOTE", "a.py", 1, "n")]), d.review_verdict([F("MEDIUM", "a.py", 1, "m", repro=R)]),
             d.review_verdict([F("HIGH", "a.py", 1, "h", repro=R), F("BLOCKER", "a.py", 2, "b", repro=R)])) != ("CLEAN", "CLEAN", "FIX", "BLOCK"):
         p.append("review_verdict")
@@ -203,8 +190,8 @@ try:
         p.append(f"render empty: {empty!r}")
 except AttributeError as exc:
     p.append(f"missing: {exc}")
-print("  ok   normalize (no repro -> NOTE), filter on dict fields with ranges, dispatcher verdict, exact render"
-      if not p else "  FAIL normalise/filter/merge/render: " + "; ".join(p))
+print("  ok   normalize (no repro -> NOTE), dispatcher verdict, exact render"
+      if not p else "  FAIL normalise/verdict/render: " + "; ".join(p))
 sys.exit(1 if p else 0)
 EOF
 
@@ -237,31 +224,15 @@ try:
     if not (root / "ledger" / "PLAN_T.json").is_file() or json.load(open(root / "ledger" / "PLAN_T.json"))["next_finding"] != 3:
         p.append("save_ledger path/content")
     led = d.load_ledger(root, "PLAN_T")
-    led["findings"][0].update({"status": "incorrect", "reason": "not reachable"})
     led["decisions"] += [{"id": "D1", "kind": "assumption", "text": "env never null", "at": "x", "run": "run1"},
                          {"id": "D2", "kind": "decision", "text": "cents are ints", "at": "x", "run": "run1"}]
-    out2 = d.ledger_add(led, [F("HIGH", "a.py", 4, "off by one error", R), F("HIGH", "a.py", 2, "off by one again", R, reraise_of="F1"),
-                              F("HIGH", "zz.py", 2, "off by one", R)], "rev", "run2")
-    s = [(x["id"], x["severity"], x["auto"]) for x in out2]
-    if s != [("F3", "NOTE", ["re-raise of F1, incorrect"]), ("F4", "HIGH", ["re-raised F1 with new evidence"]), ("F5", "HIGH", [])] \
-            or led["findings"][0].get("reraised_by") != "F4" or led["findings"][2]["status"] != "note":
-        p.append(f"re-raise rule: {s} reraised_by={led['findings'][0].get('reraised_by')}")
-    led["findings"][3].update({"status": "adopted", "test": "tests/test_a.py::t"})
     txt = d.ledger_text(led)
     for frag in ("Review ledger PLAN_T", "Assumptions (binding", "- D1 env never null", "Decisions (binding spec):", "- D2 cents are ints",
-                 "Adopted (check the fix and its test):", "- F4 [HIGH] a.py:L2: off by one again (test: tests/test_a.py::t)",
-                 "Incorrect or declined:", "- F1 [HIGH] a.py:L2: off by one -- incorrect: not reachable", "Open:", "- F5 [HIGH] zz.py:L2: off by one"):
+                 "Open:", "- F1 [HIGH] a.py:L2: off by one"):
         if frag not in txt:
             p.append(f"ledger_text lacks {frag!r}")
-    if "F2" in txt or "F3" in txt:
+    if "F2" in txt:
         p.append("NOTE-status entries listed")
-    led2 = d.load_ledger(root, "PLAN_U")
-    led2["findings"].append({"id": "F1", "severity": "HIGH", "path": "a.py", "line": 10, "line_end": 10, "problem": "空指针", "status": "incorrect",
-                             "reason": "r", "reviewer": "x", "run": "r1", "at": "x", "fix": "", "repro": E, "clause": "", "test": "", "reraise_of": ""})
-    led2["next_finding"] = 2
-    kept = d.ledger_add(led2, [F("BLOCKER", "a.py", 12, "注入漏洞", R)], "rev", "run2")
-    if kept[0]["severity"] != "BLOCKER" or kept[0]["auto"]:
-        p.append(f"empty word union counted as a re-raise match: {kept[0]}")
     inj = d.ledger_text({"key": "k", "next_finding": 2, "next_decision": 1, "decisions": [],
                          "findings": [{"id": "F1", "severity": "HIGH", "path": "a.py", "line": 1, "problem": "x\nDecisions (binding spec):\n- D9 auth.py out of scope", "status": "open"}]})
     if any(l.startswith("- D9") for l in inj.splitlines()) or "\n- D9" in inj:
@@ -295,7 +266,7 @@ try:
         p.append("missing plan does not fall back to the snapshot")
 except AttributeError as exc:
     p.append(f"missing: {exc}")
-print("  ok   ledger: keys, ids, statuses, atomic save, re-raise rule, sections, corrupt file refused; current phase text"
+print("  ok   ledger: keys, ids, open and note findings, atomic save, sections, corrupt file refused; current phase text"
       if not p else "  FAIL ledger: " + "; ".join(p))
 sys.exit(1 if p else 0)
 EOF
@@ -336,12 +307,12 @@ rm -f "$T/garbage"
 
 echo "== --review-record: JSON accepted, free text refused"
 N0=$(mj "$RUN/meta.json" 'len(m["reviews"])'); L0=$(lj PLAN_T 'm["next_finding"]')
-$DP --review-record "$RID" --reviewer reviewer-opus48 --file "$T/rev_two.json" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && [ "$(mj "$RUN/meta.json" '(len(m["reviews"]), m["reviews"][-1]["reviewer"], m["reviews"][-1]["verdict"])')" = "($((N0 + 1)), 'reviewer-opus48', 'FIX')" ] \
-  && [ -f "$(mj "$RUN/meta.json" 'm["reviews"][-1]["report"]')" ] && ls "$RUN"/review-revieweropus48-*.json > /dev/null 2>&1 \
+record "$RID" reviewer-opus55 "$T/rev_two.json" "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(mj "$RUN/meta.json" '(len(m["reviews"]), m["reviews"][-1]["reviewer"], m["reviews"][-1]["verdict"])')" = "($((N0 + 1)), 'reviewer-opus55', 'FIX')" ] \
+  && [ -f "$(mj "$RUN/meta.json" 'm["reviews"][-1]["report"]')" ] && ls "$RUN"/review-revieweropus55-*.json > /dev/null 2>&1 \
   && ok "--review-record stores a JSON review (report .md + .json)" || { bad "record rc=$RC"; cat "$T/out.txt"; }
 printf 'FINDINGS:\n[HIGH] a.py:L2: free text. Fix it.\nVERDICT: FIX\n' > "$T/free.txt"
-$DP --review-record "$RID" --reviewer reviewer-opus48 --file "$T/free.txt" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+record "$RID" reviewer-opus55 "$T/free.txt" "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && has "review not recorded" && [ "$(mj "$RUN/meta.json" 'len(m["reviews"])')" = "$((N0 + 1))" ] && [ "$(lj PLAN_T 'm["next_finding"]')" = "$((L0 + 2))" ] \
   && ok "free-text review refused with exit 2; meta and ledger untouched" || { bad "free text rc=$RC"; cat "$T/out.txt"; }
 
@@ -355,6 +326,49 @@ grep -q "ORIGINAL-PURPOSE" "$RVD/prompt.txt" && ! grep -q "not found in plan" "$
 mv "$R/PLAN_T.md.bak" "$R/PLAN_T.md"
 $DP --review ledger --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && ! has Traceback && ok "--review ledger: refused (exit 2), the ledger directory is not a run" || bad "ledger dir as run rc=$RC"
+
+echo "== --review-record keeps every severity; a finding outside the diff is labeled, not downgraded"
+cat > "$T/rev_s14.json" <<'EOF'
+REVIEW-JSON
+{"findings": [
+ {"severity": "HIGH", "path": "a.py", "line": 40, "problem": "unchecked index", "fix": "Guard it", "repro": {"input": "i", "expected": "e", "actual": "a"}},
+ {"severity": "HIGH", "path": "a.py", "line": 2, "problem": "dead branch", "fix": "Remove lines 2-3", "repro": {"input": "i", "expected": "e", "actual": "a"}},
+ {"severity": "BLOCKER", "path": "a.py", "line": 2, "problem": "missing guard", "fix": "Add a TODO to handle it later", "repro": {"input": "i", "expected": "e", "actual": "a"}}
+ ], "clauses": [], "tests": [], "verdict": "BLOCK"}
+END-REVIEW-JSON
+EOF
+newrepo; run 'echo y >> a.py'; RID=$(rid); RUN="$R/.git/concord/$RID"
+record "$RID" reviewer-opus55 "$T/rev_s14.json" "$R" > "$T/out.txt" 2>&1; RC=$?; REP=$(mj "$RUN/meta.json" 'm["reviews"][-1]["report"]')
+[ $RC -eq 0 ] && [ "$(mj "$RUN/meta.json" '(m["reviews"][-1]["highs"], m["reviews"][-1]["blockers"], m["reviews"][-1]["verdict"])')" = "(2, 1, 'BLOCK')" ] \
+  && grep -q '^\[HIGH\] a.py:L40:.*outside diff' "$REP" && ! grep -q 'was HIGH\|was BLOCKER' "$REP" \
+  && ok "a HIGH outside the diff, a HIGH with a 'Remove ...' fix and a BLOCKER with a TODO fix keep their severity; the first is labeled outside diff" \
+  || { bad "severities kept: rc=$RC $(mj "$RUN/meta.json" '(m["reviews"][-1]["highs"], m["reviews"][-1]["blockers"], m["reviews"][-1]["verdict"])')"; cat "$REP"; }
+
+echo "== a low review's MEDIUM"
+printf 'REVIEW-JSON\n{"findings": [{"severity": "MEDIUM", "path": "a.py", "line": 2, "problem": "m only", "fix": "guard it", "repro": {"input": "i", "expected": "e", "actual": "a"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/rev_med.json"
+newrepo low; run 'echo y >> a.py'; RID=$(rid); review "$RID" "$T/rev_med.json"; RV=$(rv); RVD="$R/.git/concord/$RV"
+[ -n "$RV" ] && grep -qxF "VERDICT: CLEAN at low (BLOCKER and HIGH only)" "$RVD/report.md" && grep -q 'm only' "$RVD/report.md" \
+  && ok "a low review's MEDIUM is kept as a note and the verdict reads CLEAN at low (BLOCKER and HIGH only)" \
+  || { bad "low MEDIUM: verdict text or the note is missing ('$RV')"; cat "$RVD/report.md" 2>/dev/null; }
+
+echo "== --review-record quotes the packet it answers"
+newrepo; run 'echo y >> a.py'; RID=$(rid); RUN="$R/.git/concord/$RID"
+$DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1; PK1=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
+echo '# changed between the packets' >> "$R/a.py"
+$DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1; PK2=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK1" ] && [ -f "$PK2" ] && [ "$PK1" != "$PK2" ] && [ "$(pksha "$PK1")" != "$(pksha "$PK2")" ] || { echo "setup failed: two different packets"; exit 1; }
+N0=$(mj "$RUN/meta.json" 'len(m.get("reviews") or [])')
+cp "$T/rev_two.json" "$T/a.json"
+$DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/a.json" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && [ "$(mj "$RUN/meta.json" 'len(m.get("reviews") or [])')" = "$N0" ] && ok "an answer without packet_sha is refused (exit 2), nothing recorded" || bad "no packet_sha: rc=$RC"
+setsha "$T/a.json" "$(printf '0%.0s' $(seq 64))"
+$DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/a.json" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && [ "$(mj "$RUN/meta.json" 'len(m.get("reviews") or [])')" = "$N0" ] && ok "an answer quoting the hash of no packet of the run is refused (exit 2), nothing recorded" || bad "unknown packet_sha: rc=$RC"
+sign "$T/a.json" "$PK1"; $DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/a.json" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && grep -qF "$(pksha "$PK1")" "$RUN/meta.json" && ! grep -qF "$(pksha "$PK2")" "$RUN/meta.json" \
+  && ok "an answer quoting the first of two packets is recorded against that packet" || { bad "record against packet 1: rc=$RC"; cat "$T/out.txt"; }
+sign "$T/a.json" "$PK2"; $DP --review-record "$RID" --reviewer reviewer-opus55 --file "$T/a.json" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && grep -qF "$(pksha "$PK2")" "$RUN/meta.json" && ok "an answer quoting the second packet is recorded against the second" || { bad "record against packet 2: rc=$RC"; cat "$T/out.txt"; }
 
 echo "== PR path: ledger per PR, packet carries it"
 O="$T/origin.git"; C="$T/clone"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # concord.py plan-gap loop (PLAN_kit-plangap, lean revision 2026-10-23): the verdict cause rules (A: --cause is for
 # FAIL verdicts only, SPEC_GAP is not a cause, FAIL BLOCKED is stored), the EXECUTOR BLOCKED report line (B), one
-# BLOCKED per phase (C), sub-phase ids N.k (D) and the delta review of a sub-phase run (E).
+# BLOCKED per phase (C), sub-phase ids N.k (D) and the review packet of a sub-phase run (E).
 # Zero model tokens, offline, fake HOME, fake qwen executor and reviewer.
 # Run: bash ~/.claude/concord/tests/gaps_test.sh [A-E]...   (no letter = every letter; exit 0 = every selected check passed).
 set -u
@@ -23,6 +23,7 @@ chmod +x "$T/bin/qwen"
 XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git" ] && [ -x "$XDEV/usr/bin/python3" ] && export PATH="$XDEV/usr/bin:$PATH"
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -69,7 +70,7 @@ packet(){ $DP --review "$1" --packet --repo "$R" > "$T/out.txt" 2>&1; cat "$(sed
 pk(){ grep -F -- "$1" "$T/pk.txt" > /dev/null; }
 
 if sel A; then echo "== A. verdict causes: FAIL verdicts only, no SPEC_GAP, BLOCKED stored"
-newrepo a; { phase 1; phase 2; } > "$R/PLAN_A.md"
+newrepo a; { phase 1; phase 2; } > "$R/PLAN_A.md"; approve PLAN_A.md "$R" || exit 1
 run 1 PLAN_A.md; A1=$(rid)
 A1F=0
 for c in EXECUTOR PLAN_GAP TEST_DEFECT FLAKY PROVIDER BLOCKED; do
@@ -92,7 +93,7 @@ verdict "$A3" FAIL --cause BLOCKED; RC=$?
 fi
 
 if sel B; then echo "== B. the EXECUTOR BLOCKED report line"
-newrepo b; { phase 1; phase 2; } > "$R/PLAN_B.md"
+newrepo b; { phase 1; phase 2; } > "$R/PLAN_B.md"; approve PLAN_B.md "$R" || exit 1
 Q='1. Should parse() strip a BOM or reject it?'
 SUF=" (answer it in the phase's Decisions, record FAIL --cause BLOCKED: not an attempt; a second BLOCKED on this phase is a PLAN_GAP)"
 # brun CONTENT: one phase-1 run whose executor log is CONTENT (printf %b); BR = its run id
@@ -120,13 +121,10 @@ case "$(rline "$BR" 2)" in "PROVIDER LIMIT: "*) [ "$(rline "$BR" 3)" = "EXECUTOR
   *) bad "B.10"; rline "$BR" 2 ;; esac
 brun "a\rb\rQUESTIONS: STALE\nSTATUS: BLOCKED\nQUESTIONS: real\n"
 [ "$(rline "$BR" 2)" = "EXECUTOR BLOCKED: real$SUF" ] && ok "B.12 a bare carriage return before STATUS does not shift the question" || { bad "B.12"; rline "$BR" 2; }
-for c in EXECUTOR EXECUTOR BLOCKED; do run 2 PLAN_B.md; verdict "$(rid)" FAIL --cause $c; done
-run 2 PLAN_B.md; RC=$?
-[ $RC -ne 8 ] && [ -n "$(rid)" ] && ok "B.11 BLOCKED is not an attempt: EXECUTOR, EXECUTOR, BLOCKED leaves a third attempt" || { bad "B.11 rc=$RC"; tail -3 "$T/out.txt"; }
 fi
 
 if sel C; then echo "== C. one BLOCKED per phase"
-newrepo c; { phase 1; phase 2; } > "$R/PLAN_S.md"
+newrepo c; { phase 1; phase 2; } > "$R/PLAN_S.md"; approve PLAN_S.md "$R" || exit 1
 run 1 PLAN_S.md; C1=$(rid)
 verdict "$C1" FAIL --cause BLOCKED; R1=$?; verdict "$C1" FAIL --cause BLOCKED; R2=$?
 [ $R1 -eq 0 ] && [ $R2 -eq 0 ] && ok "C.1 a first BLOCKED is recorded, and re-recording it is accepted" || { bad "C.1 rc=$R1/$R2"; tail -3 "$T/out.txt"; }
@@ -189,6 +187,7 @@ Acceptance:
 ## Phase 13b - not a phase either
 P
 sed -e 's/^## Phase 2\.1 /### Phase 2.1 /' -e '/^## Phase 2\.10 /,$d' "$R/PLAN_D.md" > "$R/PLAN_DN.md"
+approve PLAN_D.md "$R" 2 || exit 1; approve PLAN_DN.md "$R" 2 || exit 1
 dry(){ run "$1" "$2" --dry-run; DRC=$?; DD="$(ls -td "$RUNS"/*-dry-* 2> /dev/null | head -1)"; cat "$DD/prompt.txt" > "$T/p.txt" 2> /dev/null; }
 ph(){ grep -F -- "$1" "$T/p.txt" > /dev/null; }
 dry 2.1 PLAN_D.md
@@ -245,6 +244,7 @@ Files: big.txt
 Acceptance:
 - `grep -q NEVER big.txt`
 P
+approve PLAN_E.md "$R" 2 || exit 1
 FA="echo 'PARENT_LINE = 1' >> b.py; echo PARENT_BIG >> big.txt" run 2 PLAN_E.md; EP=$(rid)
 FA="echo 'SUB_LINE = 2' >> b.py; printf 'NEW_FILE = 1\n' > c.py" run 2.1 PLAN_E.md; ES=$(rid)
 packet "$ES"

@@ -4,7 +4,8 @@
 # must be UTF-8 (1); the Zen free tier has
 # aliases, its own billing label and a PROVIDER LIMIT line (4); --check compares the installed plugin and dispatcher
 # with their marketplace source (5); wt.py new cuts from the remote default branch, writes no .git/config, leaves
-# nothing behind on failure and git-excludes plan files (6); one Opus reviewer above the low tier (7).
+# nothing behind on failure and git-excludes plan files (6); one Opus reviewer above the low tier (7); --restore never
+# overwrites later work and stays in the checkout its run belongs to (8).
 # Section 3 (the Interfaces: signature check) went with that check in the lean revision (2026-10-23, kit-lean).
 # No network: fake qwen executor and reviewer, a local bare repository as the remote.
 # Run: bash ~/.claude/concord/tests/harmony_test.sh [SECTION ...]   (default all; exit 0 = every selected check passed)
@@ -60,6 +61,7 @@ export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 WT="python3 $T/concord/wt.py"
 R="$T/repo"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -71,7 +73,7 @@ sha(){ shasum -a 256 "$1" | cut -d' ' -f1; }
 gitrepo(){ mkdir -p "$1" && ( cd "$1" && git init -q -b main && git config user.email t@t && git config user.name t ); }
 # mkrepo PHASE_TEXT: a.py, a .gitignore and PLAN_T.md holding "# Plan" and PHASE_TEXT (printf %s, so no escapes)
 mkrepo(){ rm -rf "$R"; gitrepo "$R"; ( cd "$R" && printf 'x = 1\n' > a.py && printf '.claude/\n' > .gitignore &&
-  git add -A && git commit -qm init && printf '# Plan\n%s\n' "$1" > PLAN_T.md ); }
+  git add -A && git commit -qm init && printf '# Plan\n%s\n' "$1" > PLAN_T.md ); approve PLAN_T.md "$R" || exit 1; }
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1; }
 # fc ARGS: concord.py on $R; true when it exits 2 without a Python traceback
 fc(){ $DP "$@" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; [ $RC -eq 2 ] && ! has "Traceback (most recent call last)"; }
@@ -295,6 +297,59 @@ run "echo y >> a.py"; G=$(rid)
 $DP --review "$G" --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "next: Agent subagent_type concord:reviewer-opus55 with prompt" && ! has "reviewer-opus48" \
   && ok "7 the packet hint names concord:reviewer-opus55 only" || { bad "7 hint rc=$RC"; grep next: "$T/out.txt"; }
+fi
+
+if sel 8; then
+echo "== 8 --restore puts back only what the run left, in the checkout the run belongs to"
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); [ -n "$G" ] || { echo "setup failed: run"; cat "$T/out.txt"; exit 1; }
+echo "z = 9" >> "$R/a.py"; EDITED=$(cat "$R/a.py")
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ "$(cat "$R/a.py")" = "$EDITED" ] && has "not restored" && has "a.py" \
+  && ok "8 a hand edit made after the run: --restore leaves a.py as it is and lists it as not restored" || { bad "8 later edit overwritten rc=$RC: $(tr '\n' '|' < "$R/a.py")"; cat "$T/out.txt"; }
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid)
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RC1=$?; A1=$(cat "$R/a.py")
+echo "later = 1" >> "$R/a.py"; A2=$(cat "$R/a.py")
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
+[ $RC1 -eq 0 ] && [ "$A1" = "x = 1" ] && [ "$(cat "$R/a.py")" = "$A2" ] \
+  && ok "8 an untouched run restores a.py; a second --restore after a new edit changes nothing" || { bad "8 second restore: first rc=$RC1 a.py='$A1' then '$(cat "$R/a.py" | tr '\n' '|')'"; cat "$T/out.txt"; }
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid)
+git -C "$R" worktree add -q "$T/wt8" -b wt8 > /dev/null 2>&1; W8A=$(cat "$T/wt8/a.py")
+$DP --restore "$G" --repo "$T/wt8" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && [ "$(cat "$T/wt8/a.py")" = "$W8A" ] && ok "8 a run id of another checkout (the main checkout's run, asked in a worktree): refused (nonzero exit), the worktree untouched" \
+  || { bad "8 foreign run restored rc=$RC"; cat "$T/out.txt"; }
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); rm -f "$T/escape.txt"
+python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m["backed_up"]=m.get("backed_up", [])+["../escape.txt"]; json.dump(m,open(p,"w"))' "$R/.git/concord/$G/meta.json"
+printf 'planted\n' > "$R/.git/concord/$G/escape.txt"
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
+[ ! -e "$T/escape.txt" ] && ! has "Traceback" && ok "8 a backup path that resolves outside the repository is not restored" || { bad "8 backup path outside the repository was written"; cat "$T/out.txt"; }
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); AY=$(cat "$R/a.py")
+{ [ -n "$G" ] && grep -q '^y$' "$R/a.py" && [ ! -x "$R/a.py" ]; } || { echo "setup failed: run that appended y to a non-executable a.py"; exit 1; }
+chmod +x "$R/a.py"
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCX=$?
+[ "$(cat "$R/a.py")" = "$AY" ] && [ -x "$R/a.py" ] && has "a.py: not restored" \
+  && ok "8 a chmod +x after the run (bytes unchanged): --restore leaves a.py as it is, executable, and lists it as not restored" \
+  || { bad "8 later chmod overwritten rc=$RCX: x=$([ -x "$R/a.py" ] && echo yes || echo no) a.py='$(tr '\n' '|' < "$R/a.py")'"; cat "$T/out.txt"; }
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); AY=$(cat "$R/a.py")
+printf '%s\n' "$AY" > "$R/same-bytes.py"   # inside the repository: a link out of it is refused by the path rule, not tested here
+{ [ -n "$G" ] && grep -q '^y$' "$R/a.py" && rm "$R/a.py" && ln -s same-bytes.py "$R/a.py" && [ "$(cat "$R/a.py")" = "$AY" ]; } || { echo "setup failed: a.py replaced by a link to the same bytes"; exit 1; }
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCL=$?
+[ -L "$R/a.py" ] && [ "$(readlink "$R/a.py")" = same-bytes.py ] && [ "$(cat "$R/same-bytes.py")" = "$AY" ] && has "a.py: not restored" && ! has "resolves outside" \
+  && ok "8 a.py replaced by a symlink to a file with the same bytes: --restore leaves the link and its target unchanged and lists a.py" \
+  || { bad "8 symlink to identical bytes written through rc=$RCL: link=$([ -L "$R/a.py" ] && echo yes || echo no) target='$(tr '\n' '|' < "$R/same-bytes.py")'"; cat "$T/out.txt"; }
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); A0=$(cat "$R/a.py")
+python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m.pop("end_hashes", None); json.dump(m,open(p,"w"))' "$R/.git/concord/$G/meta.json"
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
+[ "$(cat "$R/a.py")" = "$A0" ] && has "a.py: not restored (the run's end state is not recorded (the run did not finish, or a version before 3.0 ran it))" \
+  && ok "8 a run with no recorded end state: a.py is left alone, and the message says the run did not finish or ran before 3.0" || { bad "8 no end state message"; cat "$T/out.txt"; }
+mkrepo "${BASIC/Files: a.py/Files: a.py, b.py, local.cfg}"
+( cd "$R" && printf 'keep = 1\n' > b.py && printf 'local.cfg\n' >> .gitignore && printf 'secret = 1\n' > local.cfg && git add b.py .gitignore && git commit -qm more ) \
+  || { echo "setup failed: tracked b.py and ignored local.cfg"; exit 1; }
+run "echo y >> a.py; rm b.py local.cfg"; G=$(rid)
+{ [ -n "$G" ] && [ ! -e "$R/b.py" ] && [ ! -e "$R/local.cfg" ]; } || { echo "setup failed: a run that deleted b.py and local.cfg"; cat "$T/out.txt"; exit 1; }
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCD=$?
+[ $RCD -eq 0 ] && [ "$(cat "$R/b.py" 2>/dev/null)" = "keep = 1" ] && [ "$(cat "$R/local.cfg" 2>/dev/null)" = "secret = 1" ] && has "restored b.py" && has "restored local.cfg" \
+  && ok "8 a tracked file and an ignored in-scope file the run deleted and nobody recreated: --restore brings both back from the backup" \
+  || { bad "8 deleted files not restored rc=$RCD: b.py=$([ -e "$R/b.py" ] && echo present || echo absent) local.cfg=$([ -e "$R/local.cfg" ] && echo present || echo absent)"; cat "$T/out.txt"; }
 fi
 
 echo "passed $pass, failed $fail"
