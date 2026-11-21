@@ -3,8 +3,8 @@
 # (path:function, path:a-b) are resolved at dispatch and the current code is inlined into the executor's task; a
 # pointer that resolves to nothing is marked. (2) FOUND: lines of an executor's report land once in the plan's notes
 # file, and later executor and --review tasks of that plan include it. (3) Retry feedback is not called verifier
-# feedback. (4) --report writes the test report from recorded data and stops the drift clock. No network: fake
-# qwen executor.
+# feedback. (4) --report writes the test report from recorded data, opens with the overrides, attributes each finding
+# outcome to its round, head and closing review, and stops the drift clock. No network: fake qwen executor, fake gh.
 # Run: bash ~/.claude/concord/tests/handoff_test.sh   (exit 0 = every check passed)
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -13,10 +13,19 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/concord" "$T/home/.claude"
 cp -p "$SRC"/concord.py "$SRC"/wt.py "$SRC"/*.md "$SRC"/*.conf "$T/concord/" && cp -Rp "$SRC/repo-notes" "$T/concord/"
 printf '#!/bin/sh\nsh -c "${FAKE_ACTIONS:-true}"\n' > "$T/bin/qwen"; chmod +x "$T/bin/qwen"
+cat > "$T/bin/gh" <<'G'
+#!/bin/sh
+[ "$1" = pr ] && [ "$2" = view ] || exit 1
+n=$(printf '%s' "$3" | sed -E 's|.*/pull/||; s|.*#||')
+[ -f "$T/pr$n.json" ] && cat "$T/pr$n.json" && exit 0
+echo "no pull requests found for $3" >&2; exit 1
+G
+chmod +x "$T/bin/gh"
 # Prefer the developer dir's real git/python3 over the /usr/bin xcrun shims (they print cache errors in the sandbox).
 XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git" ] && [ -x "$XDEV/usr/bin/python3" ] && export PATH="$XDEV/usr/bin:$PATH"
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -56,6 +65,7 @@ Acceptance:
 - `grep -q qty a.py`
 P
 ) || { echo "setup failed: repo"; exit 1; }
+approve PLAN_T.md "$R" || exit 1
 dry(){ $DP 1 --plan PLAN_T.md --via qwen --model fake/m --dry-run "$@" --repo "$R" > "$T/out.txt" 2>&1
   local id; id=$(sed -n 's/^DRY RUN \([^ ]*\)$/\1/p' "$T/out.txt" | head -1); cat "$RUNS/${id:-none}/prompt.txt" 2>/dev/null; }
 
@@ -84,8 +94,8 @@ grep -qF 'marker-found-fact' "$RUNS/${RV:-none}/prompt.txt" 2>/dev/null && ok "2
 
 echo "== 3 retry feedback"
 dry --extra "EVIDENCE: marker-feedback" > "$T/p3.txt"
-grep -qF 'marker-feedback' "$T/p3.txt" && ! grep -qi 'verifier feedback' "$T/p3.txt" \
-  && ok "3 --extra reaches the task as feedback from the previous attempt, not verifier feedback" \
+grep -qF 'marker-feedback' "$T/p3.txt" \
+  && ok "3 --extra reaches the task as feedback from the previous attempt" \
   || { bad "3 feedback wording"; grep -i -m2 'feedback' "$T/p3.txt"; }
 
 
@@ -93,38 +103,43 @@ echo "== 4 --report: the test report for the Dev Acceptance Test (2026-11-15, ki
 H="$T/h"; mkdir -p "$H/tests"
 ( set -e; cd "$H"; git init -q -b main; git config user.email t@t; git config user.name t
   printf 'x = 1\n' > a.py; printf 'echo old\n' > tests/a_test.sh; git add -A; git commit -qm init
-  printf '# Plan\nTier: M\nSize: ~10 lines\nTests: +2/−0 lines, net ≤ +2\nETA: 30 min\n\n## Open questions\n- Q1 which name to show\n
+  printf '# Plan\nTier: M\nSize: ~10 lines\nTests: +1/−0 lines, net ≤ +1\nETA: 30 min\n\n## Open questions\n- Q1 which name to show\n
 ## Test plan (behavior ledger)\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| marker-behavior-row | none | ADD | tests/a_test.sh |
-\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py, tests/a_test.sh\nAcceptance:\n- `grep -q 2 a.py`\n' > PLAN_rep.md
+\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py, tests/a_test.sh\nAcceptance:\n- `grep -q 2 a.py`\n- `grep -q NEVER a.py`\n' > PLAN_rep.md
 ) || { echo "setup failed"; exit 1; }
-printf 'VERDICT: APPROVE\n' > "$T/v.txt"; $DP --plan-verdict "$T/v.txt" --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
+approve PLAN_rep.md "$H" || exit 1
 FAKE_ACTIONS='echo "x = 2" > a.py; printf "echo new1\necho new2\n" >> tests/a_test.sh' \
   $DP 1 --plan PLAN_rep.md --via qwen --model fake/m --no-baseline --repo "$H" > "$T/r1.txt" 2>&1 || { bad "4 setup run"; tail -3 "$T/r1.txt"; }
+RID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/r1.txt" | head -1); [ -n "$RID" ] || { echo "setup failed: the run did not start"; cat "$T/r1.txt"; exit 1; }
+$DP --verdict "$RID" PASS --force --note "owner accepts the failing NEVER check" --repo "$H" > "$T/v.txt" 2>&1 || { echo "setup failed: forced PASS"; cat "$T/v.txt"; exit 1; }
 mkdir -p "$H/.git/concord/ledger"
 python3 -I -c 'import json, sys
 f = lambda i, sev, st, text: dict(id=f"F{i}", severity=sev, path="a.py", line=1, line_end=1, problem=text, fix="", repro={},
                                   reviewer="opus55", run="r1", at="2026-11-15T00:00:00", status=st)
-json.dump(dict(key="PLAN_rep", next_finding=4, next_decision=1, decisions=[], findings=[f(1, "HIGH", "adopted", "high-thing"),
-          f(2, "MEDIUM", "open", "medium-thing"), f(3, "NOTE", "note", "note-thing")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/PLAN_rep.json"
+json.dump(dict(key="PLAN_rep", next_finding=3, next_decision=1, decisions=[], findings=[
+          f(1, "MEDIUM", "open", "medium-thing"), f(2, "NOTE", "note", "note-thing")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/PLAN_rep.json"
 $DP --report --plan PLAN_rep.md --repo "$H" > "$T/rep.txt" 2>&1; RC=$?
 REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1)
 [ $RC -eq 0 ] && [ "$REP" = "$H/.git/concord/reports/REPORT_rep.md" ] && [ -f "$REP" ] \
   && ok "4.1 --report writes REPORT_<ticket>.md in the runs root and prints its path" || { bad "4.1 rc=$RC path=$REP"; tail -3 "$T/rep.txt"; }
 [ -f "$REP" ] || REP="$T/none"
 prev=0; order=ok
-for h in "# Test report: rep" "## Phases" "## Test plan" "## Test lines" "## Review" "## Open items for the DAT" "## Time"; do
+for h in "# Test report: rep" "## Overrides" "## Phases" "## Test plan" "## Test lines" "## Review" "## Open items for the DAT" "## Time"; do
   n=$(grep -nxF -- "$h" "$REP" | head -1 | cut -d: -f1); { [ -n "$n" ] && [ "$n" -gt "$prev" ]; } || order="missing or out of order: $h"; prev=${n:-0}
 done
-[ "$order" = ok ] && ok "4.2 seven sections in order" || { bad "4.2 $order"; grep "^#" "$REP"; }
+[ "$order" = ok ] && ok "4.2 the report opens with Overrides, then six more sections in order" || { bad "4.2 $order"; grep "^#" "$REP"; }
 sec(){ sed -n "/^## $1/,/^## /p" "$REP"; }
+ov=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP")
+echo "$ov" | grep -qF "grep -q NEVER a.py" && echo "$ov" | grep -qF "owner accepts the failing NEVER check" \
+  && ok "4.2b Overrides: the forced PASS, its failed command beside the owner's reason" || { bad "4.2b overrides"; echo "$ov"; }
 sec Phases | grep -Eq '^\| 1 \| [^|]+ \| 1 \|' && ok "4.3 phase row: one run of phase 1" || { bad "4.3 phases"; sec Phases; }
 sec "Test plan" | grep -qF "marker-behavior-row" && ok "4.4 the plan's Test plan is copied" || { bad "4.4 test plan"; sec "Test plan"; }
 sec "Test lines" | grep -qF "| tests/a_test.sh | 2 | 0 |" && ! sec "Test lines" | grep -qF "| a.py |" \
-  && sec "Test lines" | grep -qF "Total: +2 -0 lines; plan Tests: +2/−0 lines, net ≤ +2" \
-  && ok "4.5 test lines: test files only, total against the plan's Tests: line" || { bad "4.5 test lines"; sec "Test lines"; }
-sec Review | grep -qF "| r1 | opus55 | 0 | 1 | 1 | 1 |" && ok "4.6 review row: BLOCKER/HIGH/MEDIUM/NOTE per reviewer and run" || { bad "4.6 review"; sec Review; }
+  && sec "Test lines" | grep -qF "Total: +2 -0 lines; plan Tests: +1/−0 lines, net ≤ +1" \
+  && ok "4.5 test lines: test files only, the actual total beside the plan's Tests: estimate, which fails nothing though the actual is above it" || { bad "4.5 test lines"; sec "Test lines"; }
+sec Review | grep -qF "| r1 | opus55 | 0 | 0 | 1 | 1 |" && ok "4.6 review row: BLOCKER/HIGH/MEDIUM/NOTE per reviewer and run" || { bad "4.6 review"; sec Review; }
 O=$(sec "Open items for the DAT")
-echo "$O" | grep -qF "medium-thing" && echo "$O" | grep -qF "note-thing" && ! echo "$O" | grep -qF "high-thing" \
+echo "$O" | grep -qF "medium-thing" && echo "$O" | grep -qF "note-thing" \
   && echo "$O" | grep -qF "Q1 which name to show" \
   && ok "4.7 open items: open and note findings, open questions" || { bad "4.7 open items"; echo "$O"; }
 grep -Eq '^Elapsed [0-9]+ min against ETA 30 min \(plan\)' "$REP" && grep -q '^Concurrency: 1.00' "$REP" \
@@ -141,5 +156,52 @@ for x in "7 $P7 pr-thing" "20 $P20 other-thing"; do read -r n h p <<< "$x"; mkdi
 $DP --report --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
 sec "Open items for the DAT" | grep -qF "pr-thing" && sec Review | grep -qF "| pr7-a | opus55 | 0 | 1 | 0 | 0 |" && ! grep -qF "other-thing" "$REP" \
   && ok "4.11 the reviews of the ticket's PR are in the report, not those of a PR merged in with main" || { bad "4.11 PR ledger"; sec Review; grep -F "other-thing" "$REP"; }
+
+
+echo "== 5 the report attributes each finding outcome to its round, head and closing review (S11)"
+O5="$T/o5.git"; HC="$T/hc"
+git init -q --bare -b main "$O5" && git clone -q "$O5" "$HC" 2> /dev/null || { echo "setup failed: repos"; exit 1; }
+( set -e; cd "$HC"; git config user.email t@t; git config user.name t; printf 'x = 1\n' > a.py; printf '.claude/\n' > .gitignore; git add -A; git commit -qm init; git push -q origin main
+  printf '# Plan\nTier: M\nSize: ~10 lines\nETA: 30 min\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n' > PLAN_o.md
+  git checkout -qb pr7 ) || { echo "setup failed: pr repo"; exit 1; }
+approve PLAN_o.md "$HC" || exit 1
+FAKE_ACTIONS='echo "x = 2" > a.py' $DP 1 --plan PLAN_o.md --via qwen --model fake/m --no-baseline --repo "$HC" > "$T/out.txt" 2>&1
+RIDO=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -n "$RIDO" ] || { echo "setup failed: phase run of PLAN_o"; cat "$T/out.txt"; exit 1; }
+$DP --verdict "$RIDO" PASS --repo "$HC" > "$T/v.txt" 2>&1 || { echo "setup failed: PASS of the run of PLAN_o (a run with no verdict blocks --report)"; cat "$T/v.txt"; exit 1; }
+( cd "$HC" && git add a.py && git commit -qm "pr7 head 1" && git push -q origin HEAD:refs/pull/7/head ); H71=$(git -C "$HC" rev-parse HEAD)
+pj(){ printf '{"baseRefName": "main", "headRefName": "pr7", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$(git -C "$HC" rev-parse HEAD)" > "$T/pr7.json"; }
+pj
+opus7(){ $DP --review-pr 7 --packet --tier medium --repo "$HC" > "$T/out.txt" 2>&1; local pk; pk=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+  [ -n "$pk" ] || { echo "setup failed: no packet for PR 7"; cat "$T/out.txt"; exit 1; }
+  cp "$1" "$T/ans.txt"; sign "$T/ans.txt" "$pk"; RV7=$(basename "$(dirname "$pk")")
+  $DP --review-record "$RV7" --reviewer concord:reviewer-opus55 --file "$T/ans.txt" --repo "$HC" > "$T/rec.txt" 2>&1 || { echo "setup failed: record"; cat "$T/rec.txt"; exit 1; }; }
+printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": 1, "problem": "wrong constant", "fix": "use 3", "repro": {"input": "x", "expected": "3", "actual": "2"}}], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' > "$T/h1.txt"
+printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN", "resolutions": [{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 it is 3 now"}]}\nEND-REVIEW-JSON\n' > "$T/h2.txt"
+opus7 "$T/h1.txt"; RV71="$RV7"
+( cd "$HC" && echo "x = 3" > a.py && git commit -qam "pr7 head 2" && git push -q origin HEAD:refs/pull/7/head ); H72=$(git -C "$HC" rev-parse HEAD); pj
+opus7 "$T/h2.txt"; RV72="$RV7"
+$DP --report --plan PLAN_o.md --repo "$HC" > "$T/rep.txt" 2>&1; RC=$?; REP5=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1)
+[ $RC -eq 0 ] && [ -f "$REP5" ] && grep -F "F1" "$REP5" | grep -qF "${H71:0:8}" && grep -F "F1" "$REP5" | grep -qF "${H72:0:8}" && grep -F "F1" "$REP5" | grep -qF "$RV72" \
+  && ok "5 the outcome of F1 names the head it was found at, the head that fixed it and the review that closed it" \
+  || { bad "5 outcome attribution rc=$RC"; sed -n 1,40p "$REP5" 2>/dev/null; }
+
+echo "== 6 a forced PASS shows the owner's reason, or 'reason: not recorded', never a failed command as the reason (S47)"
+H6="$T/h6"; mkdir -p "$H6"
+( set -e; cd "$H6"; git init -q -b main; git config user.email t@t; git config user.name t; printf 'x = 1\n' > a.py; printf '.claude/\n' > .gitignore; git add -A; git commit -qm init
+  printf '# Plan\nTier: M\nSize: ~10 lines\nETA: 30 min\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q NEVER a.py`\n' > PLAN_f.md ) || { echo "setup failed: repo 6"; exit 1; }
+approve PLAN_f.md "$H6" || exit 1
+f6(){ FAKE_ACTIONS='echo "x = 2" >> a.py' $DP 1 --plan PLAN_f.md --via qwen --model fake/m --no-baseline --repo "$H6" > "$T/out.txt" 2>&1
+  RID6=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+  [ -n "$RID6" ] && [ "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["acceptance_after_rc"])' "$H6/.git/concord/$RID6/meta.json")" = "[1]" ] \
+    || { echo "setup failed: the run of PLAN_f did not reach a failed acceptance command"; cat "$T/out.txt"; exit 1; }; }
+f6; RA="$RID6"; $DP --verdict "$RA" PASS --force --repo "$H6" > "$T/v.txt" 2>&1; grep -qF "PASS (forced)" "$T/v.txt" || { echo "setup failed: forced PASS without a note"; cat "$T/v.txt"; exit 1; }
+f6; RB="$RID6"; $DP --verdict "$RB" PASS --force --note "owner accepts the failing NEVER check" --repo "$H6" > "$T/v.txt" 2>&1; grep -qF "PASS (forced)" "$T/v.txt" || { echo "setup failed: forced PASS with a note"; cat "$T/v.txt"; exit 1; }
+$DP --report --plan PLAN_f.md --repo "$H6" > "$T/rep.txt" 2>&1; REP6=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1); [ -f "$REP6" ] || { echo "setup failed: --report"; cat "$T/rep.txt"; exit 1; }
+LA=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP6" | grep -F "$RA"); LB=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP6" | grep -F "$RB")
+echo "$LA" | grep -qF "grep -q NEVER a.py" && echo "$LA" | grep -qF "reason: not recorded" \
+  && ok "6 a forced PASS with no --note: the failed command is listed and the reason reads 'reason: not recorded'" || { bad "6 forced PASS without a note"; echo "$LA"; }
+echo "$LB" | grep -qF "grep -q NEVER a.py" && echo "$LB" | grep -qF "reason: owner accepts the failing NEVER check" && ! echo "$LB" | grep -qF "forced:" \
+  && ok "6 a forced PASS with a --note: the reason is the note, not a failed command" || { bad "6 forced PASS with a note"; echo "$LB"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

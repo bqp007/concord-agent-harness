@@ -2,7 +2,7 @@
 
 Tier: <S|M|L>
 Size: ~<N> lines
-Tests: +<A>/−<D> lines, net ≤ <N>
+Tests: +<A>/−<D> lines
 Done when: <the result and the command or number showing it>
 Ship: <PR to <branch>, or no PR and why>
 
@@ -63,20 +63,22 @@ ETA: <N> min, lands at <hh:mm> local
 - <settled decisions, what the investigation learned>
 
 <!--
-- Passes and their diagram: `/concord:plan-then-delegate` steps 3 and 7. The planner writes `Size:` and `After:`, never
+- The schedule (`## Passes`) and its diagram: `/concord:plan-then-delegate` steps 3 and 7. The planner writes `Size:` and `After:`, never
   minutes; `--estimate` turns them and the run ledger into minutes. `After:` names only a real wait, with its reason.
+- Tier: the planner's judgment of the plan's size, which sets the estimate's final revision and turns on the drift clock;
+  no line count decides it.
 - Risk (default medium) picks the reviewer: low = approve-only flash, else concord:reviewer-opus55. High: untrusted
   input, scores or thresholds, security, money, data deletion or concurrency.
-- Files: every changed file, exact paths, comma-separated; OpenCode refuses edits outside them, and the run lock lets
-  phases with disjoint Files run in one checkout at once. Only planner phases list the repo's `Cases:` file.
+- Files: every changed file, exact paths, comma-separated; scope is enforced during the run only on OpenCode, and every
+  run's report checks it (OUT OF SCOPE); the run lock lets phases with disjoint Files run in one checkout at once. Only planner phases list the repo's `Cases:` file.
 - Notes: the dispatcher inlines each pointer's current code into the executor's task, resolving functions by name, as
-  line numbers drift between passes.
+  line numbers drift between runs.
 - Acceptance: fast, deterministic offline commands in backticks that check behaviour, not wiring, tell right from
   plausible wrong code, and fail on the untouched code (red run) unless marked `(characterization)`. A
   behaviour-preserving phase sets `Baseline: pass`, optionally `Characterize: <command>` (output diffed before and
   after).
-- Test plan: one row per touched behavior; ADD only when no test covers it; a finding fix adds at most one row; the
-  rows fit the `Tests:` line. Home names the test file: an executor phase that changes a Home file its Files: does
+- Test plan: one row per touched behavior; ADD only when no test covers it. `Tests:` is a planning estimate: the report
+  prints it beside the actual test lines and it decides nothing. Home names the test file: an executor phase that changes a Home file its Files: does
   not list cannot pass (ACCEPTANCE FILES CHANGED, exit 7).
 - One phase: about 5 files and 7 steps at most; Notes, Interfaces, Decisions, Out of scope only when needed.
 -->

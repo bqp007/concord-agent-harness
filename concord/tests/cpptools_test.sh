@@ -27,6 +27,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 R="$T/repo"
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -44,7 +45,7 @@ gitrepo(){ mkdir -p "$1" && ( cd "$1" && git init -q -b main && git config user.
 newrepo(){ rm -rf "$R"; gitrepo "$R"; ( cd "$R" && mkdir -p tests
   printf 'x = 1\n' > a.py; printf 'assert True\n' > tests/test_a.py; printf '.claude/\n' > .gitignore
   git add -A && git commit -qm init
-  printf "# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\n$1" > PLAN_T.md ); }
+  printf "# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\n$1" > PLAN_T.md ); approve PLAN_T.md "$R" || exit 1; }
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 # mut FILE [ARGS]: --mutate run $MR with the mutants listed in FILE; the isolated copy goes under $T/tmp
 mut(){ TMPDIR="$T/tmp" $DP --mutate "$MR" --mutants "$1" "${@:2}" --repo "$R" > "$T/out.txt" 2>&1; }
@@ -458,6 +459,7 @@ Files: src/calc.h
 Acceptance:
 - `true`
 P
+approve PLAN_C.md "$C" || exit 1
 # Like a real executor, the fake one builds after its edit; the touch stands for build files of a test target. make
 # compares mtimes to the second here, so the edit waits one second after the red run's build (a real executor does).
 FAKE_ACTIONS="sleep 1; cp '$T/calc_impl.cpp' src/calc.cpp && cmake --build build -j4 > /dev/null 2>&1; touch build/CMakeFiles/calc_test.dir/flags.make" \

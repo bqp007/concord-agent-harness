@@ -18,6 +18,7 @@ XDEV="$(xcode-select -p 2>/dev/null)"; [ -n "$XDEV" ] && [ -x "$XDEV/usr/bin/git
 export PATH="$T/bin:$PATH" HOME="$T/home"
 DP="python3 $T/concord/concord.py"
 R="$T/repo"; export R
+. "$(dirname "$0")/lib.sh"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ok   $1"; }
 bad(){ fail=$((fail+1)); echo "  FAIL $1"; }
@@ -30,7 +31,7 @@ newrepo(){ rm -rf "$R"; mkdir -p "$R/tests"; (
   printf 'x = 1\n' > a.py; printf 'assert True\n' > tests/test_a.py; printf '.claude/\n' > .gitignore
   git add -A && git commit -qm init
   printf "# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\n$1" > PLAN_T.md
-); }
+); approve PLAN_T.md "$R" || exit 1; }
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 BASE='Files: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py`%s\n'
 sha(){ shasum -a 256 "$1" | cut -d" " -f1; }

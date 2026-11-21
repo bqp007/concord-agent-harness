@@ -35,6 +35,7 @@ mkdir -p "$W/concord" "$W/bin" "$W/home/.claude" || die "cannot set up $W"
 cp -p "$SRC/concord/concord.py" "$SRC/concord/wt.py" "$SRC"/concord/*.md "$SRC"/concord/*.conf "$W/concord/" ||
   die "cannot copy the dispatcher into $W"
 cp -Rp "$SRC/concord/repo-notes" "$W/concord/" || die "cannot copy repo-notes into $W"
+printf 'qwen.env = FAKE_* FIXED\n' >> "$W/concord/executors.conf" || die "cannot extend the demo's executor environment"   # the scripted executor reads them
 cat > "$W/bin/qwen" <<'Q'
 #!/bin/sh
 if [ -n "${FAKE_ACTIONS:-}" ]; then sh -c "$FAKE_ACTIONS"; exit 0; fi
@@ -89,6 +90,12 @@ need() { local rc=$?; [ "$rc" = 0 ] || fail "$1 failed (exit $rc)" "$rc"; }
 echo "3. Lint: dry-run the phase pre-flight so the questions are visible before spending a token."
 out=$(D --lint 2 --dry-run --via qwen --model fake/m 2>&1); need "the lint"
 printf '%s\n' "$out"
+# The gate wants a plan-verifier APPROVE of this plan text; no model here, so a scripted answer quotes the plan read.
+read=$(printf '%s\n' "$out" | sed -n 's/^PLAN-READ: //p' | head -1)
+[ -f "$read" ] || fail "the lint wrote no plan read"
+printf 'VERDICT: APPROVE\nPLAN-HASH: %s\n' "$(basename "$read" .md)" > "$W/verifier-answer.txt"
+D --plan-verdict "$W/verifier-answer.txt" > /dev/null; need "recording the scripted plan-verifier answer"
+echo "   a scripted plan-verifier APPROVE is recorded for this plan text (the real one is the plan-verifier agent)."
 
 # 4. Attempt 1: the executor fixes cart.py but also edits README.md, which Files: does not allow.
 echo "4. Attempt 1: the executor fixes cart.py and edits README.md, outside Files:."

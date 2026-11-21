@@ -8,7 +8,7 @@ Concord grew out of reading other workflows and papers, keeping what held up in 
 
 | | Where a human decides | Evidence a run must leave | Who reviews | Enforced by code, not by a prompt |
 |---|---|---|---|---|
-| Concord | approves every plan; commits | the dispatcher's report (scope, red run, acceptance re-run) and a verdict with a cause | a fresh agent, once, at the change's risk tier | red run, acceptance-file hashes, attempt cap, PR review tier, billing guard; edit scope and no web on OpenCode |
+| Concord | approves every plan; commits | the dispatcher's report (scope, red run, acceptance re-run) and a verdict with a cause; a PASS only on the expected acceptance results | a fresh agent at the change's risk tier, then a cheap delta review of each fix | plan approval bound to the text the verifier read, red run, acceptance results and file hashes, PR review tier and finding closure, billing guard; edit scope and no web on OpenCode |
 | ECC | `/plan` asks for approval before code; the orchestration pipeline adds a gate before commit (both prompt text) | test-first and verification skills write reports quoting real commands | a separate reviewer agent; cross-provider and adversarial reviews on request | hooks that block `--no-verify`, protect config files and gate a first edit |
 | agentic-sdlc | three sign-offs (advisory); git commands ask first | gate reports quoting command, exit code and runner summary | a separate reviewer agent on the session's model | a hook that asks before commit, tag, push and publish (it fails open by design); strike counters in a state script |
 | agent-protocols | none required | checklists inside the skills | an optional persona | nothing |
@@ -19,7 +19,7 @@ Concord grew out of reading other workflows and papers, keeping what held up in 
 
 ## Claude Code, the host
 
-Concord runs inside Claude Code and leans on its real enforcement: subagents for reviewers with a fresh context, hooks (through the hookify plugin) for the four rules that block destructive git commands, recursive deletes outside a scratch folder and writes to a shared `PLAN.md`, and git worktrees for one ticket per checkout. What Claude Code does not provide is a lifecycle around a change: no plan format, evidence record, mandatory review or ledger. Concord fills that gap.
+Concord runs inside Claude Code and leans on its real enforcement: subagents for reviewers with a fresh context, hooks (through the hookify plugin) for four reminder rules that catch common spellings of destructive git commands, recursive deletes outside a scratch folder and writes to a shared `PLAN.md`, and git worktrees for one ticket per checkout. What Claude Code does not provide is a lifecycle around a change: no plan format, evidence record, mandatory review or ledger. Concord fills that gap.
 
 ## Plugins for the same host
 
@@ -29,7 +29,7 @@ agentic-sdlc drives a seven-phase lifecycle with 35 subagents, persisted state a
 
 ## Multi-agent role play
 
-MetaGPT turns a one-line requirement into a repository through a chain of typed documents (requirements, design, tasks, code, tests) written by agents playing product manager, architect, project manager, engineer and QA engineer. ChatDev runs a chat chain of a CEO, a CTO, a programmer, a reviewer and a tester. Concord keeps MetaGPT's typed hand-off, since its plan file names exact files, interfaces and acceptance commands, and drops the personas. Its four roles differ in what they may do, not in what they are told they are: the planner plans and verifies, the executor edits only its phase's files, the reviewer only reads, the owner approves and commits. In both role-play systems the author or the same model reviews the work; in Concord the reviewer is always an agent that did not write the code.
+MetaGPT turns a one-line requirement into a repository through a chain of typed documents (requirements, design, tasks, code, tests) written by agents playing product manager, architect, project manager, engineer and QA engineer. ChatDev runs a chat chain of a CEO, a CTO, a programmer, a reviewer and a tester. Concord keeps MetaGPT's typed hand-off, since its plan file names exact files, interfaces and acceptance commands, and drops the personas. Its four roles differ in what they may do, not in what they are told they are: the planner plans and verifies, the executor edits only its phase's files, the reviewer only reads, the owner approves and commits. In both role-play systems the author or the same model reviews the work; in Concord the reviewer is always a fresh agent that did not write the code, though at the low tier it may run on the same cheap model as the executor.
 
 ## Harness evolution and review research
 
@@ -56,7 +56,7 @@ Harness² from Google Research evolves a harness for a frozen executor model and
 - **Breadth and one-step install.** ECC and agentic-sdlc cover many more languages and stages. Concord covers one loop, and installs in two steps: a plugin for the commands and agents, which adds about 500 tokens to every session (ECC's catalog added roughly 33,000 on our setup), and a script for the dispatcher.
 - **Enforcement outside OpenCode's edit tools.** Claude Code's permission rules, hooks and sandbox act at the tool layer; Concord's scope check covers OpenCode's edit tools, not shell redirection, so the backup taken before every run is the real safety net.
 - **A controlled evaluation.** Harness², MILO and Harmony Harness report benchmark results over repeated runs. Concord's numbers come from one developer's ten days, and the same person assigned the failure causes.
-- **The rest of the governance model.** A machine-checked contract registry, path reservations before parallel runs, and evidence bound to a hash of the whole checked state; today only the acceptance files are hashed.
+- **The rest of the governance model.** A machine-checked contract registry, path reservations before parallel runs, and evidence bound to a hash of the whole checked state; today only the plan text and the acceptance files are hashed.
 
 ## How it grew
 
