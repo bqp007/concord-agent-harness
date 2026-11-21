@@ -9,7 +9,11 @@
 # 4th head of a PR is refused (exit 8) unless --user-approved. (9) Reviews recorded at the same time lose no finding.
 # (10) A finding belongs to the PR: a fix on a sibling branch closes nothing, a force-push or a moved merge base keeps it
 # open (carried), a finding whose file left the diff is resolved by a review of the other files, and a clause FAIL of one
-# file group is neither listed nor resolved by a review of another group.
+# file group is neither listed nor resolved by a review of another group. (11) A run counts for the files whose content
+# after the run is in one of the PR's own commits, or feeds a run that counts; its branch name plays no part. (12) PR
+# records belong to one repository. (13) Status and packets stop (exit 75) while gh's head and the pull ref differ.
+# (14) A finding path names a PR file (an a/ or b/ before one is dropped); any other path is resolved only by a review of
+# every file. (15) A PR packet names a read-only copy of the reviewed head as the repository to read.
 # No network: fake gh, fake qwen reviewer and executor, a local bare repository as the remote.
 # Run: bash ~/.claude/concord/tests/prgate_test.sh   (exit 0 = every check passed)
 set -u
@@ -137,6 +141,9 @@ case "$S1" in *"UNREVIEWED"*"b.py"*) [ $RC1 -eq 1 ] && has "REVIEWED at" && [ $R
 newpr 63 m.py 'm = 63'
 opus 63 medium concord:reviewer-opus55 "$T/clean.txt"; st 63
 has "REVIEWED at" && ! has "UNREVIEWED" && [ $RC -eq 0 ] && ok "3 a clean opus55 review of every file: REVIEWED (exit 0)" || { bad "3 reviewed rc=$RC"; tail -3 "$T/out.txt"; }
+TREE=$(sed -n 's/^REPOSITORY (read-only, head [0-9a-f]*): //p' "$PK" | head -1)
+[ -n "$TREE" ] && [ "$(cat "$TREE/m.py" 2>/dev/null)" = "m = 63" ] && [ "$(cat "$TREE/README" 2>/dev/null)" = "readme" ] \
+  && ok "3 the packet names a read-only copy of the reviewed head as the repository to read" || bad "3 no copy of the head named in the packet: '${TREE:-none}'"
 opus 63 medium concord:reviewer-opus55 "$T/high_a.txt"; st 63
 has "FINDINGS OPEN" && [ $RC -eq 1 ] && ok "3 a later answer of the same head with a HIGH: FINDINGS OPEN (exit 1)" || { bad "3 open rc=$RC"; tail -3 "$T/out.txt"; }
 
@@ -150,7 +157,17 @@ git -C "$C" remote set-url origin https://github.com/other/repo.git && git -C "$
   && git -C "$C" config "url.$O.insteadOf" https://github.com/me/kit.git || { echo "setup failed: remotes"; exit 1; }
 $DP --review-pr me/kit#64 --via qwen --model fake/m --tier medium --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "PR REVIEW" && ok "4 owner/repo#N fetches from the remote that names it, not origin" || { bad "4 any remote rc=$RC"; tail -3 "$T/out.txt"; }
-git -C "$C" remote set-url origin "$O"; git -C "$C" config --unset "url.$O.insteadOf"; git -C "$C" remote remove harness
+git -C "$C" config --add "url.$O.insteadOf" https://github.com/other/repo.git
+st 64; S64O=$(head -1 "$T/out.txt"); $DP --pr-status me/kit#64 --repo "$C" > "$T/out.txt" 2>&1
+case "$S64O" in *"0 review(s) recorded"*) has "1 review(s) recorded" \
+  && ok "4 PR 64 of other/repo (origin) lists none of the reviews of me/kit#64, which lists its own" || bad "4 me/kit#64 lost its review: $(head -1 "$T/out.txt")";;
+  *) bad "4 PR 64 of other/repo lists the review of me/kit#64: $S64O";; esac
+newpr 65 s.py 's = 65'      # a ledger that 3.0.0 wrote under pr65 holds an open HIGH of me/kit#65
+python3 -I -c 'import json,sys; json.dump({"key": "pr65", "next_finding": 2, "next_decision": 1, "decisions": [], "findings": [{"id": "F1", "severity": "HIGH", "status": "open", "path": "s.py", "line": 1, "problem": "kept from 3.0.0", "head": sys.argv[2], "scope": ["s.py"], "run": "pr65-old", "reviewer": "opus55"}]}, open(sys.argv[1], "w"))' "$RUNS/ledger/pr65.json" "$(hd 65)"
+$DP --pr-status me/kit#65 --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "4 an open finding of a 3.0.0 ledger (pr65) stays open for me/kit#65 (exit 1)" \
+  || bad "4 the finding of the 3.0.0 ledger was lost, rc=$RC: $(sed -n 2p "$T/out.txt")"
+git -C "$C" remote set-url origin "$O"; git -C "$C" config --unset-all "url.$O.insteadOf"; git -C "$C" remote remove harness
 
 echo "== 5 a clause marked FAIL is an open finding until a review of a later head resolves it"
 newpr 71 a.py 'a = 71'
@@ -221,12 +238,31 @@ grep -q '^DELEGATE RESULT' "$T/out.txt" || { echo "setup failed: run 92"; cat "$
 prjson 92
 $DP --review-pr 92 --packet --tier medium --files core.py --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 after a rebase rewrites the commit a Risk: high run started from, core.py still needs high: --tier medium is refused" || { bad "8 a rebase dropped the Risk: high run rc=$RC"; tail -2 "$T/out.txt"; }
-runpr 93 high core.py "echo 'c = 93' > core.py" side93
+# a Risk: high run and then a Risk: low run edit core.py before one commit: the high run's result feeds the low run
+for r in 631:high 632:low; do
+  printf '# Plan\n## Phase 1 - run %s\nExecutor: deepseek-flash\nRisk: %s\nPurpose: PLAN-MARK-%s\nFiles: core.py\nAcceptance:\n- `true`\n' "${r%:*}" "${r#*:}" "${r%:*}" > "$C/.claude/PLAN_${r%:*}.md"
+done
+( set -e; cd "$C"; git checkout -q main; git checkout -qb pr631 ) || { echo "setup failed: pr631"; exit 1; }
+approve ".claude/PLAN_631.md" "$C" && approve ".claude/PLAN_632.md" "$C" || exit 1
+for r in 631 632; do
+  FAKE_ACTIONS="echo 'c = $r' > core.py" $DP 1 --plan ".claude/PLAN_$r.md" --via qwen --model fake/m --no-baseline --repo "$C" > "$T/out.txt" 2>&1
+  grep -q '^DELEGATE RESULT' "$T/out.txt" || { echo "setup failed: run $r"; cat "$T/out.txt"; exit 1; }
+done
+( set -e; cd "$C"; git add -A; git commit -qm "runs 631 632"; git push -qf origin "HEAD:refs/pull/631/head"; git checkout -q main; git branch -qD pr631 ) \
+  || { echo "setup failed: push 631"; exit 1; }
+prjson 631
+$DP --review-pr 631 --packet --tier medium --files core.py --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a Risk: high run whose result a Risk: low run edited before the commit still sets high: --tier medium is refused" \
+  || { bad "8 the high run was lost under the low run rc=$RC"; tail -2 "$T/out.txt"; }
+# a stale Risk: low run recorded on branch pr93, whose result went into another history; PR 93 comes from a new pr93
+runpr 930 low core.py "echo 'c = 930' > core.py" pr93
+newpr 93 core.py 'c = 93'
 $DP --review-pr 93 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a run recorded on another branch is not attributed: the PR needs medium, --tier low is refused" || { bad "8 other-branch run rc=$RC"; tail -2 "$T/out.txt"; }
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a stale Risk: low run on the PR's branch name, its result not in the PR, lowers nothing: --tier low is refused" \
+  || { bad "8 a stale low run lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --review-pr 93 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-[ -f "$PK" ] && grep -qF "No Concord run produced this PR; no plan clauses apply" "$PK" && ! grep -qF "PLAN-MARK-93" "$PK" \
-  && ok "8 a PR with no attributable run: --tier medium runs and its packet says no Concord run produced it" || { bad "8 no-run packet '$PK'"; tail -2 "$T/out.txt"; }
+[ -f "$PK" ] && grep -qF "No Concord run produced this PR; no plan clauses apply" "$PK" && ! grep -qF "PLAN-MARK-930" "$PK" \
+  && ok "8 that run's plan stays out of the packet, which says no Concord run produced the PR" || { bad "8 stale run packet '$PK'"; tail -2 "$T/out.txt"; }
 
 # a run made in a fork of the PR's worktree is the PR's run: it records the fork's origin branch and HEAD
 WT="python3 $T/concord/wt.py"
@@ -461,5 +497,31 @@ opus 118 medium concord:reviewer-opus55 "$T/resolve40.txt" --files parser.py; PK
 st 118
 [ -n "$PKP" ] && grep -qF "CLAUSE-MARK-40" "$PKP" && has "REVIEWED at" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
   && ok "15 a later review whose files hold parser.py lists the clause FAIL and its yes resolves it: REVIEWED (exit 0)" || { bad "15 the parser.py group did not list and resolve the clause FAIL, rc=$RC"; head -3 "$T/out.txt"; }
+
+echo "== 16 status and packets wait while gh's head and the pull ref differ"
+newpr 96 lag.py 'l = 96'
+LAG=$( set -e; cd "$C"; git fetch -q origin refs/pull/96/head; git checkout -q FETCH_HEAD; printf 'l = 97\n' > lag.py; git commit -qam lag
+  git rev-parse HEAD; git checkout -q main ) || { echo "setup failed: lag"; exit 1; }
+printf '{"baseRefName": "main", "headRefName": "pr96", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$LAG" > "$T/pr96.json"
+OLD96=$(hd 96); st 96; S96=$(cat "$T/out.txt"); RC96=$RC
+$DP --review-pr 96 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+case "$S96" in *"${LAG:0:8}"*) case "$S96" in *"${OLD96:0:8}"*) GOT=1;; *) GOT=0;; esac;; *) GOT=0;; esac
+[ $RC96 -eq 75 ] && [ $GOT -eq 1 ] && ! printf '%s\n' "$S96" | grep -q "^CURRENT HEAD" && [ $RC -eq 75 ] && ! grep -q '^PACKET' "$T/out.txt" \
+  && ok "16 gh reports a head the pull ref does not serve yet: --pr-status names both and judges no head (exit 75); --review-pr writes no packet (exit 75)" \
+  || { bad "16 unreconciled head: status rc=$RC96, packet rc=$RC"; printf '%s\n' "$S96" | tail -2; tail -2 "$T/out.txt"; }
+
+echo "== 17 a finding path names a PR file; an unknown path is resolved only by a review of every file"
+newpr 99 launcher.sh 'l = 99' notes.txt 'n = 99'
+fnd(){ printf '{"severity": "HIGH", "path": "%s", "line": 1, "problem": "p", "fix": "f", "repro": {"input": "x", "expected": "2", "actual": "1"}}' "$1"; }
+printf 'REVIEW-JSON\n{"findings": [%s, %s], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$(fnd b/notes.txt)" "$(fnd zz/ghost.py)" > "$T/paths99.txt"
+opus 99 medium concord:reviewer-opus55 "$T/paths99.txt" --files launcher.sh
+pushpr 99 launcher.sh 'l = 100'
+printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN", "resolutions": [{"finding": "F1", "fixed": "yes", "evidence": "fixed"}, {"finding": "F2", "fixed": "yes", "evidence": "fixed"}]}\nEND-REVIEW-JSON\n' > "$T/res99.txt"
+opus 99 medium concord:reviewer-opus55 "$T/res99.txt" --files launcher.sh; st 99
+has "F1" && has "F2" && has "FINDINGS OPEN" && [ $RC -eq 1 ] \
+  && ok "17 a review of launcher.sh alone resolves neither the finding on b/notes.txt nor the one on an unknown path (exit 1)" || { bad "17 a launcher.sh review resolved a finding outside its files, rc=$RC"; head -4 "$T/out.txt"; }
+opus 99 medium concord:reviewer-opus55 "$T/res99.txt"; st 99
+has "REVIEWED at" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
+  && ok "17 a review of every PR file resolves both: REVIEWED (exit 0)" || { bad "17 the review of every file did not resolve them, rc=$RC"; head -4 "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

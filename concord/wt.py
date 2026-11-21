@@ -6,7 +6,7 @@ Usage:
   wt.py list [--repo DIR]
   wt.py done TICKET [--repo DIR] [--force]
   wt.py fork TICKET N [--repo DIR]
-  wt.py join TICKET N [--repo DIR]
+  wt.py join TICKET N [--repo DIR] [--force]
 
 new   creates <main>/.claude/worktrees/<TICKET> on branch NAME (default feature/<TICKET>; an existing local
       branch is checked out instead of created), starting from --base (default: <repo>.base in
@@ -21,13 +21,17 @@ done  removes a finished ticket's worktree. First its PLAN_*.md files are archiv
       refuses while (a) tracked or untracked work is uncommitted, (b) ignored files other than caches/build
       output and wt.py's own copies would be lost (listed with sizes), or (c) this session's sandbox
       write-protects files inside (Claude Code protects .claude/settings*.json of a worktree it entered:
-      run `done` unsandboxed then). --force skips (a) and (b). Branches and commits are never deleted.
+      run `done` unsandboxed then), or (d) a link wt.py made now points somewhere else (listed). --force skips
+      (a), (b) and (d); it removes a link, never its target. Branches and commits are never deleted.
 fork  snapshots DIR's working state (tracked and untracked, not ignored; DIR's HEAD, index and branch stay
       untouched) in a temporary commit and checks it out detached at
       <main>/.claude/worktrees/<TICKET>-p<N>, then copies DIR's top-level PLAN_*.md and links the folders
       `new` linked (plus the configured ones). Prints the path; exits 2 when it exists.
 join  applies the fork's changes (binary diff of its working tree, untracked included, against its HEAD) to
-      DIR, then unlinks its links and runs `git worktree remove --force`. A patch that does not apply exits 2
+      DIR, then unlinks its links and runs `git worktree remove --force`. Before touching anything it refuses,
+      keeping the fork and listing each path, while join would lose work: staged and working content that
+      differ, a deletion whose working file is back, an ignored file only the fork holds, a link wt.py made
+      that now points somewhere else. --force joins anyway and drops those. A patch that does not apply exits 2
       naming the files and keeps the fork. Prints the files applied.
 """
 import argparse
@@ -371,6 +375,11 @@ def cmd_done(args):
     # their work and goes through the uncommitted and ignored-file checks (which refuse, or need --force).
     ours = {rel for rel in made if not rel.startswith(".claude/") and (wt / rel).is_symlink()} | set(plans) | unedited
     # Every check runs before anything is touched, so a refusal leaves the worktree fully working.
+    moved = [rel for rel in made if not rel.startswith(".claude/") and (wt / rel).is_symlink()
+             and os.readlink(wt / rel) != str(repo / rel)]
+    if moved and not args.force:            # a link the user re-pointed is theirs now
+        die(f"{wt} holds links that wt.py made and that now point elsewhere; nothing removed (--force removes the "
+            "links, never their targets):\n  " + "\n  ".join(f"{rel}: points to {os.readlink(wt / rel)}" for rel in moved))
     dirty = [line for line in git(wt, "status", "--porcelain", "--untracked-files=all", check=False).splitlines()
              if line.strip() and line[3:].rstrip("/") not in ours]
     if dirty and not args.force:
@@ -459,17 +468,19 @@ def snapshot_commit(dirpath):
 
 
 def marked_links(dirpath):
-    """The links `new` made in this checkout (its MARK file), minus the .claude copies and non-links."""
+    """(ours, moved): the links `new` or `fork` made in this checkout (its MARK file, minus the .claude copies and
+    non-links) that still point to the main checkout's folder, and those re-pointed since, which are the user's."""
     gitdir = Path(git(dirpath, "rev-parse", "--path-format=absolute", "--git-dir"))
     mark = gitdir / MARK
     if not mark.is_file():
-        return []
-    out = []
+        return [], []
+    main = main_checkout(dirpath)
+    ours, moved = [], []
     for rel in mark.read_text(errors="replace").splitlines():
         rel = rel.strip().strip("/")
         if rel and not rel.startswith(".claude/") and (dirpath / rel).is_symlink():
-            out.append(rel)
-    return out
+            (ours if os.readlink(dirpath / rel) == str(main / rel) else moved).append(rel)
+    return ours, moved
 
 
 def cmd_fork(args):
@@ -486,7 +497,7 @@ def cmd_fork(args):
                          capture_output=True, text=True)
     if res.returncode != 0:
         die(f"git worktree add --detach {wt} failed: {res.stderr.strip()}")
-    links = list(dict.fromkeys(conf.get(f"{repo.name}.links", "").split() + marked_links(dirpath)))
+    links = list(dict.fromkeys(conf.get(f"{repo.name}.links", "").split() + marked_links(dirpath)[0]))
     made, skipped = [], []
     for rel in links:
         rel = rel.strip("/")
@@ -595,10 +606,12 @@ def join_blockers(fork, origin, record):
         committed = names_of(fork, "diff", "--name-only", snap, head)
         differs = names_of(fork, "diff", "--name-only", head) & committed
         out += [f"{p}: committed content differs from the working file" for p in sorted(differs)]
-    links = marked_links(fork)
+    links, moved = marked_links(fork)
+    out += [f"{rel}: the link wt.py made now points to {os.readlink(fork / rel)} (join would delete it)"
+            for rel in moved]
     copies = read_copies(git(fork, "rev-parse", "--path-format=absolute", "--git-dir"))
     for p in sorted(names_of(fork, "ls-files", "--others", "--ignored", "--exclude-standard")):
-        if any(p == rel or p.startswith(rel + "/") for rel in links):       # a link wt.py made
+        if any(p == rel or p.startswith(rel + "/") for rel in links + moved):       # a link wt.py made
             continue
         if DISPOSABLE.intersection(p.split("/")):
             continue
@@ -640,7 +653,7 @@ def cmd_join(args):
         if res.returncode != 0:
             die(f"{dirpath}: the fork's patch does not apply; fork kept at {fork}; files: "
                 f"{', '.join(names) or 'none'}\n  {res.stderr.decode(errors='replace').strip()}")
-    for rel in marked_links(fork):
+    for rel in marked_links(fork)[0]:
         (fork / rel).unlink()
     res = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(fork)],
                          capture_output=True, text=True)

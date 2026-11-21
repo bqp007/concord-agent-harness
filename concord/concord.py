@@ -57,8 +57,9 @@ Before the executor starts, the acceptance commands run once on the untouched tr
 phase whose acceptance already passes is not run (exit 6), because its tests do not test it.
 Exit codes: 2 usage/plan/lock, 3 session executor, 4 unknown model, 5 billing guard, 6 baseline,
 7 PASS refused (an acceptance result missing or not the expected one, or acceptance files changed), 8 PR review-round
-cap, 9 provider refusal, 10 DRIFT BLOCK or a reported plan, 11 plan text with no plan-verifier APPROVE, 124 timeout,
-125 resource limit (run watchdog); --pr-status exits 1 unless the head is REVIEWED.
+cap, 9 provider refusal, 10 DRIFT BLOCK or a reported plan, 11 plan text with no plan-verifier APPROVE, 75 PR head
+unsettled (gh's head and the fetched pull ref differ; run again), 124 timeout, 125 resource limit (run watchdog);
+--pr-status exits 1 unless the head is REVIEWED.
 Run artifacts live in <git-common-dir>/concord/<run-id>/ (outside the working tree).
 Repository notes for executors: ~/.claude/concord/repo-notes/<repo-dir-name>.md (binding facts,
 kept short; prepended to every task for that repository).
@@ -262,6 +263,9 @@ FUNC_CONTEXT_ATTRS = (
     "*.java diff=java\n"
 )
 PR_TIMEOUT = 120          # seconds for every gh / git subprocess on the --review-pr / --pr-status path
+PR_HEAD_TRIES = 2         # times gh's head and the fetched pull ref are compared before a status or a review gives up
+PR_HEAD_WAIT_S = 2        # seconds between those tries
+HEAD_UNSETTLED = 75       # exit code: gh's head and the pull ref still differ (EX_TEMPFAIL: run again in a moment)
 PR_TEXT_CAP = 4_000       # chars kept of a PR title and of a PR body in the review prompt
 TEST_PATH = re.compile(r"(^|/)(tests?|spec)(/|_)|(^|/)test_|_test\.|\.test\.", re.I)
 TEST_PATH = re.compile(r"(^|/)(tests?|spec)/|(^|/)test_|_test\.|\.test\.", re.I)
@@ -1072,7 +1076,7 @@ def snapshot(repo, track_ignored=True):
             continue
         try:
             st = os.lstat(repo / path)       # a worktree's linked folder is a symlink: sign the link, not its target
-            sig = [st.st_size, st.st_mtime_ns]
+            sig = [st.st_size, st.st_mtime_ns, st.st_mode]     # chmod leaves size and mtime alone
         except FileNotFoundError:
             sig = None
         entries[path] = [status, sig]
@@ -2343,6 +2347,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
         lines += ["--- executor output (tail) ---", tail(run_dir / "output.log", 20 if rc == 0 else 60)]
     report = "\n".join(lines)
     (run_dir / "report.md").write_text(report + "\n")
+    ends = {f: file_identity(repo / f) for f in [*st["backed_up"], *changed, *created, *deleted]}
     meta = {
         "run_id": st["run_id"], "repo": st["repo"], "who": st["who"], "executor": st.get("executor", ""),
         "model": st.get("model", ""), "name": st.get("name", ""), "mode": st["mode"], "rc": rc,
@@ -2363,10 +2368,12 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "risk": st.get("risk"), "baseline_mode": st.get("baseline_mode"),
         "baseline_rc": [b["rc"] for b in st.get("baseline") or []],
         "diff_lines": diff_lines, "no_baseline": st.get("no_baseline"), "backup_hashes": st.get("backup_hashes") or {},
-        # The end state --restore compares: content hash (a link's target text), type and executable bit.
-        "end_hashes": {f: file_identity(repo / f)[2] for f in st["backed_up"]},
-        "end_kinds": {f: file_identity(repo / f)[0] for f in st["backed_up"]},
-        "end_exec": {f: file_identity(repo / f)[1] for f in st["backed_up"]},
+        # The end state of every file the run backed up, changed, created or deleted: content hash (a link's target
+        # text), type and executable bit. --restore compares it for the backed-up files; the PR gate looks the hash up
+        # in the PR's commits.
+        "end_hashes": {f: e[2] for f, e in ends.items()},
+        "end_kinds": {f: e[0] for f, e in ends.items()},
+        "end_exec": {f: e[1] for f, e in ends.items()},
         "user_approved": [n for n in st.get("notes") or [] if str(n).startswith("user approved")],
         "characterization": char_line or None, "staged": staged_new, "git_internals_changed": internals_changed,
         "sandbox": sandbox_state,
@@ -3144,7 +3151,8 @@ def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
     committed and uncommitted changes of the run's files appear; a file the run removed from the index and the working
     tree (git rm) is diffed against `base` as a deletion, and other untracked files against /dev/null.
     `cap=None` returns the raw diff (no truncation marker); otherwise a diff over `cap` is cut with a note."""
-    tracked = set(git(repo, "ls-files", "--", *files).split("\n")) - {""}
+    # --literal-pathspecs: a name such as memo[1].txt is that file, never a pattern that also matches memo1.txt
+    tracked = set(git(repo, "--literal-pathspecs", "ls-files", "--", *files).split("\n")) - {""}
     tracked |= {f for f in files if f not in tracked and not os.path.lexists(Path(repo) / f)
                 and run_git(["cat-file", "-e", f"{base}:{f}"], repo).returncode == 0}
     parts = []
@@ -3159,7 +3167,7 @@ def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
 
     for f in tracked_files:
         parts.append(binary_diff_note(f) if opaque(f) else
-                     text_of(["diff", str(base), *OPAQUE_DIFF, "--", f]))
+                     text_of(["--literal-pathspecs", "diff", str(base), *OPAQUE_DIFF, "--", f]))
     for f in files:
         if f not in tracked:
             parts.append(binary_diff_note(f) if opaque(f) else
@@ -3209,25 +3217,30 @@ def review_diff(repo, run_dir, meta, files, cap=REVIEW_DIFF_CAP, base=None):
     parts = []
     for f in files:
         before, after = Path(run_dir) / "backup" / f, Path(repo) / f
-        if not (before.is_file() or before.is_symlink()) or not (after.is_file() or after.is_symlink()):
-            parts.append(change_diff(repo, [f], cap=None, base=base))      # no start copy, or the file is gone
+        gone = not os.path.lexists(after)       # deleted: the change runs from the start copy to nothing
+        if not (before.is_file() or before.is_symlink()) or not (gone or after.is_file() or after.is_symlink()):
+            parts.append(change_diff(repo, [f], cap=None, base=base))      # no start copy, or no file now
             continue
-        old, new, mode = side_bytes(before), side_bytes(after), mode_lines(before, after)
+        old, new = side_bytes(before), b"" if gone else side_bytes(after)
+        mode = (f"deleted file mode {'100755' if before.stat().st_mode & 0o100 else '100644'}\n" if gone
+                else mode_lines(before, after))
         if b"\0" in old or b"\0" in new:                                    # D12: a NUL on either side, no content
             parts.append(binary_diff_note(f))
             continue
-        if old == new:
+        if old == new and not gone:
             if mode:                                                        # only the execute bit changed
                 parts.append(f"diff --git a/{f} b/{f}\n{mode}")
             continue
         # git's own diff of the two versions (as change_diff reads them: bytes, text forced, invalid UTF-8 escaped), with
         # no context lines. git names the two copies by their full paths and writes one block per side when the file
         # changed type, so only the hunks of each block are kept, under the file's own name
-        res = run_git(["diff", "--no-index", "-U0", *OPAQUE_DIFF, "--", str(before), str(after)], repo, text=False)
+        res = run_git(["diff", "--no-index", "-U0", *OPAQUE_DIFF, "--", str(before), os.devnull if gone else str(after)],
+                      repo, text=False)
         text = res.stdout.decode("utf-8", errors="backslashreplace")
         hunks = "".join(b[b.find("\n@@") + 1:] for b in re.split(r"(?m)^diff --git ", text) if "\n@@" in b)
-        if hunks:         # a hunk header keeps its ranges only: git's function-context text would show a line outside the change
-            parts.append(f"diff --git a/{f} b/{f}\n{mode}--- a/{f}\n+++ b/{f}\n" + re.sub(r"(?m)^(@@ [^@]*@@).*$", r"\1", hunks))
+        if hunks or gone:   # a hunk header keeps its ranges only: git's function-context text would show a line outside the change
+            parts.append(f"diff --git a/{f} b/{f}\n{mode}--- a/{f}\n+++ {'/dev/null' if gone else 'b/' + f}\n"
+                         + re.sub(r"(?m)^(@@ [^@]*@@).*$", r"\1", hunks))
     diff = "".join(parts)
     if cap is not None and len(diff) > cap:
         diff = diff[:cap] + f"\n[diff truncated at {cap} characters; read the files for the rest]\n"
@@ -3826,10 +3839,10 @@ def render_review(review, findings, verdict, unreviewed=(), limit=""):
 # -- ledger's lock (ledger_lock): its findings, its resolutions and its entry in the run's meta.json.
 
 def ledger_key(meta):
-    """`pr<N>` for a PR review, else the plan stem, else `noplan-<run_id>` (R10), else `noplan`."""
+    """pr_key for a PR review, else the plan stem, else `noplan-<run_id>` (R10), else `noplan`."""
     meta = meta or {}
     if meta.get("kind") == "pr-review":
-        return f"pr{meta.get('pr')}"
+        return pr_key(meta.get("pr"), meta.get("slug"))
     plan = meta.get("plan") or ""
     if plan:
         return Path(plan).stem
@@ -3839,8 +3852,12 @@ def ledger_key(meta):
 
 def load_ledger(root, key):
     """Read root/ledger/<key>.json; a missing file is a fresh ledger. A corrupt or wrongly-typed file is fatal
-    (exit 2, R6): never silently reset a ledger that may hold binding decisions."""
+    (exit 2, R6): never silently reset a ledger that may hold binding decisions. A PR ledger that 3.0.0 or 2.4 wrote
+    under pr<N> is read for pr<N>@<repo> until that file exists, and the next save writes it under the new key."""
     path = Path(root) / "ledger" / f"{key}.json"
+    old = re.fullmatch(r"(pr\d+)@.+", key)
+    if old and not path.exists() and (Path(root) / "ledger" / f"{old.group(1)}.json").exists():
+        path = Path(root) / "ledger" / f"{old.group(1)}.json"
     fresh = {"key": key, "next_finding": 1, "next_decision": 1, "findings": [], "decisions": []}
     if not path.exists():
         return fresh
@@ -3853,7 +3870,7 @@ def load_ledger(root, key):
     missing = [k for k in ("findings", "decisions", "next_finding", "next_decision") if k not in data]
     if missing:                                # never guess counters: a reset would reuse F1/D1 ids
         die(f"ledger {path} unreadable: missing {', '.join(missing)}")
-    data.setdefault("key", key)
+    data["key"] = key
     bad = (not isinstance(data["findings"], list) or not isinstance(data["decisions"], list)
            or isinstance(data["next_finding"], bool) or not isinstance(data["next_finding"], int)
            or isinstance(data["next_decision"], bool) or not isinstance(data["next_decision"], int)
@@ -3896,10 +3913,19 @@ def _ledger_entry(finding, reviewer, run_id, status, extra=None):
              "reviewer": reviewer, "run": run_id,
              "at": datetime.now(timezone.utc).isoformat(timespec="microseconds"), "status": status}
     extra = dict(extra or {})
-    review_files = extra.pop("review_files", None)
+    review_files, pr_files = extra.pop("review_files", None), set(extra.pop("pr_files", None) or ())
     entry.update(extra)
-    if review_files is not None:          # a PR finding's scope: its file; a clause FAIL has none, so the review's files
-        entry["scope"] = [entry["path"]] if entry["path"] else list(review_files)
+    if review_files is not None:
+        # A PR finding's scope: its file. A path outside the PR diff that is a diff file under git's a/ or b/ prefix
+        # names that file; any other path outside the diff names no file, so its scope is the whole diff and only a
+        # review of every file resolves it. A clause FAIL has no path: the files of the review that recorded it.
+        path = entry["path"]
+        if f"/{run_id}/tree/" in path:          # a path inside the packet's copy of the head names the file there
+            entry["path"] = path = path.split(f"/{run_id}/tree/", 1)[1]
+        if path and path not in pr_files and path[:2] in ("a/", "b/") and path[2:] in pr_files:
+            entry["path"] = path = path[2:]
+        entry["scope"] = (list(review_files) if not path else
+                          [path] if path in pr_files or not pr_files else sorted(pr_files))
     return entry
 
 
@@ -4285,7 +4311,7 @@ def pr_ledger_extra(meta, reviewer):
     if meta.get("kind") != "pr-review":
         return None
     return {"head": meta.get("head"), "merge_base": meta.get("merge_base"), "counted": pr_counted_tier(meta, reviewer),
-            "review_files": list(meta.get("files") or [])}
+            "review_files": list(meta.get("files") or []), "pr_files": list(meta.get("pr_files") or [])}
 
 
 def is_ancestor(repo, a, b):
@@ -4306,14 +4332,14 @@ def pr_apply_answer(repo, root, meta, run_id, reviewer, result, entry):
     finding, under the PR's ledger lock; whether it counts is the history rule (pr_finding_resolution). A hunk of a
     delta is explained only by a finding this answer closes; a file is covered by the delta only when each of its hunks
     is explained. Stores the closed ids and the explained files on the entry."""
-    n, head, mb = meta.get("pr"), meta.get("head"), meta.get("merge_base")
+    head, mb, key = meta.get("head"), meta.get("merge_base"), ledger_key(meta)
     review_files, diff_files = set(meta.get("files") or []), set(meta.get("pr_files") or [])
     answers = {}
     for r in result.get("resolutions") or []:
         answers.setdefault(r["finding"], []).append(r)
     closed = {}
-    with ledger_lock(root, f"pr{n}"):
-        ledger = load_ledger(root, f"pr{n}")
+    with ledger_lock(root, key):
+        ledger = load_ledger(root, key)
         for f in ledger["findings"]:
             rs = answers.get(f.get("id"))
             if not rs or f.get("severity") not in ("BLOCKER", "HIGH", "CLAUSE"):
@@ -4844,29 +4870,41 @@ def cmd_review_pr(args, target, conf):
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
     notes = repo_notes(repo)
-    n, slug = parse_pr(args.review_pr)
+    n, asked = parse_pr(args.review_pr)
     if args.delta and (args.files or args.exclude):
         die("--delta cannot be combined with --files/--exclude (a delta covers every file changed since the "
             "reviewed head)", code=2)
-    remote = pr_remote(repo, slug)
+    remote = pr_remote(repo, asked)
     if remote is None:
-        die(f"PR {slug}#{n}: no remote of this repository names {slug}, and origin is {remote_slug(repo)} "
-            f"(add a remote for {slug}, or run from a clone of it)", code=2)
-    info = gh_pr_view(n, slug, "baseRefName,headRefName,headRefOid,title,body", repo)
+        die(f"PR {asked}#{n}: no remote of this repository names {asked}, and origin is {remote_slug(repo)} "
+            f"(add a remote for {asked}, or run from a clone of it)", code=2)
+    fields = "baseRefName,headRefName,headRefOid,title,body"
+    info = gh_pr_view(n, asked, fields, repo)
     base_branch = (info.get("baseRefName") or "").strip()
     head_ref = (info.get("headRefName") or "").strip()
     gh_head = (info.get("headRefOid") or "").strip()
     if not base_branch or not gh_head:
         die(f"gh pr view {n} returned no baseRefName/headRefOid", code=3)
-    slug = slug or remote_slug(repo)
+    slug = asked or remote_slug(repo)
     ref = f"refs/review/pr{n}-{os.getpid()}"
     base = f"refs/review/base{n}-{os.getpid()}"
     try:
         fetch_pr_refs(repo, n, base_branch, ref, base, remote)
-        head = git(repo, "rev-parse", ref, timeout=PR_TIMEOUT).strip()   # the sha actually fetched, not gh's snapshot
+        head = git(repo, "rev-parse", ref, timeout=PR_TIMEOUT).strip()
+        for _ in range(PR_HEAD_TRIES - 1):          # gh's head lags a push, or the pull ref does: ask both again
+            if head == gh_head:
+                break
+            time.sleep(PR_HEAD_WAIT_S)
+            info = gh_pr_view(n, asked, fields, repo)
+            gh_head = (info.get("headRefOid") or "").strip()
+            fetch_pr_refs(repo, n, base_branch, ref, base, remote)
+            head = git(repo, "rev-parse", ref, timeout=PR_TIMEOUT).strip()
+        if head != gh_head:
+            die(f"PR {n} head unsettled: gh reports {gh_head[:8]}, the remote serves {head[:8]} as refs/pull/{n}/head; "
+                "no packet and no review written: run again in a moment", code=HEAD_UNSETTLED)
         mb = git(repo, "merge-base", base, head, timeout=PR_TIMEOUT).strip()
         all_files = pr_files_at(repo, mb, head)
-        ranks, runs = pr_attributable_runs(repo, root, mb, head, head_ref)
+        ranks, runs = pr_attributable_runs(repo, root, mb, head)
         need = pr_needed_tiers(repo, all_files, ranks)
         files, excluded = filter_pr_files(all_files, args.files, args.exclude)
         if not files:
@@ -4878,7 +4916,7 @@ def cmd_review_pr(args, target, conf):
         parts = pr_diff(repo, base, ref, files)
         diff = "".join(parts[f] for f in files)
         since, delta_files, hunks = None, [], {}
-        entries = pr_entries(root, n)
+        entries = pr_entries(root, n, slug)
         if args.delta:
             h0 = pr_delta_base(repo, entries, mb, head)
             if not h0:
@@ -4927,10 +4965,11 @@ def cmd_review_pr(args, target, conf):
                 return 8
             if len(diff) > REVIEW_DIFF_CAP:            # a full PR over the cap: refuse, no model call
                 pr_cap_exit(files, parts, len(diff))
-        open_f = [f for f in pr_open_findings(repo, root, n, head) if pr_finding_listed(f, set(all_files), set(files))]
+        open_f = [f for f in pr_open_findings(repo, root, n, slug, head)
+                  if pr_finding_listed(f, set(all_files), set(files))]
         open_ids = {f["id"] for f in open_f}
         carried = {f["id"] for f in open_f if not is_ancestor(repo, f.get("head"), head)}
-        ledger = ledger_text(load_ledger(root, f"pr{n}"), only=open_ids, carried=carried)
+        ledger = ledger_text(load_ledger(root, pr_key(n, slug)), only=open_ids, carried=carried)
         delta_line = ""
         if since:
             delta_line = (f"Delta review since {str(since)[:8]}: files {', '.join(delta_files)}\n"
@@ -4945,7 +4984,7 @@ def cmd_review_pr(args, target, conf):
         if args.packet:
             rc = write_pr_packet(root, n, slug, base_branch, head, tier, files, excluded, task,
                                  tag=("delta-packet" if since else "packet"), since=since, delta_files=delta_files,
-                                 approval=approval, pr_files=all_files, hunks=hunks, **ident)
+                                 approval=approval, pr_files=all_files, hunks=hunks, repo=repo, **ident)
         else:
             res, executor, model, binary = resolve_review_model(args, conf, target)
             run_dir = pr_run_dir(root, n, head, f"delta-{model}" if since else (model or "review"))
@@ -4971,8 +5010,6 @@ def cmd_review_pr(args, target, conf):
                                        f"verdict {d['verdict']}, blockers {d['blockers']}"
                                        f"{', retried' if d.get('retried') else ''})"),
                 entry_extra=entry_extra, approve_only=(tier == "low"))
-        if gh_head != head:
-            print(f"PR head moved during review: gh reported {gh_head[:8]}, fetched {head[:8]}")
         return rc
     finally:
         delete_ref(repo, ref)
@@ -4981,10 +5018,27 @@ def cmd_review_pr(args, target, conf):
 
 def write_pr_packet(root, n, slug, base, head, tier, files, excluded, task, tag="packet", since=None,
                     delta_files=None, approval=None, pr_files=None, hunks=None, merge_base=None, head_ref=None,
-                    waived=(), runs=()):
+                    waived=(), runs=(), repo=None):
     """Write the PR review prompt for a Claude reviewer subagent; no model is called here. The run's meta holds the
-    diff identity, so an answer credits only the diff its packet showed."""
+    diff identity, so an answer credits only the diff its packet showed. The packet names a copy of the head's tree in
+    the run folder as the repository to read, so the reviewer reads the reviewed head whatever the checkout holds."""
     run_dir = pr_run_dir(root, n, head, tag)
+    tree, tar = run_dir / "tree", run_dir / "tree.tar"
+    tree.mkdir()
+    res = run_git(["archive", "--format=tar", "-o", str(tar), head], repo, timeout=PR_TIMEOUT)
+    if res.returncode != 0:
+        die(f"git archive {head[:8]} failed: {res.stderr.strip()}", code=3)
+    try:
+        res = subprocess.run(["tar", "-xf", str(tar), "-C", str(tree)], capture_output=True, text=True,
+                             timeout=PR_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        die(f"tar -xf {tar} failed: {exc}", code=3)
+    if res.returncode != 0:
+        die(f"tar -xf {tar} failed: {res.stderr.strip()}", code=3)
+    tar.unlink()
+    task = (f"REPOSITORY (read-only, head {head}): {tree}\nRead the code there, and only there: it is the reviewed "
+            "head. The checkout this packet came from may hold another commit or uncommitted work. Give each finding's "
+            "path relative to that folder, as the diff names it.\n\n" + task)
     meta = pr_meta(n, slug, base, head, files, excluded, tier, pr_files=pr_files, merge_base=merge_base,
                    head_ref=head_ref, waived=waived, runs=runs)
     if approval:
@@ -5089,15 +5143,24 @@ def pr_files_at(repo, mb, head):
     return sorted(diff_names(repo, [mb, head], no_renames=True))
 
 
-def pr_entries(root, n):
-    """Every recorded review of PR n that parsed, oldest first, each with its run's diff identity and scope."""
+def pr_key(n, slug):
+    """The ledger key of PR n of the repository `slug` (owner/name; GitHub ignores case, so this does too): one PR
+    number in two repositories keeps two ledgers. A PR with no slug (origin is no GitHub URL) keeps `pr<N>`."""
+    s = (slug or "").lower().replace("/", "~")
+    return f"pr{n}@{s}" if s else f"pr{n}"
+
+
+def pr_entries(root, n, slug):
+    """Every recorded review of PR n of the repository `slug` that parsed, oldest first, each with its run's diff
+    identity and scope."""
     out = []
     for meta_path in sorted(Path(root).glob(f"pr{n}-*/meta.json")):
         try:
             meta = json.loads(meta_path.read_text())
         except (OSError, ValueError):
             continue
-        if not isinstance(meta, dict) or meta.get("pr") != n or meta.get("kind") != "pr-review" or not meta.get("head"):
+        if (not isinstance(meta, dict) or meta.get("pr") != n or meta.get("kind") != "pr-review" or not meta.get("head")
+                or str(meta.get("slug") or "").lower() != (slug or "").lower()):
             continue
         for rev in meta.get("reviews") or []:
             if rev.get("verdict") in ("CLEAN", "FIX", "BLOCK"):
@@ -5109,29 +5172,87 @@ def pr_entries(root, n):
     return sorted(out, key=lambda e: str(e.get("at") or ""))
 
 
-def pr_attributable_runs(repo, root, mb, head, head_ref):
-    """The Concord runs that produced this PR: those recorded on its head branch. The commit a run started from is no
-    bound: merging the base branch into the PR moves the merge base past it, and a rebase rewrites it, while the run
-    still produced the PR's files (a run whose work is already in the base can only raise a needed tier). Without a head
-    branch name, a run counts when it started at the head or an ancestor of it. Returns
-    ({path: highest Risk rank of a run that changed, created or deleted it}, [run meta])."""
-    ranks, runs = {}, []
+def pr_range_states(repo, mb, head):
+    """{path: the SHA-256 of every version that a commit of the PR (merge base to head; a merge commit adds none)
+    wrote to the path, plus "missing" when one deleted it}. A symlink's version is its target text, the hash
+    file_identity takes of a link."""
+    res = run_git(["log", "--raw", "--no-renames", "--no-abbrev", "-z", "--format=", f"{mb}..{head}"], repo,
+                  timeout=PR_TIMEOUT, text=False)
+    if res.returncode != 0:
+        die(f"git log {mb[:8]}..{head[:8]} failed: {res.stderr.decode('utf-8', 'replace').strip()}", code=3)
+    states, blobs = {}, {}
+    tokens, i = res.stdout.split(b"\0"), 0
+    while i + 1 < len(tokens):                 # ":<mode> <mode> <sha> <sha> <status>", then the path
+        rec = tokens[i].lstrip(b"\n")
+        if not rec.startswith(b":"):
+            i += 1
+            continue
+        _old_mode, mode, _old_sha, sha, status = rec[1:].decode().split()
+        path, i = tokens[i + 1].decode("utf-8", "surrogateescape"), i + 2
+        if status == "D":
+            states.setdefault(path, set()).add("missing")
+        elif mode in ("100644", "100755", "120000"):
+            blobs.setdefault(sha, set()).add(path)
+    if not blobs:
+        return states
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"], input="".join(f"{s}\n" for s in blobs).encode(),
+                             capture_output=True, timeout=PR_TIMEOUT).stdout
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        die(f"git cat-file --batch failed: {exc}", code=3)
+    pos = 0
+    while pos < len(out):                      # "<sha> blob <size>\n<bytes>\n" per blob
+        nl = out.index(b"\n", pos)
+        sha, _kind, size = out[pos:nl].decode().split()
+        digest = hashlib.sha256(out[nl + 1:nl + 1 + int(size)]).hexdigest()
+        pos = nl + 1 + int(size) + 1
+        for path in blobs[sha]:
+            states.setdefault(path, set()).add(digest)
+    return states
+
+
+def pr_attributable_runs(repo, root, mb, head):
+    """The Concord runs that produced this PR, decided by content. A run counts for a file it changed, created or
+    deleted when the state it left the file in (its end hash; "missing" after a deletion) is a version that a commit
+    of the PR wrote, or when it is the state that another run counting for the file started from (that run's start
+    copy hash): its work reached the PR through that run. Branch names and start commits play no part: a merge of the
+    base branch keeps a run, and so does a rebase onto a base that left the run's files alone (a rebase onto a base
+    that changed such a file writes a version the run never left, so the run no longer counts for that file); a run
+    whose work is not in the PR's commits gives no tier, whatever branch it ran on. A run counts for the PR when it
+    counts for one of its files. Returns ({path: highest Risk rank
+    of a run counting for it}, [meta of each run counting for a file])."""
+    metas = []
     for meta_path in sorted(Path(root).glob("*/meta.json")):
         try:
             m = json.loads(meta_path.read_text())
         except (OSError, ValueError):
             continue
-        if not isinstance(m, dict) or m.get("kind") == "pr-review" or m.get("plan") is None:
-            continue
-        if head_ref and (m.get("origin_branch") or m.get("branch_before")) != head_ref:
-            continue
-        if not head_ref and not is_ancestor(repo, m.get("origin_head") or m.get("head_before"), head):
-            continue
-        rank = TIER_RANK.get(m.get("risk"), TIER_RANK["medium"])
-        runs.append(m)
-        for key in ("changed", "created", "deleted"):
-            for f in m.get(key) or []:
-                ranks[f] = max(ranks.get(f, 0), rank)
+        if isinstance(m, dict) and m.get("kind") != "pr-review" and m.get("plan") is not None:
+            metas.append(m)
+    states = pr_range_states(repo, mb, head)
+    touched = [{f: (m.get("end_hashes") or {}).get(f) for key in ("changed", "created", "deleted")
+                for f in m.get(key) or []} for m in metas]
+    counts = {}                                # path -> indexes of the runs counting for it
+    for i, ends in enumerate(touched):
+        for f, end in ends.items():
+            if end in states.get(f, ()):
+                counts.setdefault(f, set()).add(i)
+    grew = True
+    while grew:                                # the run whose end state a counted run started from counts too
+        grew = False
+        for i, ends in enumerate(touched):
+            for f, end in ends.items():
+                if end and i not in counts.get(f, ()) and any(
+                        (metas[j].get("backup_hashes") or {}).get(f) == end for j in counts.get(f, ())):
+                    counts[f].add(i)
+                    grew = True
+    ranks, runs = {}, []
+    for i, m in enumerate(metas):
+        files = [f for f, idx in counts.items() if i in idx]
+        if files:
+            runs.append(m)
+            for f in files:
+                ranks[f] = max(ranks.get(f, 0), TIER_RANK.get(m.get("risk"), TIER_RANK["medium"]))
     return ranks, runs
 
 
@@ -5169,10 +5290,10 @@ def pr_finding_resolution(repo, f, head):
     return None
 
 
-def pr_open_findings(repo, root, n, head):
+def pr_open_findings(repo, root, n, slug, head):
     """The BLOCKER, HIGH and clause FAIL findings of this PR that are open at `head`: the one place that decides it,
     for the status, the packets and the report."""
-    return [f for f in load_ledger(root, f"pr{n}")["findings"]
+    return [f for f in load_ledger(root, pr_key(n, slug))["findings"]
             if f.get("severity") in ("BLOCKER", "HIGH", "CLAUSE") and f.get("head")
             and not pr_finding_resolution(repo, f, head)]
 
@@ -5288,7 +5409,7 @@ def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
     valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
     cover = pr_coverage(repo, entries, mb, head)
     waived = sorted({f for e in valid if e["head"] == head for f in (e["meta"].get("waived") or []) if f in files})
-    open_ = pr_open_findings(repo, root, n, head)
+    open_ = pr_open_findings(repo, root, n, slug, head)
     binary = pr_binary_files(repo, mb, head, [f for f in files if f not in waived])
     uncovered = [f for f in files if f not in waived and (f in binary or f not in cover or cover[f][0] < need[f])]
     tier = TIER_NAME[max(need.values(), default=TIER_RANK["medium"])]
@@ -5330,11 +5451,12 @@ def cmd_pr_status(args):
     """List the recorded reviews of a PR and the gate state of its current head: exit 0 only when it is REVIEWED."""
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
-    n, slug = parse_pr(args.pr_status)
-    info = gh_pr_view(n, slug, "baseRefName,headRefName,headRefOid", repo)
+    n, asked = parse_pr(args.pr_status)
+    info = gh_pr_view(n, asked, "baseRefName,headRefOid", repo)
     current = (info.get("headRefOid") or "").strip()
     base_branch = (info.get("baseRefName") or "").strip()
-    entries = pr_entries(root, n)
+    slug = asked or remote_slug(repo)
+    entries = pr_entries(root, n, slug)
     print(f"PR {n} ({slug or 'unknown'}): {len(entries)} review(s) recorded")
     for e in entries:
         meta = e["meta"]
@@ -5345,10 +5467,17 @@ def cmd_pr_status(args):
     remote = pr_remote(repo, slug) or "origin"
     try:
         fetched = pr_current_head(repo, n, slug, "status")
-        if fetched:
-            if current and fetched != current:
-                print(f"PR head moved during status: gh reported {current[:8]}, fetched {fetched[:8]}")
-            current = fetched
+        for _ in range(PR_HEAD_TRIES - 1):          # gh's head lags a push, or the pull ref does: ask both again
+            if not fetched or not current or fetched == current:
+                break
+            time.sleep(PR_HEAD_WAIT_S)
+            current = (gh_pr_view(n, asked, "headRefOid", repo).get("headRefOid") or "").strip()
+            fetched = pr_current_head(repo, n, slug, "status")
+        if fetched and current and fetched != current:
+            print(f"HEAD UNSETTLED: gh reports {current[:8]}, the remote serves {fetched[:8]} as refs/pull/{n}/head; "
+                  "no head judged: run again in a moment")
+            return HEAD_UNSETTLED
+        current = fetched or current
         mb = ""
         if base_branch and fetch_quiet(repo, f"refs/heads/{base_branch}", base_ref, remote):
             res = run_git(["merge-base", base_ref, current], repo, timeout=PR_TIMEOUT)
@@ -5358,7 +5487,7 @@ def cmd_pr_status(args):
                   f"base branch {base_branch or '?'} is not available here)")
             return 1
         files = pr_files_at(repo, mb, current)
-        ranks, _runs = pr_attributable_runs(repo, root, mb, current, (info.get("headRefName") or "").strip())
+        ranks, _runs = pr_attributable_runs(repo, root, mb, current)
         return print_pr_state(repo, root, n, slug, current, mb, files, pr_needed_tiers(repo, files, ranks), entries)
     finally:
         delete_ref(repo, base_ref)
@@ -5638,8 +5767,8 @@ def test_line_deltas(repo, base, plan_rel):
 
 
 def report_prs(repo, root, base):
-    """The PR numbers whose reviewed heads are this ticket's commits: on the first-parent line from HEAD back to the
-    drift base, so the PRs that a merge of main brings in stay out."""
+    """The PRs, as (number, repository slug in lower case), whose reviewed heads are this ticket's commits: on the
+    first-parent line from HEAD back to the drift base, so the PRs that a merge of main brings in stay out."""
     if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}", base):
         return []
     own = set(run_git(["rev-list", "--first-parent", f"{base}..HEAD"], repo, timeout=PR_TIMEOUT).stdout.split())
@@ -5655,7 +5784,7 @@ def report_prs(repo, root, base):
         if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
             continue
         if head in own:
-            prs.add(meta["pr"])
+            prs.add((meta["pr"], str(meta.get("slug") or "").lower()))
     return sorted(prs)
 
 
@@ -5774,7 +5903,7 @@ def cmd_report(args):
     lines.append(f"Total: +{added} -{deleted} lines; plan Tests: {tests_line or 'none'}")
 
     prs = report_prs(repo, root, entry.get("base"))
-    keys = [ledger_key({"plan": plan_rel})] + [f"pr{n}" for n in prs]
+    keys = [ledger_key({"plan": plan_rel})] + [pr_key(n, s) for n, s in prs]
     by_key = {key: [f for f in load_ledger(root, key)["findings"] if isinstance(f, dict)] for key in keys}
     findings = [f for key in keys for f in by_key[key]]
     counts = {}
@@ -5792,18 +5921,18 @@ def cmd_report(args):
         lines.append("none recorded")
 
     outcomes, fixed_ids = [], set()
-    for n in prs:
-        heads, pr_ents = [], pr_entries(root, n)
+    for n, s in prs:
+        heads, pr_ents = [], pr_entries(root, n, s)
         for e in pr_ents:
             if e["head"] not in heads:
                 heads.append(e["head"])
         # the PR's current head, resolved as --pr-status resolves it: the finding is open there or not
         tip = ""
         if pr_ents:
-            info = gh_pr_view(n, pr_ents[-1]["meta"].get("slug"), "headRefOid", repo, fatal=False) or {}
-            tip = pr_current_head(repo, n, pr_ents[-1]["meta"].get("slug"), "report") or str(info.get("headRefOid") or "").strip()
+            info = gh_pr_view(n, s or None, "headRefOid", repo, fatal=False) or {}
+            tip = pr_current_head(repo, n, s, "report") or str(info.get("headRefOid") or "").strip()
         rnd = lambda h: heads.index(h) + 1 if h in heads else "?"
-        for f in by_key[f"pr{n}"]:
+        for f in by_key[pr_key(n, s)]:
             if str(f.get("severity") or "").upper() not in ("BLOCKER", "HIGH", "CLAUSE"):
                 continue
             found = f"round {rnd(f.get('head'))}, head {str(f.get('head'))[:8]}, {_flat(f.get('reviewer'))}"

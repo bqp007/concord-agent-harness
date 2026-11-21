@@ -276,7 +276,9 @@ done
   || { bad "E.5 lint missing:$miss"; grep "^ESTIMATE LINT" "$T/out.txt"; }
 { printf '# Plan\nTier: S\n'; ph 1 planner 'Size: ~1800 lines\nFiles: t.sh'; ph 2 deepseek-flash 'Size: ~180 lines\nFiles: a.py'; } > "$R/PLAN_S.md"
 $DP --estimate --plan PLAN_S.md --repo "$R" > "$T/out.txt" 2>&1
-eta_rel && ok "E.6 ETA = max(critical path, session lane) + final revision on a plan whose session lane is the longer" || { bad "E.6 session lane"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
+LANE=$(sed -nE 's/^CRITICAL PATH: .*= ([0-9]+) min; session lane ([0-9]+) min;.*/\1 \2/p' "$T/out.txt")
+eta_rel && [ -n "$LANE" ] && [ "${LANE#* }" -gt "${LANE% *}" ] \
+  && ok "E.6 ETA = max(critical path, session lane) + final revision on a plan whose session lane is the longer" || { bad "E.6 session lane"; grep -E "^(CRITICAL|ETA)" "$T/out.txt"; }
 { printf '# Plan\nTier: S\n'; ph 1 planner 'Size: ~180 lines\nFiles: t.sh'; ph 2 deepseek-flash 'Size: ~180 lines\nFiles: a.py'
   ph 3 deepseek-flash 'Size: ~180 lines\nAfter: Phase 1 and 2 (needs both), tests\nFiles: b.py'
   ph 4 deepseek-flash 'Size: ~180 lines\nFiles: src/a*.py'; ph 5 deepseek-flash 'Size: ~180 lines\nFiles: src/*b.py'
