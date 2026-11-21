@@ -567,8 +567,9 @@ def read_copies(gitdir):
 
 
 def join_blockers(fork, origin, record):
-    """What `join` would lose or get wrong: a path whose staged content differs from its working file; a fork whose
-    HEAD moved and a path whose committed content differs from its working file; an ignored file of the fork, outside
+    """What `join` would lose or get wrong: a path whose staged content differs from its working file; a path deleted
+    in the fork, staged or committed, whose working file exists again; a fork whose HEAD moved and a path whose
+    committed content differs from its working file; an ignored file of the fork, outside
     the linked folders, that the origin lacks or holds differently (a symlink only counts as held when the origin has
     a link with the same target text). An unchanged copied plan is not unique to the fork."""
     out = []
@@ -576,6 +577,10 @@ def join_blockers(fork, origin, record):
     unstaged = names_of(fork, "diff", "--name-only")
     out += [f"{p}: staged content differs from the working file" for p in sorted(staged & unstaged)]
     snap = record.get("snapshot")
+    gone = names_of(fork, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=D", snap or "HEAD")
+    back = names_of(fork, "ls-files", "--others") if gone else set()     # git's own names: exact case, ignored included
+    out += [f"{p}: deleted in the fork (staged or committed), but a working file exists (join would lose the deletion)"
+            for p in sorted(gone & back)]
     head = git(fork, "rev-parse", "HEAD")
     if snap and head != snap:
         committed = names_of(fork, "diff", "--name-only", snap, head)

@@ -246,7 +246,17 @@ printf 'x = 10\n' > "$F7/a.py"; git -C "$F7" add a.py; printf 'x = 11\n' > "$F7/
 $WT join T8 7 --repo "$W8" > "$T/j7.txt" 2>&1; RJ7=$?
 [ $RJ7 -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && ok "join with staged content that differs from the working file is refused, the fork kept" \
   || { bad "staged differs rc=$RJ7"; cat "$T/j7.txt"; }
-git -C "$F7" reset -q a.py; $WT join T8 7 --repo "$W8" > /dev/null 2>&1
+git -C "$F7" reset -q a.py; git -C "$F7" rm -q --cached a.py      # a staged deletion; the working file stays, untracked
+$WT join T8 7 --repo "$W8" > "$T/j7b.txt" 2>&1; RJ7B=$?
+[ $RJ7B -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && grep -q 'a\.py' "$T/j7b.txt" \
+  && ok "join with a staged deletion whose path exists again in the fork is refused, the fork kept, the path named" \
+  || { bad "staged deletion of a recreated path rc=$RJ7B"; cat "$T/j7b.txt"; }
+git -C "$F7" reset -q a.py; git -C "$F7" rm -q --cached a.py; git -C "$F7" -c user.email=t@t -c user.name=t commit -qm "drop a.py"   # a committed deletion; the file stays, untracked
+$WT join T8 7 --repo "$W8" > "$T/j7c.txt" 2>&1; RJ7C=$?
+[ $RJ7C -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && grep -q 'a\.py' "$T/j7c.txt" \
+  && ok "join with a committed deletion whose path exists again in the fork is refused, the fork kept, the path named" \
+  || { bad "committed deletion of a recreated path rc=$RJ7C"; cat "$T/j7c.txt"; }
+git -C "$F7" reset -q HEAD~1; $WT join T8 7 --repo "$W8" > /dev/null 2>&1
 $WT fork T8 8 --repo "$W8" > /dev/null 2>&1; F8="$M/.claude/worktrees/T8-p8"; [ -d "$F8" ] || { echo "setup failed: fork 8"; exit 1; }
 printf 'x = 12\n' > "$F8/a.py"; mkdir -p "$F8/build"; printf 'o\n' > "$F8/build/only-here.o"
 $WT join T8 8 --repo "$W8" > "$T/j8.txt" 2>&1; RJ8=$?

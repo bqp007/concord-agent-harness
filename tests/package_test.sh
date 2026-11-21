@@ -112,10 +112,11 @@ inst_e() { inst --bogus 2>/dev/null; [ $? = 2 ] && { inst --repo 2>/dev/null; [ 
 inst_f() { mkdir "$H/bin" && printf '#!/bin/sh\nexit 1\n' > "$H/bin/python3" && chmod +x "$H/bin/python3"
   PATH="$H/bin:$PATH" inst --no-tests >/dev/null 2>"$H/err"; [ $? = 2 ] && grep -q python3 "$H/err"; }
 inst_g() { env HOME=$H CLAUDE_HOME=$H/x bash install.sh --no-tests >/dev/null && [ -f "$H/x/concord/concord.py" ] && [ ! -e "$H/.claude" ]; }
-inst_h() { local g="$H/.claude/concord/tests/gone_test.sh"   # a suite the source dropped: removed, kept in the backup
-  inst --no-tests >/dev/null && echo old > "$g" && inst --dry-run > "$H/out" && grep -qF "would remove $g" "$H/out" && [ -f "$g" ] &&
-  inst --no-tests > "$H/out" && [ ! -e "$g" ] && grep -qF "remove $g" "$H/out" &&
-  [ "$(cat "$H"/.claude/concord/backup/*-pre-install*/tests/gone_test.sh)" = old ] && [ -f "$H/.claude/concord/tests/run_all.sh" ]; }
+inst_h() { local g="$H/.claude/concord/tests/slim_test.sh" m="$H/.claude/concord/tests/team_test.sh"   # a suite Concord retired: removed, kept in the backup; a team's own suite: kept
+  inst --no-tests >/dev/null && echo old > "$g" && echo team > "$m" && inst --dry-run > "$H/out" && grep -qF "would remove $g" "$H/out" && [ -f "$g" ] &&
+  ! grep -qF "remove $m" "$H/out" && inst --no-tests > "$H/out" && [ ! -e "$g" ] && grep -qF "remove $g" "$H/out" &&
+  [ "$(cat "$m")" = team ] && ! grep -qF "remove $m" "$H/out" &&
+  [ "$(cat "$H"/.claude/concord/backup/*-pre-install*/tests/slim_test.sh)" = old ] && [ -f "$H/.claude/concord/tests/run_all.sh" ]; }
 # link mode: $DEST/commands/concord -> the repo commands dir, $DEST/agents/<name>.md -> each repo agent file (symlinks)
 links_made() { local n
   { [ -L "$H/.claude/commands/concord" ] && [ "$(cd "$H/.claude/commands/concord" 2>/dev/null && pwd -P)" = "$(cd "$ROOT/$A/commands" && pwd -P)" ]; } || return 1

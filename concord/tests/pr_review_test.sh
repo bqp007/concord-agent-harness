@@ -343,16 +343,16 @@ PDRY=$(sed -n 's/.*prompt [0-9]* chars at \(.*prompt.txt\).*/\1/p' "$T/out.txt" 
 
 # a phase run that started on a dirty file (every phase retry does): its packet diff is git's text, bytes escaped, a NUL file named only
 PR3="$T/pdirty"; mkdir -p "$PR3" && ( cd "$PR3" && git init -q -b main && git config user.email t@t && git config user.name t
-  printf 'x = 1\n' > a.txt; printf 'ok\n' > b.bin; printf 'ok text\n' > ok.txt; printf 'swap me\n' > swap.txt; python3 -c "open('nul.dat','wb').write(b'nul\\0data\\n')"; ln -s ok.txt link
+  printf 'x = 1\n' > a.txt; printf 'ok\n' > b.bin; printf 'ok text\n' > ok.txt; printf 'swap me\n' > swap.txt; printf 'echo run\n' > run.sh; python3 -c "open('nul.dat','wb').write(b'nul\\0data\\n')"; ln -s ok.txt link
   printf '.claude/\n' > .gitignore; git add -A && git commit -qm init
-  printf '# Plan\n## Phase 1 - x\nExecutor: deepseek-flash\nRisk: medium\nFiles: a.txt, b.bin, link, swap.txt\nAcceptance:\n- `grep -q z a.txt`\n' > PLAN_D.md ) || { echo "setup failed: pdirty"; exit 1; }
+  printf '# Plan\n## Phase 1 - x\nExecutor: deepseek-flash\nRisk: medium\nFiles: a.txt, b.bin, link, swap.txt, run.sh\nAcceptance:\n- `grep -q z a.txt`\n' > PLAN_D.md ) || { echo "setup failed: pdirty"; exit 1; }
 approve PLAN_D.md "$PR3" || exit 1
 printf 'name = caf\xe9\nx = 1\n' > "$PR3/a.txt"; printf 'dirty-zq\n' > "$PR3/b.bin"          # uncommitted edits before the run: a dirty start
-FAKE_ACTIONS="python3 -c \"open('a.txt','wb').write(b'name = caf\\\\xe8\\\\nx = 1\\\\nz\\\\n'); open('b.bin','wb').write(b'bin-zq\\\\0\\\\n')\"; ln -sf nul.dat link; rm -f swap.txt; ln -s ok.txt swap.txt" \
+FAKE_ACTIONS="python3 -c \"open('a.txt','wb').write(b'name = caf\\\\xe8\\\\nx = 1\\\\nz\\\\n'); open('b.bin','wb').write(b'bin-zq\\\\0\\\\n')\"; ln -sf nul.dat link; rm -f swap.txt; ln -s ok.txt swap.txt; chmod +x run.sh" \
   $DP 1 --plan PLAN_D.md --via qwen --model fake/m --repo "$PR3" > "$T/out.txt" 2>&1
 DRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-{ [ -n "$DRID" ] && python3 -I -c 'import sys; sys.exit(0 if b"caf\xe8" in open(sys.argv[1], "rb").read() else 1)' "$PR3/a.txt" && [ -L "$PR3/link" ] && [ "$(readlink "$PR3/link")" = nul.dat ] && [ -L "$PR3/swap.txt" ]; } \
-  || { echo "setup failed: a dirty-start run that changed a.txt (0xe8), b.bin (NUL), link and swap.txt"; cat "$T/out.txt"; exit 1; }
+{ [ -n "$DRID" ] && python3 -I -c 'import sys; sys.exit(0 if b"caf\xe8" in open(sys.argv[1], "rb").read() else 1)' "$PR3/a.txt" && [ -L "$PR3/link" ] && [ "$(readlink "$PR3/link")" = nul.dat ] && [ -L "$PR3/swap.txt" ] && [ -x "$PR3/run.sh" ]; } \
+  || { echo "setup failed: a dirty-start run that changed a.txt (0xe8), b.bin (NUL), link, swap.txt and the mode of run.sh"; cat "$T/out.txt"; exit 1; }
 $DP --review "$DRID" --packet --repo "$PR3" > "$T/out.txt" 2>&1; DPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$DPK" ] && grep -qxF -- '-name = caf\xe9' "$DPK" && grep -qxF -- '+name = caf\xe8' "$DPK" \
   && ok "a dirty-start packet shows a one-byte change in invalid UTF-8 (0xe9 to 0xe8) as backslash escapes on both sides" \
@@ -368,6 +368,10 @@ $DP --review "$DRID" --packet --repo "$PR3" > "$T/out.txt" 2>&1; DPK=$(sed -n 's
   && [ "$(grep -c '^diff --git ' "$DPK")" = "$(grep -c '^diff --git a/\([^ /]*\) b/\1$' "$DPK")" ] && ! grep -qE '^(--- a|\+\+\+ b)/[^ ]*/' "$DPK" \
   && ok "a file the run replaced by a symlink gets one diff block under its own name, and no header names another path" \
   || bad "the replaced file's diff is mis-headed: $(grep -nE '^(diff --git|--- |\+\+\+ )' "$DPK" | head -8)"
+[ -f "$DPK" ] && grep -A1 -xF 'diff --git a/run.sh b/run.sh' "$DPK" | grep -qxF 'old mode 100644' \
+  && grep -A2 -xF 'diff --git a/run.sh b/run.sh' "$DPK" | grep -qxF 'new mode 100755' \
+  && ok "a dirty-start packet shows a file the run only made executable, by git's mode lines" \
+  || bad "the dirty-start packet hides the mode change of run.sh: $(grep -n -A2 'run.sh' "$DPK" | head -4)"
 [ -f "$DPK" ] && ! grep -qiF "the design the plan approves" "$DPK" \
   && ok "a plan with no Design section adds no design block to the phase packet" || bad "a design block appeared for a plan without a Design section"
 

@@ -563,17 +563,26 @@ def phase_arg(text):
     return key
 
 
-def extract_phase(plan_text, number):
+def phase_spans(plan_text):
+    """(key, start, end) of each phase's text: from its heading to the next heading of the same or a higher level, or
+    to the next phase heading, whichever comes first."""
     heads = [h for h in PHASE_HEAD.finditer(plan_text) if phase_key(h.group(2)) is not None]
-    wanted = phase_key(number)
+    spans = []
     for head in heads:
-        if phase_key(head.group(2)) == wanted:
-            level = len(head.group(1))
-            nxt = re.compile(r"^#{1,%d}\s" % level, re.M).search(plan_text, head.end())
-            later = next((h for h in heads if h.start() > head.end()), None)
-            stops = [p for p in (nxt.start() if nxt else None, later.start() if later else None) if p]
-            return plan_text[head.start():min(stops) if stops else len(plan_text)].strip()
-    found = ", ".join(str(phase_key(h.group(2))) for h in heads) or "none"
+        nxt = re.compile(r"^#{1,%d}\s" % len(head.group(1)), re.M).search(plan_text, head.end())
+        later = next((h for h in heads if h.start() > head.end()), None)
+        stops = [p for p in (nxt.start() if nxt else None, later.start() if later else None) if p]
+        spans.append((phase_key(head.group(2)), head.start(), min(stops) if stops else len(plan_text)))
+    return spans
+
+
+def extract_phase(plan_text, number):
+    spans = phase_spans(plan_text)
+    wanted = phase_key(number)
+    for key, start, end in spans:
+        if key == wanted:
+            return plan_text[start:end].strip()
+    found = ", ".join(str(key) for key, _, _ in spans) or "none"
     die(f"phase {number} not found in plan (phases found: {found})")
 
 
@@ -2447,13 +2456,20 @@ def approval_text(text):
     phase heading of any level, so a phase is included wherever it sits. A heading is matched by its whole text,
     ignoring case and spacing, so `## Handoff contract` is read. A heading inside a closed code fence never starts a
     skipped section, and every heading ends one, fenced or not: a fence never hides a heading, because a fence that
-    pairs with the wrong closing line could otherwise hide a whole section from the approval."""
+    pairs with the wrong closing line could otherwise hide a whole section from the approval. A phase's own text, as
+    extract_phase cuts it, is always read: a skip heading inside a phase hides nothing, because what makes a phase pass
+    must not change without a new approval."""
     lines = text.splitlines()
+    starts, pos = [], 0
+    for raw in text.splitlines(keepends=True):
+        starts.append(pos)
+        pos += len(raw)
+    spans = [(start, end) for _, start, end in phase_spans(text)]
     fenced = fenced_lines(lines)
     keep, skip = [], False
     for i, line in enumerate(lines):
         head = ATX_HEAD.match(line)
-        if PHASE_HEAD.match(line):
+        if PHASE_HEAD.match(line) or any(start <= starts[i] < end for start, end in spans):
             skip = False
         elif head:
             skip = (i not in fenced and head.group(1) == "##"
@@ -3112,6 +3128,17 @@ def side_bytes(path):
         return b""
 
 
+def mode_lines(before, after):
+    """git's mode lines when two regular files differ in the owner execute bit, the only mode bit git records; else ""."""
+    try:
+        a, b = os.lstat(before).st_mode, os.lstat(after).st_mode
+    except OSError:
+        return ""
+    if a & 0o170000 != 0o100000 or b & 0o170000 != 0o100000 or not (a ^ b) & 0o100:
+        return ""
+    return "".join(f"{side} mode {'100755' if m & 0o100 else '100644'}\n" for side, m in (("old", a), ("new", b)))
+
+
 def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
     """Unified diff of the run's changes against `base` (the run's start commit when usable, else HEAD), so both
     committed and uncommitted changes of the run's files appear; untracked files are diffed against /dev/null.
@@ -3175,11 +3202,13 @@ def review_diff(repo, run_dir, meta, files, cap=REVIEW_DIFF_CAP, base=None):
         if not (before.is_file() or before.is_symlink()) or not (after.is_file() or after.is_symlink()):
             parts.append(change_diff(repo, [f], cap=None, base=base))      # no start copy, or the file is gone
             continue
-        old, new = side_bytes(before), side_bytes(after)
+        old, new, mode = side_bytes(before), side_bytes(after), mode_lines(before, after)
         if b"\0" in old or b"\0" in new:                                    # D12: a NUL on either side, no content
             parts.append(binary_diff_note(f))
             continue
         if old == new:
+            if mode:                                                        # only the execute bit changed
+                parts.append(f"diff --git a/{f} b/{f}\n{mode}")
             continue
         # git's own diff of the two versions (as change_diff reads them: bytes, text forced, invalid UTF-8 escaped), with
         # no context lines. git names the two copies by their full paths and writes one block per side when the file
@@ -3188,7 +3217,7 @@ def review_diff(repo, run_dir, meta, files, cap=REVIEW_DIFF_CAP, base=None):
         text = res.stdout.decode("utf-8", errors="backslashreplace")
         hunks = "".join(b[b.find("\n@@") + 1:] for b in re.split(r"(?m)^diff --git ", text) if "\n@@" in b)
         if hunks:         # a hunk header keeps its ranges only: git's function-context text would show a line outside the change
-            parts.append(f"diff --git a/{f} b/{f}\n--- a/{f}\n+++ b/{f}\n" + re.sub(r"(?m)^(@@ [^@]*@@).*$", r"\1", hunks))
+            parts.append(f"diff --git a/{f} b/{f}\n{mode}--- a/{f}\n+++ b/{f}\n" + re.sub(r"(?m)^(@@ [^@]*@@).*$", r"\1", hunks))
     diff = "".join(parts)
     if cap is not None and len(diff) > cap:
         diff = diff[:cap] + f"\n[diff truncated at {cap} characters; read the files for the rest]\n"

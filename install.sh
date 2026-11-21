@@ -143,8 +143,9 @@ if [ -d "$DEST/concord" ]; then
 fi
 for f in "$SRC"/concord/*.py "$SRC"/concord/*.md "$SRC"/concord/*.sb "$SRC"/concord/*.sh; do [ -e "$f" ] && put "$f" "$DEST/concord/$(basename "$f")"; done
 for f in "$SRC"/concord/tests/*.sh; do put "$f" "$DEST/concord/tests/$(basename "$f")"; done
-if [ -n "${BK:-}" ] && [ -d "$DEST/concord/tests" ]; then   # suites this source no longer ships; the backup above keeps them
-  for f in "$DEST"/concord/tests/*_test.sh; do [ -e "$SRC/concord/tests/$(basename "$f")" ] && continue
+RETIRED_SUITES="card lessons map reuse slim"   # suites Concord shipped and retired; any other suite in tests/ is the user's
+if [ -n "${BK:-}" ] && [ -d "$DEST/concord/tests" ]; then   # the backup above keeps them
+  for n in $RETIRED_SUITES; do f="$DEST/concord/tests/${n}_test.sh"; [ -e "$f" ] || continue
     if [ "$DRY" = 1 ]; then echo "would remove $f"; else rm "$f"; echo "remove $f"; fi
   done
 fi

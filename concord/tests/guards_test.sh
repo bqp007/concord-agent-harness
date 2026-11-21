@@ -104,6 +104,16 @@ approve PLAN_V.md "$V" || exit 1; vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort
 perl -pi -e 's/grep -q 2 b.py/grep -q 3 b.py/' "$V/PLAN_V.md"; vbegin 1; RC2=$?; [ $RC2 -eq 0 ] && vabort
 [ $RC -eq 0 ] && [ $RC2 -eq 11 ] && ok "a fenced ## Handoff line inside a phase hides none of the phase (an edited acceptance command: --begin exits 11)" \
   || bad "fenced Handoff inside a phase: rc=$RC then $RC2"
+# once a phase starts, a skip heading inside it hides nothing: the phase's lines, as the dispatcher cuts the phase, stay
+# approved text (v17: ## Handoff inside a level-1 phase; v18: an indented ## Handoff, which does not end a ### phase)
+mkv v17 '\n# Phase 2 - second\nExecutor: deepseek-flash\nFiles: b.py\n## Handoff\nnotes for the executor\nAcceptance:\n- `grep -q 2 b.py`\n'
+mkv v18 '\n### Phase 2 - second\nExecutor: deepseek-flash\nFiles: b.py\n   ## Handoff\nnotes for the executor\nAcceptance:\n- `grep -q 2 b.py`\n'
+for NAME in v17 v18; do V="$T/$NAME"
+  approve PLAN_V.md "$V" || exit 1; vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort
+  perl -pi -e 's/grep -q 2 b.py/grep -q 3 b.py/' "$V/PLAN_V.md"; vbegin 1; RC2=$?; [ $RC2 -eq 0 ] && vabort
+  [ $RC -eq 0 ] && [ $RC2 -eq 11 ] && ok "a ## Handoff inside a phase hides none of the phase ($NAME: an edited acceptance command below it: --begin exits 11)" \
+    || bad "Handoff inside a phase ($NAME) hid its acceptance: rc=$RC then $RC2"
+done
 mkv v7; { printf '# Plan\nSize: ~4 lines\n\n'; phase 1 '' 'grep -q 2 a.py'; } > "$V/PLAN_V.md"
 vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort
 approve PLAN_V.md "$V" || exit 1; vbegin 1; RC2=$?; [ $RC2 -eq 0 ] && vabort
