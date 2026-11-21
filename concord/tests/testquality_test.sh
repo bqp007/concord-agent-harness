@@ -204,10 +204,11 @@ both = sum(1 for a, b in pairs if a[0] != sys.argv[2] and b[0] != sys.argv[3])
 sys.exit(0 if len(pairs) > 1 and both == 0 else 1)
 PYM
 [ $? -eq 0 ] && [ $RC -eq 0 ] && ok "two changed files: never more than one mutant in the copy at a time" || { bad "stacked mutants rc=$RC"; head -4 "$T/mlog" 2>/dev/null; }
-newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import time, lib; time.sleep(4); assert lib.clamp(5) == 5"`\n'
-run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid); H0=$(sha "$R/lib.py")
+newrepo 'Files: lib.py\nAcceptance:\n- `touch "$T/grading" && python3 -c "import time, lib; time.sleep(4); assert lib.clamp(5) == 5"`\n'
+run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid); H0=$(sha "$R/lib.py"); rm -f "$T/grading"
 $DP --mutate "$RID" --max 2 --repo "$R" > "$T/out.txt" 2>&1 & MP=$!
-sleep 1.5; kill -TERM $MP 2>/dev/null; wait $MP; RC=$?
+for _ in $(seq 100); do [ -e "$T/grading" ] && break; sleep 0.1; done   # a check command runs only after the handler is set
+kill -TERM $MP 2>/dev/null; wait $MP; RC=$?
 [ "$(sha "$R/lib.py")" = "$H0" ] && [ $RC -eq 130 ] && has "interrupted; the isolated copy was removed" \
   && ok "SIGTERM during grading: exit 130, live file untouched" || { bad "sigterm rc=$RC"; cat "$T/out.txt"; }
 newrepo 'Files: notes.txt\nAcceptance:\n- `test -f notes.txt`\n'
