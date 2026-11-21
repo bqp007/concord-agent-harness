@@ -3168,22 +3168,29 @@ def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
 
 
 def started_dirty(repo, run_dir, meta, files):
-    """True when an in-scope file has a start copy that differs from its content at the run's start commit
-    (a file missing at that commit counts as different). No head_before or no start copy: False."""
+    """True when an in-scope file has a start copy that differs from the file at the run's start commit, in content or
+    in the owner execute bit that git records (a file missing at that commit counts as different). No head_before or no
+    start copy: False."""
     sha = meta.get("head_before") if isinstance(meta, dict) else None
     if not isinstance(sha, str) or not sha:
         return False
     for f in files:
+        copy = Path(run_dir) / "backup" / f
         try:
-            before = (Path(run_dir) / "backup" / f).read_bytes()
+            before, executable = copy.read_bytes(), bool(copy.stat().st_mode & 0o100)
         except OSError:
             continue
         try:
             done = subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{f}"],
                                   capture_output=True, timeout=PR_TIMEOUT)
+            tree = subprocess.run(["git", "-C", str(repo), "ls-tree", sha, "--", f],
+                                  capture_output=True, text=True, timeout=PR_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if done.returncode != 0 or done.stdout != before:
+            return True
+        mode = tree.stdout.split(" ", 1)[0]
+        if mode in ("100644", "100755") and (mode == "100755") != executable:
             return True
     return False
 

@@ -375,5 +375,22 @@ $DP --review "$DRID" --packet --repo "$PR3" > "$T/out.txt" 2>&1; DPK=$(sed -n 's
 [ -f "$DPK" ] && ! grep -qiF "the design the plan approves" "$DPK" \
   && ok "a plan with no Design section adds no design block to the phase packet" || bad "a design block appeared for a plan without a Design section"
 
+# a whole phase whose only dirty in-scope file differs from the start commit by mode alone (committed 0644, made 0755
+# before the run), and the run returns it to 0644 with the same bytes: the packet shows the run's own mode change
+PR4="$T/pmode"; mkdir -p "$PR4" && ( cd "$PR4" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'echo run\n' > run.sh; chmod 644 run.sh; printf '.claude/\n' > .gitignore; git add -A && git commit -qm init
+  printf '# Plan\n## Phase 1 - x\nExecutor: deepseek-flash\nRisk: medium\nFiles: run.sh\nAcceptance:\n- `test ! -x run.sh`\n' > PLAN_M.md ) || { echo "setup failed: pmode"; exit 1; }
+approve PLAN_M.md "$PR4" || exit 1
+chmod 755 "$PR4/run.sh"                                   # a dirty start by mode alone; the bytes equal the commit's
+FAKE_ACTIONS="chmod 644 run.sh" $DP 1 --plan PLAN_M.md --via qwen --model fake/m --repo "$PR4" > "$T/out.txt" 2>&1
+MRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+{ [ -n "$MRID" ] && [ ! -x "$PR4/run.sh" ] && [ -z "$(git -C "$PR4" status --porcelain -- run.sh)" ]; } \
+  || { echo "setup failed: a whole-phase run that returned run.sh to 0644"; cat "$T/out.txt"; exit 1; }
+$DP --review "$MRID" --packet --repo "$PR4" > "$T/out.txt" 2>&1; MPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$MPK" ] && grep -A1 -xF 'diff --git a/run.sh b/run.sh' "$MPK" | grep -qxF 'old mode 100755' \
+  && grep -A2 -xF 'diff --git a/run.sh b/run.sh' "$MPK" | grep -qxF 'new mode 100644' \
+  && ok "a whole-phase packet shows a run that only reset the execute bit it started with (100755 to 100644)" \
+  || bad "the whole-phase packet hides the run's mode change (packet '${MPK:-none}'): $(grep -n -A2 'run.sh' "${MPK:-/dev/null}" | head -4; tail -2 "$T/out.txt")"
+
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
