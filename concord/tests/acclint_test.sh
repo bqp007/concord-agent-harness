@@ -168,6 +168,9 @@ C0=$(calls); review "$RID" --files 'nothing/*' --exclude zz; RC=$?
 $DP --review "$RID" --packet --files 'docs/*' --repo "$R" > "$T/out.txt" 2>&1; RC=$?; PK=$(sed -n 's/^PACKET //p' "$T/out.txt" | head -1)
 [ $RC -eq 0 ] && [ -f "$PK" ] && grep -q '^+more$' "$PK" && ! grep -q '^+# r$' "$PK" && ok "E.4 --packet --files: packet holds the docs diff only" || { bad "E.4 packet rc=$RC"; tail -2 "$T/out.txt"; }
 run "python3 -c \"open('big.py','w').write(''.join('v_%04d = %r\\\\n' % (i, 'x' * 30) for i in range(8000)))\"; echo y > docs/y.md"; BIG=$(rid)
+C0=$(calls); review "$BIG"; RC=$?
+[ $RC -eq 2 ] && [ "$(calls)" = "$C0" ] && has "split the change, or use --packet for an Opus reviewer" && has "--files GLOB" \
+  && ok "E.5 over the cap without --files: refused (exit 2) with the file groups, no model call" || { bad "E.5 rc=$RC"; tail -3 "$T/out.txt"; }
 C0=$(calls); review "$BIG" --files 'docs/*'; RC=$?
 [ $RC -eq 0 ] && [ "$(calls)" = "$((C0+1))" ] && ok "E.6 over the cap with --files on the small group: reviewer runs" || { bad "E.6 rc=$RC calls $C0->$(calls)"; tail -3 "$T/out.txt"; }
 fi

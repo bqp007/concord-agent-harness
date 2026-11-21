@@ -568,7 +568,8 @@ def read_copies(gitdir):
 
 def join_blockers(fork, origin, record):
     """What `join` would lose or get wrong: a path whose staged content differs from its working file; a path deleted
-    in the fork, staged or committed, whose working file exists again; a fork whose HEAD moved and a path whose
+    in the fork, staged or committed, whose working file exists again; an ignored file staged in the fork (git add -f),
+    which the patch leaves out; a fork whose HEAD moved and a path whose
     committed content differs from its working file; an ignored file of the fork, outside
     the linked folders, that the origin lacks or holds differently (a symlink only counts as held when the origin has
     a link with the same target text). An unchanged copied plan is not unique to the fork."""
@@ -581,6 +582,14 @@ def join_blockers(fork, origin, record):
     back = names_of(fork, "ls-files", "--others") if gone else set()     # git's own names: exact case, ignored included
     out += [f"{p}: deleted in the fork (staged or committed), but a working file exists (join would lose the deletion)"
             for p in sorted(gone & back)]
+    added = sorted(names_of(fork, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=A", "HEAD"))
+    if added:           # fork_patch builds on HEAD with add -A, which skips ignored files, so a staged one is left out
+        res = subprocess.run(["git", "-C", str(fork), "check-ignore", "-z", "--stdin", "--no-index"],
+                             input=b"\0".join(p.encode() for p in added), capture_output=True)
+        if res.returncode not in (0, 1):                 # 1: none of them is ignored
+            die(f"git check-ignore failed: {res.stderr.decode(errors='replace').strip()}")
+        out += [f"{p}: an ignored file staged in the fork (join carries no ignored file, so it would be lost)"
+                for p in sorted(p.decode(errors="replace") for p in res.stdout.split(b"\0") if p)]
     head = git(fork, "rev-parse", "HEAD")
     if snap and head != snap:
         committed = names_of(fork, "diff", "--name-only", snap, head)

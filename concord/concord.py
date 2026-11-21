@@ -3141,9 +3141,12 @@ def mode_lines(before, after):
 
 def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
     """Unified diff of the run's changes against `base` (the run's start commit when usable, else HEAD), so both
-    committed and uncommitted changes of the run's files appear; untracked files are diffed against /dev/null.
+    committed and uncommitted changes of the run's files appear; a file the run removed from the index and the working
+    tree (git rm) is diffed against `base` as a deletion, and other untracked files against /dev/null.
     `cap=None` returns the raw diff (no truncation marker); otherwise a diff over `cap` is cut with a note."""
     tracked = set(git(repo, "ls-files", "--", *files).split("\n")) - {""}
+    tracked |= {f for f in files if f not in tracked and not os.path.lexists(Path(repo) / f)
+                and run_git(["cat-file", "-e", f"{base}:{f}"], repo).returncode == 0}
     parts = []
     tracked_files = [f for f in files if f in tracked]
 
@@ -5180,8 +5183,8 @@ def pr_coverage(repo, entries, mb, head):
     valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
     memo = {}
 
-    def unchanged(h0, h, path):
-        res = run_git(["diff", "--quiet", h0, h, "--", path], repo, timeout=PR_TIMEOUT)
+    def unchanged(h0, h, path):          # a PR file name is untrusted: a name like `:(top)x` is a file, never pathspec magic
+        res = run_git(["--literal-pathspecs", "diff", "--quiet", h0, h, "--", path], repo, timeout=PR_TIMEOUT)
         return res.returncode == 0
 
     def cov(h):

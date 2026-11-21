@@ -317,11 +317,16 @@ git -C "$R" worktree add -q "$T/wt8" -b wt8 > /dev/null 2>&1; W8A=$(cat "$T/wt8/
 $DP --restore "$G" --repo "$T/wt8" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && [ "$(cat "$T/wt8/a.py")" = "$W8A" ] && ok "8 a run id of another checkout (the main checkout's run, asked in a worktree): refused (nonzero exit), the worktree untouched" \
   || { bad "8 foreign run restored rc=$RC"; cat "$T/out.txt"; }
-mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); rm -f "$T/escape.txt"
-python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m["backed_up"]=m.get("backed_up", [])+["../escape.txt"]; json.dump(m,open(p,"w"))' "$R/.git/concord/$G/meta.json"
-printf 'planted\n' > "$R/.git/concord/$G/escape.txt"
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid)
+# ../escape.txt gets a.py's recorded end state and start hash, and copies that match them, so only its path stops the restore
+cp "$R/a.py" "$T/escape.txt"; cp "$R/.git/concord/$G/backup/a.py" "$R/.git/concord/$G/escape.txt"; ESC=$(cat "$T/escape.txt")
+python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p))
+for k in ("end_hashes", "backup_hashes", "end_kinds", "end_exec"): m[k]["../escape.txt"] = m[k]["a.py"]
+m["backed_up"] = m.get("backed_up", []) + ["../escape.txt"]; json.dump(m, open(p, "w"))' "$R/.git/concord/$G/meta.json"
 $DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
-[ ! -e "$T/escape.txt" ] && ! has "Traceback" && ok "8 a backup path that resolves outside the repository is not restored" || { bad "8 backup path outside the repository was written"; cat "$T/out.txt"; }
+[ "$(cat "$T/escape.txt")" = "$ESC" ] && has "../escape.txt: not restored (its path resolves outside the repository)" && ! has "Traceback" \
+  && ok "8 a backup path that resolves outside the repository is not restored, though its end state and start hash match" || { bad "8 backup path outside the repository was written or not named"; cat "$T/out.txt"; }
+rm -f "$T/escape.txt"
 mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); AY=$(cat "$R/a.py")
 { [ -n "$G" ] && grep -q '^y$' "$R/a.py" && [ ! -x "$R/a.py" ]; } || { echo "setup failed: run that appended y to a non-executable a.py"; exit 1; }
 chmod +x "$R/a.py"

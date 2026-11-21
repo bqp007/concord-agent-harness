@@ -279,8 +279,10 @@ REVIEW-JSON
  ], "clauses": [], "tests": [], "verdict": "BLOCK"}
 END-REVIEW-JSON
 EOF
-record "$RID" reviewer-opus55 "$T/rev.txt" "$R" > /dev/null 2>&1; rm "$R/a.py"; record "$RID" reviewer-opus55 "$T/rev.txt" "$R" > "$T/rr.txt" 2>&1
-python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]))['reviews'][-1]; sys.exit(0 if r.get('highs')==4 and r.get('blockers')==1 else 1)" "$R/.git/concord/$RID/meta.json" \
-  && ok "review record on a run whose files are gone keeps findings as written" || { bad "no-files record downgraded"; cat "$T/rr.txt"; }
+record "$RID" reviewer-opus55 "$T/rev.txt" "$R" > /dev/null 2>&1
+N1=$(python3 -I -c "import json,sys; print(len(json.load(open(sys.argv[1]))['reviews']))" "$R/.git/concord/$RID/meta.json")
+rm "$R/a.py"; record "$RID" reviewer-opus55 "$T/rev.txt" "$R" > "$T/rr.txt" 2>&1; RR=$?
+python3 -I -c "import json,sys; rs=json.load(open(sys.argv[1]))['reviews']; r=rs[-1]; sys.exit(0 if len(rs)==int(sys.argv[2])+1 and r.get('highs')==4 and r.get('blockers')==1 else 1)" "$R/.git/concord/$RID/meta.json" "$N1" && [ $RR -eq 0 ] \
+  && ok "review record on a run whose files are gone is recorded (exit 0) and keeps findings as written" || { bad "no-files record rc=$RR"; cat "$T/rr.txt"; }
 
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

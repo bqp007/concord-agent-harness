@@ -271,6 +271,12 @@ $WT join T8 9 --repo "$W8" > "$T/j9.txt" 2>&1; RJ9=$?
 [ $RJ9 -ne 0 ] && [ -d "$F9B" ] && [ ! -e "$W8/only9.py" ] && grep -q "before 3.0" "$T/j9.txt" \
   && ok "a fork without .wt-fork (made by an older wt.py) is refused and kept, with the reason" || { bad "fork without .wt-fork rc=$RJ9"; cat "$T/j9.txt"; }
 $WT join T8 9 --repo "$W8" --force > /dev/null 2>&1
+$WT fork T8 10 --repo "$W8" > /dev/null 2>&1; F10B="$M/.claude/worktrees/T8-p10"; [ -d "$F10B" ] || { echo "setup failed: fork 10"; exit 1; }
+printf 'x = 13\n' > "$F10B/a.py"; mkdir -p "$F10B/build"; printf 'precious\n' > "$F10B/build/out.txt"; git -C "$F10B" add -f build/out.txt
+$WT join T8 10 --repo "$W8" > "$T/j10.txt" 2>&1; RJ10=$?
+[ $RJ10 -ne 0 ] && [ -d "$F10B" ] && [ -f "$F10B/build/out.txt" ] && grep -q 'build/out\.txt' "$T/j10.txt" \
+  && ok "join with an ignored file staged in the fork (git add -f) is refused, the fork kept, the file named" || { bad "staged ignored file rc=$RJ10"; cat "$T/j10.txt"; }
+git -C "$F10B" reset -q build/out.txt; $WT join T8 10 --repo "$W8" --force > /dev/null 2>&1
 echo "== done and join do not over-refuse: tracked .claude files, cache folders, unchanged copies, copies of an older wt.py"
 # mkr DIR [TRACKED_CLAUDE]: a repo with mod.py, an ignored __pycache__/ and, with the argument, a tracked .claude/settings.json
 mkr(){ rm -rf "$1"; mkdir -p "$1"; ( cd "$1" && git init -q -b main && git config user.email t@t && git config user.name t

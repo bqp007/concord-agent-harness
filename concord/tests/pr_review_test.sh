@@ -307,14 +307,14 @@ has "REVIEWED at medium WITH OWNER WAIVER: blob.bin excluded" && grep -qE '^  bl
 
 echo "== the phase packet: deleted files, the recorded acceptance result, the diff fence, no executor notes"
 PR2="$T/prun"; mkdir -p "$PR2" && ( cd "$PR2" && git init -q -b main && git config user.email t@t && git config user.name t
-  printf 'x = 1\n' > a.py; printf 'g = 1\n' > gone.py; printf '.claude/\n' > .gitignore; git add -A && git commit -qm init
-  printf '# Plan\n## Design\n- DESIGN-MARK-31: a.py keeps x = 1 for the old callers\n## Phase 1 - drop gone\nExecutor: deepseek-flash\nFiles: a.py, gone.py\nAcceptance:\n- `sh -c "echo ACC-FAIL-MARK-77; exit 1"`\n' > PLAN_P.md ) || { echo "setup failed: prun"; exit 1; }
+  printf 'x = 1\n' > a.py; printf 'g = 1\n' > gone.py; printf 'h = 1\n' > gone2.py; printf '.claude/\n' > .gitignore; git add -A && git commit -qm init
+  printf '# Plan\n## Design\n- DESIGN-MARK-31: a.py keeps x = 1 for the old callers\n## Phase 1 - drop gone\nExecutor: deepseek-flash\nFiles: a.py, gone.py, gone2.py\nAcceptance:\n- `sh -c "echo ACC-FAIL-MARK-77; exit 1"`\n' > PLAN_P.md ) || { echo "setup failed: prun"; exit 1; }
 approve PLAN_P.md "$PR2" || exit 1
-FAKE_ACTIONS='echo y >> a.py; rm gone.py; printf "STATUS: DONE\nFOUND: a.py:1 marker-found-fact-xyz\n"' $DP 1 --plan PLAN_P.md --via qwen --model fake/m --repo "$PR2" > "$T/out.txt" 2>&1
+FAKE_ACTIONS='echo y >> a.py; rm gone.py; git rm -q gone2.py; printf "STATUS: DONE\nFOUND: a.py:1 marker-found-fact-xyz\n"' $DP 1 --plan PLAN_P.md --via qwen --model fake/m --repo "$PR2" > "$T/out.txt" 2>&1
 PRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$PRID" ] || { echo "setup failed: phase run"; cat "$T/out.txt"; exit 1; }
 $DP --review "$PRID" --packet --repo "$PR2" > "$T/out.txt" 2>&1; PPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-[ -f "$PPK" ] && grep -q '^deleted file mode' "$PPK" && grep -q '^-g = 1$' "$PPK" \
-  && ok "the phase packet shows a deleted file with its diff" || { bad "deleted file missing from the phase packet '$PPK'"; tail -2 "$T/out.txt"; }
+[ -f "$PPK" ] && grep -q '^deleted file mode' "$PPK" && grep -q '^-g = 1$' "$PPK" && grep -q '^-h = 1$' "$PPK" \
+  && ok "the phase packet shows a deleted file with its diff, removed with rm or with git rm" || { bad "deleted file missing from the phase packet '$PPK'"; tail -2 "$T/out.txt"; }
 [ -f "$PPK" ] && grep -qF "ACC-FAIL-MARK-77" "$PPK" && ! grep -qiF "acceptance tests already pass" "$PPK" \
   && ok "the phase packet shows the recorded acceptance result, the failed command included, not a sentence that it passes" || bad "acceptance result in the phase packet"
 python3 -I - "$PPK" <<'PYE' > "$T/fence.txt" 2>&1

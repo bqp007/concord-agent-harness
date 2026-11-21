@@ -173,6 +173,7 @@ inst_v() { env HOME=$H CLAUDE_HOME=$H/x bash install.sh --no-tests >/dev/null &&
   ! grep -qF '.claude/concord' "$H/x/settings.json"; }
 # a CLAUDE_HOME whose name holds a space, a single and a double quote: settings.json stays valid JSON and the hook command, split as sh splits it, names the script
 inst_w() { local d="$H/it's a \"odd\" home"; env HOME=$H CLAUDE_HOME="$d" bash install.sh --no-tests >/dev/null &&
+  env HOME=$H CLAUDE_HOME="$d" bash install.sh --no-tests > "$H/out" 2>&1 && ! grep -q 'keep hook' "$H/out" &&
   python3 -B -I -c "
 import json, shlex, sys, os
 d = sys.argv[1]

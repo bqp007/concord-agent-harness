@@ -114,6 +114,11 @@ git -C "$R" config --unset color.diff; git -C "$R" config --unset color.ui
   && ok "delta: a file name with a double quote keeps its diff and the prompt has no color codes under color.ui=always" || { bad "quoted name or color rc=$RC"; tail -2 "$T/out.txt"; }
 newpr 17 "printf 'evil = 1\n' > ':(top)a.py'"; review 17 FAKE_CLEAN=1
 grep -q '^+evil = 1$' "$RD/prompt.txt" && ok "a PR file named ':(top)a.py' is diffed literally (no pathspec magic)" || bad "pathspec magic hid a file from the review"
+opus 17 medium concord:reviewer-opus55 "$T/clean.txt"; st 17
+[ $RC -eq 0 ] || { echo "setup failed: PR 17 is not REVIEWED after a clean Opus review"; cat "$T/out.txt"; exit 1; }
+pushn 17 "printf 'evil = 2\n' > ':(top)a.py'"; st 17
+has "UNREVIEWED" && grep -qF '  :(top)a.py: needs medium' "$T/out.txt" && [ $RC -eq 1 ] \
+  && ok "a file named ':(top)a.py' changed after its reviewed head needs a new review (no pathspec magic carries coverage)" || { bad "pathspec magic carried coverage to a changed file rc=$RC"; tail -3 "$T/out.txt"; }
 
 echo "== a finding path is stored without ./ so a resolution finds the file"
 newpr 18 "printf 'w = 1\n' > w2.py"; review 18 FAKE_PATH=./w2.py
@@ -137,7 +142,8 @@ has "UNREVIEWED" && has "a.py" && ! has "FINDINGS OPEN" && [ $RC -eq 1 ] \
   && ok "an answer that omits the hunk: F1 closes, the file stays uncovered" || { bad "omitted hunk rc=$RC"; tail -4 "$T/out.txt"; }
 s23 83 'policy(retries=3, timeout=60)'
 dans "$T/d.txt" '[]' '[{"hunk": "H1", "explained_by": "F1"}]'; opus 83 medium reviewer-delta "$T/d.txt" --delta; st 83
-has "FINDINGS OPEN" && has "F1" && [ $RC -eq 1 ] && ok "no resolution for F1: it stays open, and a hunk naming it is unexplained" || { bad "missing resolution rc=$RC"; tail -4 "$T/out.txt"; }
+has "FINDINGS OPEN" && has "F1" && grep -qF '  a.py: needs medium' "$T/out.txt" && ! has "a.py: medium by" && [ $RC -eq 1 ] \
+  && ok "no resolution for F1: it stays open, and a hunk naming it is unexplained (a.py needs medium)" || { bad "missing resolution rc=$RC"; tail -4 "$T/out.txt"; }
 s23 84 'policy(retries=3, timeout=60)'
 dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "a.py:1 ok"}, {"finding": "F1", "fixed": "no", "evidence": "a.py:1 still 3 but timeout moved"}]' '[]'; opus 84 medium reviewer-delta "$T/d.txt" --delta; st 84
 has "FINDINGS OPEN" && has "F1" && [ $RC -eq 1 ] && ok "two resolutions of F1 that disagree: F1 stays open" || { bad "disagreeing resolutions rc=$RC"; tail -4 "$T/out.txt"; }

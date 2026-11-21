@@ -100,13 +100,15 @@ if os.path.exists(snippet):
     # A hook is replaced only when its whole command equals one this installer ships or shipped before:
     # `python3 "$HOME/.claude/concord/concord.py" --drift-hook 2>/dev/null || true` (or --lessons-hook), or
     # `sh '<home>/concord/drift_hook.sh' 2>/dev/null || true` (double quotes before; the quoted path holds no quote, so a
-    # user's command before the shipped one is no part of it). A user's own hook stays, and so does a
-    # shipped command with anything added; the installer names each such kept hook.
+    # user's command before the shipped one is no part of it), or the exact command this run writes, whatever its home
+    # path holds. A user's own hook stays, and so does a shipped command with anything added; the installer names each
+    # such kept hook.
     TAIL = r" 2>/dev/null \|\| true"
     SHIPPED = re.compile(r'^(python3 "\$HOME/\.claude/concord/concord\.py" --(drift|lessons)-hook|'
                          r'sh (["\'])[^"\']*/concord/drift_hook\.sh\3)' + TAIL + "$")
     CONTAINS = re.compile(r'python3 "\$HOME/\.claude/concord/concord\.py" --(drift|lessons)-hook\b|/concord/drift_hook\.sh')
-    def shipped(h): return bool(SHIPPED.match(h.get("command", "")))
+    OWN = {h.get("command") for entries in hooks.values() for e in entries for h in e.get("hooks", [])}
+    def shipped(h): return h.get("command") in OWN or bool(SHIPPED.match(h.get("command", "")))
     # Each snippet hook joins its event's existing list once, replacing the shipped hooks that stand there.
     for event, entries in hooks.items():
         have = base.setdefault("hooks", {}).setdefault(event, [])

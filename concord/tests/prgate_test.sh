@@ -196,8 +196,8 @@ rm -f "$NOTES"
 echo "== 8 needed tiers come from the Concord runs that produced the PR"
 runpr 90 high 'core.py, new.py, old.py' "echo 'c = 2' > core.py; echo 'n = 1' > new.py; rm old.py"; RUN90=$RUNID
 for f in core.py new.py old.py; do
-  $DP --review-pr 90 --packet --tier low --files "$f" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
-  [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 --tier low for $f (a path a Risk: high run changed, created or deleted) is refused" || { bad "8 low tier for $f rc=$RC"; tail -2 "$T/out.txt"; }
+  $DP --review-pr 90 --packet --tier medium --files "$f" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+  [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 --tier medium for $f (a path a Risk: high run changed, created or deleted) is refused" || { bad "8 medium tier for $f rc=$RC"; tail -2 "$T/out.txt"; }
 done
 $DP --review-pr 90 --packet --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && grep -qF "PLAN-MARK-90" "$PK" && ! grep -qF "No Concord run produced this PR" "$PK" \
