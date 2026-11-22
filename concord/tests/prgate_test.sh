@@ -10,10 +10,13 @@
 # (10) A finding belongs to the PR: a fix on a sibling branch closes nothing, a force-push or a moved merge base keeps it
 # open (carried), a finding whose file left the diff is resolved by a review of the other files, and a clause FAIL of one
 # file group is neither listed nor resolved by a review of another group. (11) A run counts for the files whose content
-# after the run is in one of the PR's own commits, or feeds a run that counts; its branch name plays no part. (12) PR
-# records belong to one repository. (13) Status and packets stop (exit 75) while gh's head and the pull ref differ.
+# after the run is in one of the PR's own commits, or feeds a run that counts; its branch name plays no part; a run below
+# Risk medium counts only when the PR made its exact change (the same content and file mode, or the deletion of its start
+# copy). (12) PR records belong to one repository. (13) Status and packets stop (exit 75) while gh's head and the pull
+# ref differ or one of them cannot be read, a wait re-reads the base, and the report leaves the findings unjudged.
 # (14) A finding path names a PR file (an a/ or b/ before one is dropped); any other path is resolved only by a review of
-# every file. (15) A PR packet names a read-only copy of the reviewed head as the repository to read.
+# every file; an older ledger's finding is mapped against the files of the review that raised it. (15) A PR packet names
+# a read-only copy of the reviewed head as the repository to read, and a direct review runs inside that copy.
 # No network: fake gh, fake qwen reviewer and executor, a local bare repository as the remote.
 # Run: bash ~/.claude/concord/tests/prgate_test.sh   (exit 0 = every check passed)
 set -u
@@ -25,7 +28,7 @@ cp -p "$SRC"/concord.py "$SRC"/wt.py "$SRC"/*.md "$SRC"/*.conf "$T/concord/" && 
 REFUSAL='Error: Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go'; export REFUSAL
 cat > "$T/bin/qwen" <<'Q'
 #!/bin/sh
-echo ran >> "$T/qwen_calls"
+echo ran >> "$T/qwen_calls"; pwd -P > "$T/qwen_cwd"
 if [ -n "${FAKE_REFUSE:-}" ]; then printf '> build . fake\n%s\n' "$REFUSAL"; exit 1; fi
 if [ -n "${FAKE_ACTIONS:-}" ]; then sh -c "$FAKE_ACTIONS"; exit 0; fi
 cat "${FAKE_JSON:-$T/clean.txt}"
@@ -34,8 +37,8 @@ cat > "$T/bin/gh" <<'G'
 #!/bin/sh
 [ "$1" = pr ] && [ "$2" = view ] || exit 1
 n=$(printf '%s' "$3" | sed -E 's|.*/pull/||; s|.*#||')
-[ -f "$T/pr$n.json" ] && cat "$T/pr$n.json" && exit 0
-echo "no pull requests found for $3" >&2; exit 1
+[ -f "$T/pr$n.json" ] || { echo "no pull requests found for $3" >&2; exit 1; }
+cat "$T/pr$n.json"; [ -f "$T/pr$n.next" ] && mv "$T/pr$n.next" "$T/pr$n.json"; exit 0
 G
 chmod +x "$T/bin/qwen" "$T/bin/gh"
 # Prefer the developer dir's real git/python3 over the /usr/bin xcrun shims (they print cache errors in the sandbox).
@@ -144,6 +147,13 @@ has "REVIEWED at" && ! has "UNREVIEWED" && [ $RC -eq 0 ] && ok "3 a clean opus55
 TREE=$(sed -n 's/^REPOSITORY (read-only, head [0-9a-f]*): //p' "$PK" | head -1)
 [ -n "$TREE" ] && [ "$(cat "$TREE/m.py" 2>/dev/null)" = "m = 63" ] && [ "$(cat "$TREE/README" 2>/dev/null)" = "readme" ] \
   && ok "3 the packet names a read-only copy of the reviewed head as the repository to read" || bad "3 no copy of the head named in the packet: '${TREE:-none}'"
+newpr 120 m.py 'm = 120'
+flash 120 fake/m --tier medium --dry-run; D=$(sed -n 's|.*prompt [0-9]* chars at \(.*\)/prompt.txt|\1|p' "$T/out.txt" | head -1)
+grep -qF "REPOSITORY (read-only, head $(hd 120)): $D/tree" "$D/prompt.txt" && [ "$(cat "$D/tree/m.py" 2>/dev/null)" = "m = 120" ] \
+  && ok "3 a direct review dry run prepares the head tree and its prompt names it" || bad "3 direct dry run: no head tree or no REPOSITORY line in '${D:-none}'"
+rm -f "$T/qwen_cwd"; flash 120 fake/m --tier medium; W=$(cat "$T/qwen_cwd" 2>/dev/null)
+[ "${W##*/}" = tree ] && [ "$(cat "$W/m.py" 2>/dev/null)" = "m = 120" ] && grep -qF "): $W" "$(dirname "$W")/prompt.txt" \
+  && ok "3 a direct review runs the model inside the head tree its prompt names" || bad "3 direct review ran in '${W:-nowhere}', not in the head tree"
 opus 63 medium concord:reviewer-opus55 "$T/high_a.txt"; st 63
 has "FINDINGS OPEN" && [ $RC -eq 1 ] && ok "3 a later answer of the same head with a HIGH: FINDINGS OPEN (exit 1)" || { bad "3 open rc=$RC"; tail -3 "$T/out.txt"; }
 
@@ -263,6 +273,29 @@ $DP --review-pr 93 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 $DP --review-pr 93 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && grep -qF "No Concord run produced this PR; no plan clauses apply" "$PK" && ! grep -qF "PLAN-MARK-930" "$PK" \
   && ok "8 that run's plan stays out of the packet, which says no Concord run produced the PR" || { bad "8 stale run packet '$PK'"; tail -2 "$T/out.txt"; }
+
+# a stale Risk: low run deleted another version of gone.py (its start copy 'g = 1') than the one the PR deletes: both ends are "missing"
+( set -e; cd "$C"; git checkout -q main; printf 'g = 1\n' > gone.py; git add gone.py; git commit -qm "gone.py"; git push -q origin main ) || { echo "setup failed: gone.py"; exit 1; }
+runpr 1910 low gone.py "rm gone.py" pr1910
+( set -e; cd "$C"; git checkout -q main; git checkout -qb pr191; printf 'g = 191\n' > gone.py; git commit -qam "gone 191"; git rm -q gone.py; git commit -qm "pr191 deletes gone.py"
+  git push -qf origin "HEAD:refs/pull/191/head"; git checkout -q main; git branch -qD pr191 ) || { echo "setup failed: pr191"; exit 1; }
+prjson 191
+$DP --review-pr 191 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 an old Risk: low run that deleted another version of the file the PR deletes lowers nothing: --tier low is refused" \
+  || { bad "8 a low run deleting another version lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --review-pr 191 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && ! grep -qF "PLAN-MARK-1910" "$PK" && ok "8 that deletion run's plan stays out of the packet" || { bad "8 deletion run packet '$PK'"; tail -2 "$T/out.txt"; }
+# a stale Risk: low run left launcher.sh 0644 with bytes B; the PR makes it 0755 with the same bytes
+( set -e; cd "$C"; git checkout -q main; printf 'run\n' > launcher.sh; git add launcher.sh; git commit -qm "launcher"; git push -q origin main ) || { echo "setup failed: launcher"; exit 1; }
+runpr 1920 low launcher.sh "printf 'run 2\n' > launcher.sh" pr1920
+( set -e; cd "$C"; git checkout -q main; git checkout -qb pr192; printf 'run 2\n' > launcher.sh; chmod 755 launcher.sh; git add launcher.sh; git commit -qm "pr192 launcher 0755"
+  git push -qf origin "HEAD:refs/pull/192/head"; git checkout -q main; git branch -qD pr192 ) || { echo "setup failed: pr192"; exit 1; }
+prjson 192
+$DP --review-pr 192 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 an old Risk: low run that left the same bytes 0644, the PR makes 0755, lowers nothing: --tier low is refused" \
+  || { bad "8 a low run with another mode lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --review-pr 192 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && ! grep -qF "PLAN-MARK-1920" "$PK" && ok "8 that mode run's plan stays out of the packet" || { bad "8 mode run packet '$PK'"; tail -2 "$T/out.txt"; }
 
 # a run made in a fork of the PR's worktree is the PR's run: it records the fork's origin branch and HEAD
 WT="python3 $T/concord/wt.py"
@@ -510,6 +543,31 @@ case "$S96" in *"${LAG:0:8}"*) case "$S96" in *"${OLD96:0:8}"*) GOT=1;; *) GOT=0
   && ok "16 gh reports a head the pull ref does not serve yet: --pr-status names both and judges no head (exit 75); --review-pr writes no packet (exit 75)" \
   || { bad "16 unreconciled head: status rc=$RC96, packet rc=$RC"; printf '%s\n' "$S96" | tail -2; tail -2 "$T/out.txt"; }
 
+# (a) the pull ref cannot be fetched while gh's head is in the clone: one observation leaves the head unverified
+newpr 120 v.py 'v = 120'; V120=$(hd 120); git -C "$O" update-ref -d refs/pull/120/head
+printf '{"baseRefName": "main", "headRefName": "pr120", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$V120" > "$T/pr120.json"
+st 120
+has "HEAD UNVERIFIED" && ! has "CURRENT HEAD" && ! has "REVIEWED" && [ $RC -eq 75 ] \
+  && ok "16 gh's head is in the clone but the pull ref cannot be fetched: --pr-status says HEAD UNVERIFIED and judges no head (exit 75)" \
+  || { bad "16 one observation was enough for a verdict, rc=$RC"; head -3 "$T/out.txt"; }
+# (b) the report at a PR whose gh head and pull ref differ lists the findings as not judged
+printf '{"baseRefName": "main", "headRefName": "pr113", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$LAG" > "$T/pr113.json"
+git -C "$C" checkout -q --detach "$(hd 113)" && $DP --report --plan .claude/PLAN_R13.md --repo "$C" > "$T/rep16.txt" 2>&1; REP16=$(sed -n 's/^report: //p' "$T/rep16.txt" | head -1); git -C "$C" checkout -q main; prjson 113
+[ -f "$REP16" ] || { echo "setup failed: --report wrote no file"; cat "$T/rep16.txt"; exit 1; }
+OUT16=$(sed -n '/^## Finding outcomes/,/^## Time/p' "$REP16")
+case "$OUT16" in *"PR 113 F1"*"not judged"*"unsettled"*) NJ=1;; *) NJ=0;; esac; case "$OUT16" in *"PR 113 F1"*"closed in"*) CL=1;; *) CL=0;; esac
+[ $NJ -eq 1 ] && [ $CL -eq 0 ] \
+  && ok "16 --report with gh's head and the pull ref apart lists the PR's findings as not judged (unsettled), never closed" \
+  || { bad "16 report judged findings on a head gh does not report: not-judged=$NJ closed=$CL"; printf '%s\n' "$OUT16"; }
+# (c) gh moves the PR to another base between tries: the retry fetches the new base
+newpr 121 w.py 'w = 121'
+printf '{"baseRefName": "main", "headRefName": "pr121", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$LAG" > "$T/pr121.json"
+printf '{"baseRefName": "retargeted", "headRefName": "pr121", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$(hd 121)" > "$T/pr121.next"
+$DP --review-pr 121 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 3 ] && has "refs/heads/retargeted" && ! grep -q '^PACKET' "$T/out.txt" \
+  && ok "16 a base retargeted between tries is the one the retry fetches (exit 3: the new base is not in the remote)" \
+  || { bad "16 the retry fetched the stale base, rc=$RC"; tail -2 "$T/out.txt"; }
+
 echo "== 17 a finding path names a PR file; an unknown path is resolved only by a review of every file"
 newpr 99 launcher.sh 'l = 99' notes.txt 'n = 99'
 fnd(){ printf '{"severity": "HIGH", "path": "%s", "line": 1, "problem": "p", "fix": "f", "repro": {"input": "x", "expected": "2", "actual": "1"}}' "$1"; }
@@ -523,5 +581,23 @@ has "F1" && has "F2" && has "FINDINGS OPEN" && [ $RC -eq 1 ] \
 opus 99 medium concord:reviewer-opus55 "$T/res99.txt"; st 99
 has "REVIEWED at" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
   && ok "17 a review of every PR file resolves both: REVIEWED (exit 0)" || { bad "17 the review of every file did not resolve them, rc=$RC"; head -4 "$T/out.txt"; }
+
+echo "== 18 a ledger of an earlier version keeps its findings: 2.4 stored no head, 3.0.0 an a/ path"
+legacy(){ python3 -I -c 'import json,sys,os; n,run,head,files,ent,r=sys.argv[1:7]; r+="/"
+f=dict({"id": "F1", "severity": "HIGH", "line": 1, "problem": "kept", "run": run, "reviewer": "opus55", "status": "open"}, **json.loads(ent))
+json.dump({"key": "pr"+n, "next_finding": 2, "next_decision": 1, "decisions": [], "findings": [f]}, open(r+"ledger/pr"+n+".json", "w"))
+os.makedirs(r+run, exist_ok=True); json.dump({"kind": "pr-review", "head": head, "pr_files": json.loads(files)}, open(r+run+"/meta.json", "w"))' "$1" "$2" "$(hd "$1")" "$3" "$4" "$RUNS"; }
+newpr 66 t.py 't = 66'
+legacy 66 old66-run '["t.py"]' '{"path": "t.py", "line_end": 1, "fix": "f", "repro": {}, "at": "2026-01-01T00:00:00+00:00"}'
+st 66
+has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "18 a 2.4 entry (a run, no head, no scope) takes its head from the run's meta and stays open (exit 1)" \
+  || bad "18 the 2.4 finding dropped out of the gate, rc=$RC: $(sed -n 1p "$T/out.txt")"
+newpr 67 launch 'l = 67' docs.md 'd = 67'
+legacy 67 old67-run '["launch"]' '{"path": "a/launch", "scope": ["a/launch"]}'
+pushpr 67 docs.md 'd = 68'
+resolves F1 "launch is fixed" "$T/resolve67.txt"
+opus 67 medium concord:reviewer-opus55 "$T/resolve67.txt" --files docs.md; st 67
+has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "18 a 3.0.0 finding scoped a/launch (file launch in the diff): a review of docs.md alone neither covers nor resolves it" \
+  || bad "18 a docs-only review resolved the finding of a/launch, rc=$RC: $(sed -n 1p "$T/out.txt")"
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

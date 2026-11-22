@@ -142,7 +142,7 @@ $DP --review-record "$RRUN" --reviewer reviewer-opus55 --file "$T/rev.txt" --rep
 ( set -e; cd "$R" && git fetch -q origin refs/pull/7/head && git checkout -q FETCH_HEAD && printf 'w = 5\n' > d.py && git add d.py \
   && git commit -qm "pr7 more" && git push -q origin HEAD:refs/pull/7/head && git checkout -q main ) || { echo "setup failed: new commit"; exit 1; }
 H7b=$(git -C "$O" rev-parse refs/pull/7/head); prjson 7 feat-a "$H7b" "feat: add c" "body"
-prjson 9 main "$H8" "none" "none"
+prjson 9 main "$H8" "none" "none"; git -C "$O" update-ref refs/pull/9/head "$H8"   # as on GitHub, the PR has a pull ref
 $DP --pr-status 9 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 has "UNREVIEWED" && [ $RC -eq 1 ] && ok "--pr-status: PR never reviewed -> UNREVIEWED, exit 1" || { bad "no review rc=$RC"; cat "$T/out.txt"; }
 
@@ -419,6 +419,16 @@ MRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -
 $DP --review "$MRID" --packet --repo "$PR5" > "$T/out.txt" 2>&1; MPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$MPK" ] && grep -qF 'memo[1].txt' "$MPK" && ! grep -qF 'memo1.txt' "$MPK" \
   && ok "memo[1].txt in Files: is a literal name: the packet holds no memo1.txt" || bad "memo[1].txt pulled other files into the packet: $(grep -n 'memo' "${MPK:-/dev/null}" | head -4)"
+# a run that edits line 2 of the tracked café.txt: the packet shows that edit, never a new file
+( cd "$PR5" && printf 'c1\nc2\n' > café.txt && git add café.txt && git commit -qm cafe \
+  && printf '# Plan\n## Phase 1 - c\nExecutor: deepseek-flash\nRisk: medium\nFiles: café.txt\nAcceptance:\n- `true`\n' > PLAN_C.md ) \
+  || { echo "setup failed: café"; exit 1; }
+approve PLAN_C.md "$PR5" || exit 1
+FAKE_ACTIONS="printf 'c1\nc3\n' > café.txt" $DP 1 --plan PLAN_C.md --via qwen --model fake/m --no-baseline --repo "$PR5" > "$T/out.txt" 2>&1
+CRID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$CRID" ] || { echo "setup failed: the café run"; cat "$T/out.txt"; exit 1; }
+$DP --review "$CRID" --packet --repo "$PR5" > "$T/out.txt" 2>&1; CPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$CPK" ] && grep -qxF -- '-c2' "$CPK" && grep -qxF -- '+c3' "$CPK" && ! grep -qF 'new file mode' "$CPK" \
+  && ok "an edit of the tracked café.txt shows its removed and added lines, not a new file" || bad "café.txt shows as a new file: $(grep -n -A4 'café' "${CPK:-/dev/null}" | head -6)"
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]
