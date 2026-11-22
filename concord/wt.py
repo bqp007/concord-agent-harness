@@ -642,6 +642,11 @@ def cmd_join(args):
     origin = record.get("origin")
     if origin and Path(origin).resolve() != dirpath.resolve():
         die(f"the fork {fork.name} was made from {origin}, and this is {dirpath}: run join there; fork kept")
+    for w in worktrees(repo):   # git refuses to remove a locked fork after the patch is in: read the lock first
+        if "locked" in w and Path(w["worktree"]).resolve() == fork.resolve():
+            why = w["locked"] if isinstance(w["locked"], str) else ""
+            die(f"the fork {fork.name} is locked by git{f' ({why})' if why else ''}, and nothing was applied; unlock it with "
+                f"`git worktree unlock {fork}`, then run join again; fork kept")
     blockers = join_blockers(fork, origin or dirpath, record)
     if blockers and not args.force:
         die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "

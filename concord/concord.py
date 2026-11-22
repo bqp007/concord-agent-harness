@@ -525,9 +525,17 @@ def file_hash(path):
         return "missing"
 
 
+def file_mode(path):
+    """The permission bits (st_mode & 0o7777) of a regular file, or None when it cannot be read."""
+    try:
+        return os.stat(path).st_mode & 0o7777
+    except OSError:
+        return None
+
+
 def file_identity(path):
     """(kind, executable, content hash) of a path without following a symlink: kind is "file", "link", "missing" or
-    "other"; the hash of a link is the SHA-256 of its target text. --restore compares all three."""
+    "other"; the hash of a link is the SHA-256 of its target text. --restore compares all three (and file_mode)."""
     p = Path(path)
     try:
         if p.is_symlink():
@@ -538,6 +546,17 @@ def file_identity(path):
     if st.st_mode & 0o170000 != 0o100000:       # not a regular file
         return "other", False, "other"
     return "file", bool(st.st_mode & 0o100), file_hash(p)
+
+
+def end_state_drift(repo, meta):
+    """The files whose state now differs from the end state the run recorded after its acceptance re-run: every file
+    the run backed up (its scope as it stood at the start), changed, created or deleted, compared by kind, executable
+    bit and content hash (file_identity). A run without a recorded end state (a version before 3.0) gives []. Used by
+    the PASS verdict and the phase review packet, so acceptance results are never shown or accepted beside files
+    they did not test."""
+    ends, kinds, execs = meta.get("end_hashes") or {}, meta.get("end_kinds") or {}, meta.get("end_exec") or {}
+    return sorted(f for f, h in ends.items()
+                  if file_identity(Path(repo) / f) != (kinds.get(f), execs.get(f), h))
 
 
 # ---------- plan parsing ----------
@@ -2369,11 +2388,13 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "baseline_rc": [b["rc"] for b in st.get("baseline") or []],
         "diff_lines": diff_lines, "no_baseline": st.get("no_baseline"), "backup_hashes": st.get("backup_hashes") or {},
         # The end state of every file the run backed up, changed, created or deleted: content hash (a link's target
-        # text), type and executable bit. --restore compares it for the backed-up files; the PR gate looks the hash up
+        # text), type, executable bit and (end_modes, regular files) the full permission bits. --restore compares it
+        # for the backed-up files; the PR gate looks the hash up
         # in the PR's commits.
         "end_hashes": {f: e[2] for f, e in ends.items()},
         "end_kinds": {f: e[0] for f, e in ends.items()},
         "end_exec": {f: e[1] for f, e in ends.items()},
+        "end_modes": {f: file_mode(repo / f) for f, e in ends.items() if e[0] == "file"},
         "user_approved": [n for n in st.get("notes") or [] if str(n).startswith("user approved")],
         "characterization": char_line or None, "staged": staged_new, "git_internals_changed": internals_changed,
         "sandbox": sandbox_state,
@@ -3918,15 +3939,18 @@ def _ledger_entry(finding, reviewer, run_id, status, extra=None):
     entry.update(extra)
     if review_files is not None:
         # A PR finding's scope: its file. A path outside the PR diff that is a diff file under git's a/ or b/ prefix
-        # names that file; any other path outside the diff names no file, so its scope is the whole diff and only a
-        # review of every file resolves it. A clause FAIL has no path: the files of the review that recorded it.
+        # names that file; any other path outside the diff names no file, so the finding needs the whole diff
+        # (`scope_all`): the diff of the head being reviewed, whatever files enter it later, and only a review of every
+        # file resolves it. A clause FAIL has no path: the files of the review that recorded it.
         path = entry["path"]
         if f"/{run_id}/tree/" in path:          # a path inside the packet's copy of the head names the file there
             entry["path"] = path = path.split(f"/{run_id}/tree/", 1)[1]
         if path and path not in pr_files and path[:2] in ("a/", "b/") and path[2:] in pr_files:
             entry["path"] = path = path[2:]
-        entry["scope"] = (list(review_files) if not path else
-                          [path] if path in pr_files or not pr_files else sorted(pr_files))
+        if path and pr_files and path not in pr_files:
+            entry["scope"], entry["scope_all"] = [], True
+        else:
+            entry["scope"] = list(review_files) if not path else [path]
     return entry
 
 
@@ -4168,11 +4192,17 @@ def fenced_diff(diff):
             f"<<<END-DIFF-{tok}>>>\n")
 
 
-def acceptance_block(run_dir, meta):
-    """The acceptance results recorded after the run, failed commands included, or a line saying none were."""
+def acceptance_block(run_dir, meta, repo):
+    """The acceptance results recorded after the run, failed commands included, or a line saying none were. When a
+    file of the run differs now from the state those results were taken in (end_state_drift), the block says the
+    results are STALE and names the files."""
     cmds = meta.get("acceptance") or []
     if not cmds:
         return "\nAcceptance results: the phase lists no acceptance command.\n"
+    drift = end_state_drift(repo, meta)
+    stale = (f"\nSTALE: these acceptance results do not describe the files below, which differ now from the state the "
+             f"commands ran on ({', '.join(drift)}); the diff shows the current files. Treat the results as no evidence "
+             f"for them.\n") if drift else ""
     after = meta.get("acceptance_after_rc") or []
     expect = list(meta.get("acceptance_expect") or []) + ["green"] * len(cmds)
     rows = [f"- {'exit ' + str(after[k]) if k < len(after) else 'no result'} (expected {expect[k]}): {cmd}"
@@ -4182,7 +4212,7 @@ def acceptance_block(run_dir, meta):
         detail = (Path(run_dir) / "acceptance.after.txt").read_text(errors="replace")[-3000:]
     except OSError:
         pass
-    return ("\nAcceptance results recorded after the run:\n" + "\n".join(rows) + "\n"
+    return ("\nAcceptance results recorded after the run:\n" + stale + "\n".join(rows) + "\n"
             + (f"Output of those commands (tail):\n{detail}" if detail else ""))
 
 
@@ -4238,7 +4268,7 @@ def review_context(args, repo, root, with_diff=True, base=None, packet=False):
             + (f"\nTicket notes (found by earlier executors of this plan):\n{found}\n" if found else "")
             + design_block(run_dir)
             + (f"\nThe phase that was implemented:\n{phase_text}\n" if phase_text else "")
-            + acceptance_block(run_dir, meta)
+            + acceptance_block(run_dir, meta, repo)
             + ledger_block(led_text)
             + ("\nFindings from earlier review rounds, already sent back to the implementer: check that each fix is "
                "right; do not repeat a finding the diff resolves:\n" + "\n".join(prior) + "\n" if prior else "")
@@ -4707,12 +4737,17 @@ def head_sources(n, gh_head, fetched):
 
 def fetch_pr_refs(repo, n, base_branch, ref, base_ref, remote="origin"):
     """Fetch the PR head into `ref` and the base branch into `base_ref` (both forced, into temp refs, so the
-    review works in single-branch / custom-refspec clones and never touches origin/*); exit 3 when either is gone."""
-    for src, dst, why in ((f"pull/{n}/head", ref, "PR head (fork or closed PR?)"),
-                          (f"refs/heads/{base_branch}", base_ref, "base branch (deleted?)")):
-        res = run_git(["fetch", "--quiet", remote, f"+{src}:{dst}"], repo, timeout=PR_TIMEOUT)
-        if res.returncode != 0:
-            die(f"git fetch {remote} {src} failed for PR {n}: {why}: {res.stderr.strip()}", code=3)
+    review works in single-branch / custom-refspec clones and never touches origin/*). Returns False when the pull
+    ref cannot be fetched (a missing observation: the caller's shared retry decides, as for --pr-status); exits 3
+    when the base branch cannot be fetched. Returns True when both are in place."""
+    res = run_git(["fetch", "--quiet", remote, f"+pull/{n}/head:{ref}"], repo, timeout=PR_TIMEOUT)
+    if res.returncode != 0:
+        return False
+    res = run_git(["fetch", "--quiet", remote, f"+refs/heads/{base_branch}:{base_ref}"], repo, timeout=PR_TIMEOUT)
+    if res.returncode != 0:
+        die(f"git fetch {remote} refs/heads/{base_branch} failed for PR {n}: base branch (deleted?): "
+            f"{res.stderr.strip()}", code=3)
+    return True
 
 
 def fetch_quiet(repo, src, dst, remote="origin"):
@@ -4922,7 +4957,8 @@ def cmd_review_pr(args, target, conf):
     base = f"refs/review/base{n}-{os.getpid()}"
     try:
         def probe(cur):                             # the base branch is the one gh reports now (a retarget)
-            fetch_pr_refs(repo, n, (cur.get("baseRefName") or "").strip() or base_branch, ref, base, remote)
+            if not fetch_pr_refs(repo, n, (cur.get("baseRefName") or "").strip() or base_branch, ref, base, remote):
+                return ""                           # no pull ref: unobserved, so settle_pr_head retries and exits 75
             return git(repo, "rev-parse", ref, timeout=PR_TIMEOUT)
         head, why, info, gh_head, fetched = settle_pr_head(repo, n, asked, fields, probe, info)
         if why:
@@ -5046,21 +5082,58 @@ def cmd_review_pr(args, target, conf):
 
 
 def extract_head_tree(repo, head, run_dir):
-    """Copy the tree of `head` from `repo` into <run_dir>/tree (git archive, then tar) and return that folder; the
-    reviewer reads the reviewed head there whatever the checkout holds. Dies with code 3 when git or tar fails."""
-    tree, tar = run_dir / "tree", run_dir / "tree.tar"
+    """Write the committed tree of `head` from `repo` into <run_dir>/tree and return that folder; the reviewer reads
+    the reviewed head there whatever the checkout holds. The tree is exactly what is committed: git ls-tree lists it
+    and one git cat-file --batch call supplies each blob's bytes, so export attributes, filters and eol conversion
+    never apply. Mode 100755 is an executable file, 120000 a symlink whose target is the blob, 160000 (a submodule)
+    an empty directory. A path that is absolute or has a `..` component is refused (PR content is untrusted).
+    Dies with code 3 when git fails or a path is refused."""
+    tree = run_dir / "tree"
     tree.mkdir()
-    res = run_git(["archive", "--format=tar", "-o", str(tar), head], repo, timeout=PR_TIMEOUT)
+    res = run_git(["ls-tree", "-r", "-z", "--full-tree", head], repo, timeout=PR_TIMEOUT, text=False)
     if res.returncode != 0:
-        die(f"git archive {head[:8]} failed: {res.stderr.strip()}", code=3)
+        die(f"git ls-tree {head[:8]} failed: {res.stderr.decode(errors='replace').strip()}", code=3)
+    entries = []
+    for rec in res.stdout.split(b"\0"):
+        if not rec:
+            continue
+        meta, _, raw = rec.partition(b"\t")
+        mode, _kind, sha = meta.decode().split()
+        path = raw.decode("utf-8", "surrogateescape")
+        if path.startswith("/") or ".." in path.split("/"):
+            die(f"refused tree path {path!r} in {head[:8]}: absolute or with a '..' component", code=3)
+        entries.append((mode, sha, path))
+    blobs = [sha for mode, sha, _p in entries if mode != "160000"]
     try:
-        res = subprocess.run(["tar", "-xf", str(tar), "-C", str(tree)], capture_output=True, text=True,
-                             timeout=PR_TIMEOUT)
+        out = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"], input="".join(f"{b}\n" for b in blobs).encode(),
+                             capture_output=True, timeout=PR_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        die(f"tar -xf {tar} failed: {exc}", code=3)
-    if res.returncode != 0:
-        die(f"tar -xf {tar} failed: {res.stderr.strip()}", code=3)
-    tar.unlink()
+        die(f"git cat-file --batch failed: {exc}", code=3)
+    if out.returncode != 0:
+        die(f"git cat-file --batch failed: {out.stderr.decode(errors='replace').strip()}", code=3)
+    data, pos = {}, 0
+    for sha in blobs:
+        eol = out.stdout.index(b"\n", pos)
+        fields = out.stdout[pos:eol].split()
+        if len(fields) != 3 or fields[1] != b"blob":
+            die(f"git cat-file --batch: no blob {sha[:8]} in {head[:8]}", code=3)
+        size = int(fields[2])
+        data[sha] = out.stdout[eol + 1:eol + 1 + size]
+        pos = eol + 1 + size + 1
+    top = tree.resolve()
+    for mode, sha, path in entries:
+        dest = tree / path
+        # a symlink an earlier entry wrote never carries a write out of the tree, and a path is written once
+        if not dest.parent.resolve().is_relative_to(top) or os.path.lexists(dest):
+            die(f"refused tree path {path!r} in {head[:8]}: it repeats a path or leads out through a symlink", code=3)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "160000":
+            dest.mkdir(exist_ok=True)
+        elif mode == "120000":
+            os.symlink(os.fsdecode(data[sha]), dest)
+        else:
+            dest.write_bytes(data[sha])
+            dest.chmod(0o755 if mode == "100755" else 0o644)
     return tree
 
 
@@ -5269,7 +5342,9 @@ def pr_attributable_runs(repo, root, mb, head):
     base branch keeps a run, and so does a rebase onto a base that left the run's files alone (a rebase onto a base
     that changed such a file writes a version the run never left, so the run no longer counts for that file); a run
     whose work is not in the PR's commits gives no tier, whatever branch it ran on. A run counts for the PR when it
-    counts for one of its files. Returns ({path: highest Risk rank
+    counts for one of its files. A file whose counting runs are all below Risk medium keeps a tier below medium
+    only when pr_runs_cover finds runs that account for its whole change from the merge base to the head; otherwise
+    it is medium (a low run cannot lower the tier of work done before it, after it, or beside it). Returns ({path: highest Risk rank
     of a run counting for it}, [meta of each run counting for a file])."""
     metas = []
     for meta_path in sorted(Path(root).glob("*/meta.json")):
@@ -5311,7 +5386,56 @@ def pr_attributable_runs(repo, root, mb, head):
             runs.append(m)
             for f in files:
                 ranks[f] = max(ranks.get(f, 0), TIER_RANK.get(m.get("risk"), TIER_RANK["medium"]))
+    for f, rank in ranks.items():              # a tier below medium needs the runs to account for the whole change
+        if rank < TIER_RANK["medium"] and not pr_runs_cover(repo, mb, head, f, [metas[i] for i in counts[f]]):
+            ranks[f] = TIER_RANK["medium"]
     return ranks, runs
+
+
+def pr_blob_state(repo, rev, f):
+    """(SHA-256 of the content, Git mode) of path f at rev; ("missing", None) when rev has no such file."""
+    res = run_git(["ls-tree", "-z", rev, "--", f], repo, timeout=PR_TIMEOUT, text=False)
+    rec = res.stdout.split(b"\0")[0].decode("utf-8", "surrogateescape") if res.returncode == 0 else ""
+    if not rec:
+        return "missing", None
+    meta, _, _path = rec.partition("\t")
+    mode, kind, sha = meta.split()
+    blob = run_git(["cat-file", "blob", sha], repo, timeout=PR_TIMEOUT, text=False) if kind == "blob" else None
+    if blob is None or blob.returncode != 0:
+        return "other", mode
+    return hashlib.sha256(blob.stdout).hexdigest(), mode
+
+
+def pr_runs_cover(repo, mb, head, f, metas):
+    """True when the runs that count for file f account for its whole change from the merge base to the head: some
+    sequence of them starts from the file's merge-base state (content hash; "missing" when the merge base has no such
+    file), each next run starts from the end state of the previous one, and the last ends in the head's state (content
+    and Git mode of the run's end kind and executable bit; "missing" when the head deletes the file). A run's start
+    state is its start copy hash, or "missing" for a file it created; a start copy that follows a symlink never
+    matches a link."""
+    base = pr_blob_state(repo, mb, f)[0]
+    goal, head_mode = pr_blob_state(repo, head, f)
+    steps = []
+    for m in metas:
+        start = (m.get("backup_hashes") or {}).get(f)
+        if start is None and f in (m.get("created") or []):
+            start = "missing"
+        end = (m.get("end_hashes") or {}).get(f)
+        kind, exe = (m.get("end_kinds") or {}).get(f), (m.get("end_exec") or {}).get(f)
+        mode = "120000" if kind == "link" else ("100755" if exe else "100644") if kind == "file" and exe is not None else None
+        if start is not None and end is not None:
+            steps.append((start, end, mode))
+
+    def reach(state, used):
+        for k, (start, end, mode) in enumerate(steps):
+            if start != state or k in used:
+                continue
+            if end == goal and (goal == "missing" or mode == head_mode):
+                return True
+            if reach(end, used | {k}):
+                return True
+        return False
+    return reach(base, frozenset())
 
 
 def pr_needed_tiers(repo, files, ranks):
@@ -5326,24 +5450,30 @@ def pr_needed_tiers(repo, files, ranks):
 
 
 def pr_finding_listed(f, diff_files, review_files):
-    """True when a review of `review_files` covers the finding's scope: every file of the scope (the finding's file; the
-    files of the review that recorded a clause FAIL) that is still in the PR diff is among the review's files. A file of
-    the scope that left the diff (it is in the originating review's file list, `_origin`) is covered by every review. A
-    legacy scope path is mapped against that list: an a/ or b/ path whose remainder is in it or in the diff names that
-    file; any other path names no file, so the scope is the whole diff."""
+    """True when a review of `review_files` covers the finding's scope. A finding with `scope_all` needs a review of
+    every file of the current diff. Otherwise every file of the scope (the finding's file; the files of the review that
+    recorded a clause FAIL) that is still in the PR diff is among the review's files; a file that left the diff is
+    covered by every review. A scope path resolves against the originating review's file list (`_origin`) first: a path
+    in it is that file; else an a/ or b/ path whose remainder is in it maps to the remainder. Without that list a path
+    in the diff is that file, an a/ or b/ path whose remainder is in the diff maps there (both are needed when the
+    literal path is in the diff too), and any other path needs the whole diff."""
+    diff, review = set(diff_files), set(review_files)
+    # an entry recorded before `scope_all` stored the diff's files of its head for a path outside the diff: a path
+    # that is not in its own scope needs the whole current diff too
+    if f.get("scope_all") or (f.get("path") and f.get("scope") and f["path"] not in f["scope"]):
+        return diff <= review
     scope = f.get("scope") or ([f["path"]] if f.get("path") else [])
     origin, need = set(f.get("_origin") or ()), set()
     for p in scope:
-        if p in diff_files:
-            need.add(p)
-        elif p in origin:
-            continue
-        elif p[:2] in ("a/", "b/") and p[2:] in origin | set(diff_files):
-            if p[2:] in diff_files:
-                need.add(p[2:])
+        rest = p[2:] if p[:2] in ("a/", "b/") else None
+        if origin:
+            names = [p] if p in origin else [rest] if rest in origin else None
         else:
-            return set(diff_files) <= set(review_files)
-    return need <= set(review_files)
+            names = [q for q in (p, rest) if q is not None and q in diff] or None
+        if names is None:
+            return diff <= review
+        need |= set(names) & diff
+    return need <= review
 
 
 def pr_finding_resolution(repo, f, head):
@@ -5391,7 +5521,8 @@ def pr_coverage(repo, entries, mb, head):
     """{path: (tier rank, reviewer)} of the files of the PR diff at `head` that a review covers. A file is covered when
     (a) a review of that head read it, or (b) it is covered at an ancestor head and either unchanged since or read by
     a delta review of this head that explained every hunk of it (D15: a delta covers only a file that was covered at its
-    base; a file new since then needs a review of its own). A binary file is never covered (D12)."""
+    base; a file new since then needs a review of its own). A binary file is never covered (D12): it is dropped from
+    the coverage of every head (`cov`), so credit never passes through a head where the file was binary."""
     valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
     memo = {}
 
@@ -5426,12 +5557,12 @@ def pr_coverage(repo, entries, mb, head):
                 for f, (rank, who) in cov(h0).items():
                     if f in fs and unchanged(h0, h, f):
                         put(f, rank, who)
+        binary = pr_binary_files(repo, mb, h, out)
+        out = {f: v for f, v in out.items() if f not in binary}
         memo[h] = out
         return out
 
-    covered = cov(head)
-    binary = pr_binary_files(repo, mb, head, covered)
-    return {f: v for f, v in covered.items() if f not in binary}
+    return cov(head)
 
 
 def blob_bytes(repo, rev, path):
@@ -5665,9 +5796,11 @@ def cmd_begin(args, phase, conf):
 def cmd_end(args, conf):
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
-    run_dir = find_run(root, args.end, want="open")
+    run_dir = find_run(root, args.end, want="endable")
     if not (run_dir / "state.json").exists():
         die(f"{run_dir.name} has no state.json; was it started with --begin?")
+    if (run_dir / "aborted").exists():
+        die(f"{run_dir.name} was aborted; an aborted run cannot be ended")
     if (run_dir / "report.md").exists():
         die(f"{run_dir.name} already has a report; use --show {run_dir.name}")
     report = finish_run(run_dir, None)
@@ -5700,7 +5833,8 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
     # PASS needs, for every acceptance command, a result from after the run and the expected one (exit 0, or non-zero
     # other than 124, 126 and 127 for a command marked `(fails until`), and no changed grading file (an implementer
     # may not edit the tests that grade it; the planner session may). An expected-red command also needs --note
-    # naming the failing tests and why. --force records PASS anyway: the verdict reads PASS (forced) and the report
+    # naming the failing tests and why, and no file of the run edited since the acceptance results were taken
+    # (end_state_drift). --force records PASS anyway: the verdict reads PASS (forced) and the report
     # lists what failed beside the reason.
     problems, needs_note = [], False
     if verdict == "PASS":
@@ -5724,6 +5858,11 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
                             + ", ".join(f"{f} by {by[f]}" if by.get(f) == "an acceptance command" else f
                                         for f in changed_files) + "): an "
                             "implementer may not edit the tests that grade it")
+        drift = end_state_drift(repo, meta)
+        if drift:
+            problems.append("files differ from the state the acceptance results were taken in (" + ", ".join(drift)
+                            + "): the results are stale; run the phase again (concord.py PHASE --plan PLAN, or --begin "
+                            "and --end for a session run) so acceptance runs on these files")
     forced = bool(problems or needs_note) and verdict == "PASS"
     if forced and not force:
         why = problems + (["an expected-red command needs --note naming the tests that failed and why"] if needs_note else [])
@@ -6172,9 +6311,11 @@ def created_at(path):
 
 def latest_run(root, want="any"):
     """Newest run dir (by creation time) that fits `want`, or None:
-    open (state, no report), reported (has report), started (has state), any."""
+    open (state, no report), endable (open and not aborted: what --end may finish), reported (has report), started
+    (has state), any."""
     fits = {
         "open": lambda p: (p / "state.json").exists() and not (p / "report.md").exists(),
+        "endable": lambda p: (p / "state.json").exists() and not (p / "report.md").exists() and not (p / "aborted").exists(),
         "reported": lambda p: (p / "report.md").exists(),
         "started": lambda p: (p / "state.json").exists(),
         "any": lambda p: True,
@@ -6210,7 +6351,8 @@ def find_run(root, run_id, want="any"):
         return run_dir
     run_dir = latest_run(root, want)
     if run_dir is None:
-        die(f"no {want if want != 'any' else ''} delegated run found in this checkout".replace("  ", " "))
+        die(f"no {want if want != 'any' else ''} delegated run found in this checkout".replace("  ", " ").replace("endable", "open")
+            + (" (aborted runs are skipped)" if want == "endable" else ""))
     return run_dir
 
 
@@ -6265,6 +6407,7 @@ def cmd_restore(args):
             "there", code=2)
     ends, starts = meta.get("end_hashes") or {}, meta.get("backup_hashes") or {}
     kinds, execs = meta.get("end_kinds") or {}, meta.get("end_exec") or {}
+    modes = meta.get("end_modes") or {}          # absent in a run recorded before it existed: the old check stands
     top = repo.resolve()
     newest = 0
     for f in (meta.get("changed") or []) + (meta.get("created") or []):
@@ -6286,6 +6429,9 @@ def cmd_restore(args):
         if now != (kinds[f], execs[f], ends[f]):
             what = ("its type, executable bit or content" if now[0] != kinds[f] or now[1] != execs[f] else "its content")
             print(f"{f}: not restored ({what} changed after the run ended; the file is left as it is)")
+            continue
+        if f in modes and file_mode(dst) != modes[f]:
+            print(f"{f}: not restored (its permission mode changed after the run ended; the file is left as it is)")
             continue
         if kinds[f] not in ("file", "missing"):      # a file the run deleted and nobody made again is restored
             print(f"{f}: not restored (it is a {kinds[f]}, not a regular file; a restore never writes through a symlink)")

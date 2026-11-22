@@ -23,7 +23,7 @@ bash install.sh --repo ~/src/myrepo  # also drops the hook rules into that repos
 
 The default (`--link`) symlinks `/concord:plan-then-delegate`, `/concord:delegate` and `/concord:rules-review`, the agents and the `concord-design-review` skill into `~/.claude`, and edits your live setup: it writes the Concord rules into `~/.claude/CLAUDE.md` between `<!-- concord:begin -->` and `<!-- concord:end -->`, and adds to `~/.claude/settings.json` the keys it lacks: the drift hook, compaction windows for two models, and `sandbox.excludedCommands` entries for `gh *`, `git push *`, `git fetch *`, `git pull *` and `git clone *`, which then run outside Claude Code's sandbox in every project. It backs up each file it changes first and leaves everything outside the markers untouched.
 
-With `--plugin` the commands and agents come from the marketplace instead; add it in Claude Code:
+With `--plugin` the commands and agents come from the marketplace instead. The installer removes the links that point into this checkout and keeps, with a note, any other link of the same name, such as a personal skill. Add the marketplace in Claude Code:
 
 ```text
 /plugin marketplace add bqp007/concord-agent-harness

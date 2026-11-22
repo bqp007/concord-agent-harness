@@ -157,11 +157,12 @@ for f in "$SRC"/concord/models.conf "$SRC"/concord/executors.conf "$SRC"/concord
 done
 
 # commands, agents and skills: symlink into the checkout in --link (edits are live; an existing non-link file is kept and
-# reported), remove the links in --plugin.
+# reported), remove the links in --plugin that point into this checkout (any other link of the name is kept and reported).
 link_one() { if [ -e "$2" ] && [ ! -L "$2" ]; then echo "keep $2 (not a link; left as is)"; return 0; fi
   if [ "$DRY" = 1 ]; then echo "would link $2"; return 0; fi
   mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; echo "link $2"; }
 unlink_one() { [ -L "$1" ] || return 0
+  case "$(readlink "$1")" in "$SRC"/*) ;; *) echo "keep $1 (a link to $(readlink "$1"), not made by this checkout; left as is)"; return 0;; esac
   if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; echo "remove link $1"; fi; }
 if [ "$MODE" = link ]; then
   link_one "$A/commands" "$DEST/commands/concord"; for n in $AGENTS; do link_one "$A/agents/$n.md" "$DEST/agents/$n.md"; done

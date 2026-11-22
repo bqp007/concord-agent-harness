@@ -142,6 +142,12 @@ inst_l() { mkdir -p "$H/.claude" && printf '%s' '{"myKey":"keep","modelSettings"
   printf '%s' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"other"},{"type":"command","command":"python3 \"$HOME/.claude/concord/concord.py\" --lessons-hook 2>/dev/null || true","timeout":5}]},{"hooks":[{"type":"command","command":"python3 \"$HOME/.claude/concord/concord.py\" --lessons-hook 2>/dev/null || true","timeout":5}]}]}}' > "$H/.claude/settings.json" &&
   inst --no-tests >/dev/null && inst --no-tests >/dev/null &&
   python3 -B -I -c "import json; d=json.load(open('$H/.claude/settings.json'))['hooks']; c=[h['command'] for v in d.values() for e in v for h in e['hooks']]; assert 'other' in c and not any('--lessons-hook' in x for x in c) and sum('drift_hook.sh' in x for x in c)==1 and all(e['hooks'] for v in d.values() for e in v), c"; }
+# --plugin removes only the links this checkout made: a link of the same name to the user's own skill stays, and is named
+inst_ee() { inst --no-tests >/dev/null && local own="$H/mine/concord-design-review" l="$H/.claude/skills/concord-design-review" &&
+  mkdir -p "$own" && echo mine > "$own/SKILL.md" && ln -sfn "$own" "$l" && inst --plugin --no-tests > "$H/out" &&
+  [ -L "$l" ] && [ "$(readlink "$l")" = "$own" ] && [ -f "$own/SKILL.md" ] && grep -qF "keep $l" "$H/out"; }
+inst_ff() { inst --no-tests >/dev/null && [ -L "$H/.claude/skills/concord-design-review" ] && inst --plugin --no-tests > "$H/out" &&
+  [ ! -e "$H/.claude/skills/concord-design-review" ] && [ ! -L "$H/.claude/skills/concord-design-review" ] && [ ! -L "$H/.claude/agents/implementer.md" ]; }
 inst_m() { inst --no-tests >/dev/null && links_made && inst --plugin --no-tests > "$H/out" &&
   grep -qF '/plugin marketplace add' "$H/out" && grep -qF '/plugin install concord@concord' "$H/out" &&
   [ ! -e "$H/.claude/commands/concord" ] && [ ! -L "$H/.claude/agents/implementer.md" ] &&
@@ -241,7 +247,7 @@ for f in glob.glob(os.path.join(a, "agents", "*.md")):
 assert used >= 1, "no agent preloads a skill"
 PY
 }
-s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd ee ff; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.
