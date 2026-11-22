@@ -366,6 +366,31 @@ $WT done T10F --repo "$T/r10" > "$T/d10f.txt" 2>&1; RD10F=$?
   && ok "done with a user symlink to a file under an ignored .claude/ is refused without --force, the link kept and named" || { bad "done with a symlink to a file under .claude rc=$RD10F"; cat "$T/d10f.txt"; }
 $WT done T10D --repo "$T/r10" --force > /dev/null 2>&1; $WT done T10F --repo "$T/r10" --force > /dev/null 2>&1
 $WT done T9L --repo "$T/r9" --force > /dev/null 2>&1
+echo "== a closed plan is closed for its ticket checkout and its forks, not for a sibling ticket"
+$WT new TCA --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCA="$M/.claude/worktrees/TCA"
+$WT new TCB --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCB="$M/.claude/worktrees/TCB"
+for w in "$WCA" "$WCB"; do plan "$w"; mv "$w/PLAN_T.md" "$w/PLAN_C.md"; done
+approve PLAN_C.md "$WCA" || exit 1
+$DP --report --plan PLAN_C.md --repo "$WCA" > "$T/c1.txt" 2>&1 || { echo "setup failed: --report in TCA"; cat "$T/c1.txt"; exit 1; }
+$DP --begin 1 --label implementer --plan PLAN_C.md --repo "$WCB" > "$T/c2.txt" 2>&1; RCB=$?; [ $RCB -eq 0 ] && $DP --abort last --repo "$WCB" > /dev/null 2>&1
+$DP --begin 1 --label implementer --plan PLAN_C.md --repo "$WCA" > "$T/c3.txt" 2>&1; RCA=$?
+$WT fork TCA 1 --repo "$WCA" > /dev/null 2>&1; FCA="$M/.claude/worktrees/TCA-p1"
+$DP --begin 1 --label implementer --plan PLAN_C.md --repo "$FCA" > "$T/c4.txt" 2>&1; RCF=$?
+[ $RCB -eq 0 ] && [ $RCA -eq 10 ] && [ $RCF -eq 10 ] \
+  && ok "after --report in one ticket checkout: its --begin and its fork's exit 10; a sibling ticket checkout's --begin starts" \
+  || { bad "report closure scope: sibling rc=$RCB, same checkout rc=$RCA, fork rc=$RCF"; tail -2 "$T/c2.txt"; }
+# 3.0.3 and earlier keyed a closure by the plan alone: such an entry still closes that plan, in every checkout
+plan "$WCB"; mv "$WCB/PLAN_T.md" "$WCB/PLAN_L.md"; approve PLAN_L.md "$WCB" || exit 1
+python3 - "$M/.git/concord/drift.json" <<'EOF' || { echo "setup failed: legacy closure entry"; exit 1; }
+import json, sys, time
+p = sys.argv[1]; d = json.load(open(p)); d.setdefault("reports", {})["PLAN_L.md"] = time.time(); json.dump(d, open(p, "w"))
+EOF
+$DP --begin 1 --label implementer --plan PLAN_L.md --repo "$WCB" > "$T/c5.txt" 2>&1; RCL=$?
+[ $RCL -eq 10 ] && grep -q 'PLAN_L.md is written' "$T/c5.txt" \
+  && ok "a closure recorded by 3.0.3 (keyed by the plan alone) still closes the plan: --begin exits 10" \
+  || { bad "legacy closure ignored rc=$RCL"; [ $RCL -eq 0 ] && $DP --abort last --repo "$WCB" > /dev/null 2>&1; tail -2 "$T/c5.txt"; }
+git -C "$M" worktree remove --force "$FCA" > /dev/null 2>&1
+$WT done TCA --repo "$M" --force > /dev/null 2>&1; $WT done TCB --repo "$M" --force > /dev/null 2>&1
 $WT done T8 --repo "$M" --force > /dev/null 2>&1
 [ "$(git -C "$M" worktree list --porcelain | grep -c 'worktrees/T')" = 0 ] && ok "worktree list clean" || bad "worktrees left"
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

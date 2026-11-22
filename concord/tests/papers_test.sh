@@ -196,6 +196,19 @@ newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
 $DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && ! grep -qF "STALE" "$PK" && ok "an unedited run's packet carries no stale mark" || bad "false stale mark in '$PK'"
+# a grading file (a Test plan home the acceptance command runs) edited after --end so it would fail: same stale evidence
+newrepo 'python3 tests/test_a.py'
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
+BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
+echo y >> "$R/a.py"; $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
+printf 'raise SystemExit(1)\n' > "$R/tests/test_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$BID")" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "a grading file edited after --end: PASS refused (exit 7), the file named, nothing recorded" || { bad "stale grading file: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+$DP --review "$BID" --packet --repo "$R" > "$T/out.txt" 2>&1
+PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && grep -F "STALE" "$PK" | grep -qF "tests/test_a.py" \
+  && ok "the packet marks the results stale and names the grading file" || bad "packet '$PK' has no stale mark for the grading file"
 newrepo 'true'
 printf '# Plan\n## Phase 1 - tests first\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `python3 tests/red.py` (fails until phase 2)\n' > "$R/PLAN_T.md"
 printf 'import sys\nsys.exit(1)\n' > "$R/tests/red.py"; approve PLAN_T.md "$R" || exit 1

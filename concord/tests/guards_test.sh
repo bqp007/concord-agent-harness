@@ -62,6 +62,11 @@ mkv v3; $DP --lint 1 --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; PRD=$(sed
 if [ -f "$PRD" ]; then printf '\nsneaked in after the read\n' >> "$PRD"; vverdict "$(basename "$PRD" .md)"; RC=$?; vrun; RC2=$?
   [ $RC -ne 0 ] && [ $RC2 -eq 11 ] && ok "a plan read whose content no longer hashes to its name is refused and opens nothing" || bad "altered read: verdict rc=$RC, then run rc=$RC2"
 else bad "altered read: --lint wrote no plan read to alter"; fi
+mkv v3b '\n## Handoff\n```\nnotes\n## Passes\nprose of passes\n```\n'
+$DP --lint 1 --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; PRD=$(sed -n 's/^PLAN-READ: //p' "$T/out.txt" | head -1)
+if [ -f "$PRD" ]; then vverdict "$(basename "$PRD" .md)"; RC=$?
+  [ $RC -eq 0 ] && ok "an untouched plan read is accepted when a fence opened under ## Handoff spans ## Passes" || bad "untouched read refused (fence under Handoff spanning Passes): rc=$RC: $(tail -1 "$T/out.txt")"
+else bad "fence spanning Passes: --lint wrote no plan read"; fi
 mkv v4; $DP --lint 1 --plan PLAN_V.md --repo "$V" > /dev/null 2>&1; H1=$(vhash "$V/PLAN_V.md")
 perl -pi -e 's/grep -q 2 a.py/grep -q 3 a.py/' "$V/PLAN_V.md"; vverdict "$H1"; vbegin 1; RC=$?
 [ $RC -eq 11 ] && ok "a plan edited after the verifier's read: the approval of the read text opens nothing for the new text (--begin exits 11)" \
@@ -144,6 +149,16 @@ S0=$(snap); $DP --end last --repo "$R" > "$T/out.txt" 2>&1; RC=$?
   || { bad "--end last on an aborted run: rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --end "$BA" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && [ "$(snap)" = "$S0" ] && ok "--end <id> on an aborted run is refused (exit 2) and writes nothing" || { bad "--end $BA on an aborted run: rc=$RC"; tail -2 "$T/out.txt"; }
+# a run of another shell that is still starting (register_run's placeholder state, before its baseline ends) is not ended
+BS="$(date +%Y%m%d-%H%M%S)-implementer-p9"; mkdir -p "$RUNS/$BS"
+python3 -c 'import json, os, sys, time; json.dump({"run_id": sys.argv[2], "repo": os.path.realpath(sys.argv[3]), "plan": "PLAN_G.md", "phase": "9", "started": time.time(), "registering": True}, open(sys.argv[1], "w"))' \
+  "$RUNS/$BS/state.json" "$BS" "$R"
+$DP --end last --repo "$R" > "$T/out.txt" 2>&1; RC1=$?; grep -q Traceback "$T/out.txt"; TB1=$?
+$DP --end "$BS" --repo "$R" > "$T/out2.txt" 2>&1; RC2=$?
+[ $RC1 -ne 0 ] && [ $TB1 -ne 0 ] && [ $RC2 -eq 2 ] && grep -q 'still starting' "$T/out2.txt" && [ ! -e "$RUNS/$BS/meta.json" ] \
+  && ok "a run still starting in another shell: --end last passes it over and --end <id> refuses it (exit 2), no traceback, nothing written" \
+  || { bad "--end on a starting run: last rc=$RC1 id rc=$RC2"; tail -2 "$T/out.txt"; tail -2 "$T/out2.txt"; }
+rm -rf "${RUNS:?}/$BS"
 
 echo "== plugin names (agents are concord:<name> inside the Claude Code plugin)"
 run 3 PLAN_G.md; P=$(rid); [ -n "$P" ] || { echo "setup failed: run 3"; cat "$T/out.txt"; exit 1; }
@@ -292,6 +307,26 @@ rm -f "$REPV"; $DP --report --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; RC
   || bad "report after the verdict: rc=$RC: $(tail -2 "$T/out.txt")"
 perl -pi -e 's/grep -q 2 a.py/grep -q 3 a.py/' "$V/PLAN_V.md"; vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort
 [ $RC -eq 10 ] && ok "editing the reported plan, then --begin: refused with exit 10 (the plan is closed), not 11" || bad "edited reported plan: --begin rc=$RC"
+
+echo "== --report closes the plan only if no run registered since its scan of the runs (a git shim pauses it between)"
+mkv v13; approve PLAN_V.md "$V" || exit 1
+REALGIT=$(command -v git); mkdir -p "$T/gshim"
+cat > "$T/gshim/git" <<G
+#!/bin/sh
+case "\$*" in *--numstat*) : > "$T/paused"; while [ ! -e "$T/go" ]; do sleep 0.05; done;; esac
+exec "$REALGIT" "\$@"
+G
+chmod +x "$T/gshim/git"; rm -f "$T/paused" "$T/go"
+REPV="$V/.git/concord/reports/REPORT_V.md"
+PATH="$T/gshim:$PATH" $DP --report --plan PLAN_V.md --repo "$V" > "$T/rep.txt" 2>&1 & PR=$!
+i=0; until [ -e "$T/paused" ] || [ $i -ge 400 ]; do sleep 0.05; i=$((i+1)); done
+[ -e "$T/paused" ] || { echo "setup failed: --report never reached its git diff"; touch "$T/go"; wait $PR; cat "$T/rep.txt"; exit 1; }
+vbegin 1; RCB=$?
+touch "$T/go"; wait $PR; RCR=$?
+[ $RCB -eq 0 ] && [ $RCR -eq 2 ] && [ ! -e "$REPV" ] && grep -q "is open" "$T/rep.txt" \
+  && ok "a phase begun after --report's scan keeps the plan open: --report refuses, names the run, closes nothing" \
+  || bad "report raced by --begin: begin rc=$RCB, report rc=$RCR, report written=$([ -e "$REPV" ] && echo yes || echo no): $(tail -2 "$T/rep.txt")"
+vabort
 
 echo "== the drift hook starts Python only in a repository that has a drift.json"
 mkdir -p "$T/pybin"

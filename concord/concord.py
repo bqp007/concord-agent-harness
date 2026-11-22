@@ -555,8 +555,10 @@ def end_state_drift(repo, meta):
     the PASS verdict and the phase review packet, so acceptance results are never shown or accepted beside files
     they did not test."""
     ends, kinds, execs = meta.get("end_hashes") or {}, meta.get("end_kinds") or {}, meta.get("end_exec") or {}
-    return sorted(f for f, h in ends.items()
-                  if file_identity(Path(repo) / f) != (kinds.get(f), execs.get(f), h))
+    drift = {f for f, h in ends.items() if file_identity(Path(repo) / f) != (kinds.get(f), execs.get(f), h)}
+    # The grading files too (acceptance_end_hashes): their content when the acceptance results were taken.
+    drift |= {f for f, h in (meta.get("acceptance_end_hashes") or {}).items() if file_hash(Path(repo) / f) != h}
+    return sorted(drift)
 
 
 # ---------- plan parsing ----------
@@ -1884,10 +1886,13 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     to_back_up, cap_note = expand_scope(repo, files)
     if cap_note:
         notes.append(cap_note)
-    backup_hashes = {}
+    backup_hashes, start_kinds, start_exec, backup_links = {}, {}, {}, {}
     for f in to_back_up:
+        start_kinds[f], start_exec[f] = file_identity(repo / f)[:2]
         dst = backup / f
         dst.parent.mkdir(parents=True, exist_ok=True)
+        if (repo / f).is_symlink():
+            backup_links[f] = os.readlink(repo / f)      # the copy below holds the target's bytes; --restore needs the link
         shutil.copy2(repo / f, dst)
         backup_hashes[f] = file_hash(dst)
     (run_dir / "plan.snapshot.md").write_text(plan_text(plan))
@@ -1932,6 +1937,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     state = {
         "run_id": run_dir.name, "repo": str(repo), "plan": plan_rel, "plan_hash": text_hash(plan_text(plan)),
         "acceptance_expect": expect, "no_baseline": not do_baseline, "backup_hashes": backup_hashes,
+        "start_kinds": start_kinds, "start_exec": start_exec, "backup_links": backup_links,
         "phase": phase, "who": who, "executor": executor, "model": model, "name": name, "mode": mode,
         "files": files, "acceptance": acceptance, "acceptance_hashes": acceptance_hashes,
         "backed_up": to_back_up, "notes": notes,
@@ -2225,8 +2231,10 @@ def finish_run(run_dir, rc, secs=None, st=None):
     acceptance_changed = []          # list of (path, "modified"|"added"|"removed")
     acceptance_changed_by = {}       # path -> "the run" or "an acceptance command"
     known = st.get("acceptance_hashes") or {}
+    acceptance_end = {}              # grading files as the acceptance results saw them (after the post-run commands)
     for p in sorted(known):
         before, now = known[p], file_hash(repo / p)
+        acceptance_end[p] = now
         if before == now:
             continue
         how = "added" if before == "missing" else "removed" if now == "missing" else "modified"
@@ -2374,6 +2382,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "files": files, "acceptance": st["acceptance"], "acceptance_expect": st.get("acceptance_expect") or [],
         "changed": changed, "created": created,
         "acceptance_files_changed": [p for p, _ in acceptance_changed],
+        "acceptance_end_hashes": acceptance_end,
         "acceptance_files_changed_by": acceptance_changed_by,
         "acceptance_after_rc": acceptance_after_rc,
         "tool_calls": tool_calls["tool_calls"] if tool_calls else None,
@@ -2387,6 +2396,8 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "risk": st.get("risk"), "baseline_mode": st.get("baseline_mode"),
         "baseline_rc": [b["rc"] for b in st.get("baseline") or []],
         "diff_lines": diff_lines, "no_baseline": st.get("no_baseline"), "backup_hashes": st.get("backup_hashes") or {},
+        "start_kinds": st.get("start_kinds") or {}, "start_exec": st.get("start_exec") or {},
+        "backup_links": st.get("backup_links") or {},
         # The end state of every file the run backed up, changed, created or deleted: content hash (a link's target
         # text), type, executable bit and (end_modes, regular files) the full permission bits. --restore compares it
         # for the backed-up files; the PR gate looks the hash up
@@ -2507,8 +2518,13 @@ def approval_text(text):
     return "\n".join(keep)
 
 
+def read_hash(read_text):
+    """16-hex hash of a plan read as emitted, without the one newline that ends the file: the read's name."""
+    return hashlib.sha256(read_text.removesuffix("\n").encode()).hexdigest()[:16]
+
+
 def verified_hash(text):
-    """16-hex hash of the approval-relevant text of a plan."""
+    """16-hex hash of the approval-relevant text of a plan; the name of its plan read."""
     return hashlib.sha256(approval_text(text).encode()).hexdigest()[:16]
 
 
@@ -2517,7 +2533,7 @@ def write_plan_read(root, text):
     h = verified_hash(text)
     path = root / "plan-reads" / f"{h}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(approval_text(text) + "\n")
+    path.write_bytes((approval_text(text) + "\n").encode())
     return path, h
 
 
@@ -2645,13 +2661,29 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         return level, line, prev
 
 
-def mark_reported(repo, plan_rel):
+def report_key(repo, plan_rel):
+    """The "reports" key of a closed plan: the ticket checkout and the plan. A fork made by wt.py shares its ticket
+    checkout's key (its .wt-fork `origin`); a sibling ticket checkout holding a plan of the same name does not."""
+    gitdir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    origin = ""
+    try:
+        for line in (gitdir / ".wt-fork").read_text(errors="replace").splitlines():
+            key, _, value = line.partition(" ")
+            if key == "origin":
+                origin = value.strip()
+    except OSError:
+        pass
+    return f"{Path(origin or repo).resolve()}::{plan_rel}"
+
+
+def mark_reported(repo, plan_rel, locked=False):
     """Stop the drift clock of this checkout's plan (from a fork, the ticket checkout's entry): --report wrote the
-    test report. False when no gated run registered an entry for the plan."""
+    test report. False when no gated run registered an entry for the plan. locked: the caller holds drift.lock."""
     root = runs_root(repo)
-    with open(root / "drift.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        save_drift(root, "reports", {plan_rel: time.time()}, locked=True)     # a reported plan refuses new runs
+    with contextlib.nullcontext() if locked else open(root / "drift.lock", "a") as lock:
+        if not locked:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        save_drift(root, "reports", {report_key(repo, plan_rel): time.time()}, locked=True)   # a reported plan refuses new runs
         data = load_drift(root)
         key = drift_entry_key(data, repo, plan_rel)
         if key is None:
@@ -2660,13 +2692,47 @@ def mark_reported(repo, plan_rel):
         return True
 
 
+def closed_refusal(repo, plan_rel):
+    """The refusal text when the plan's test report is written for this ticket checkout, else None. A closure that
+    3.0.3 or earlier recorded is keyed by the plan alone and still closes that plan in every checkout."""
+    reports = load_drift(runs_root(repo)).get("reports") or {}
+    if report_key(repo, plan_rel) in reports or plan_rel in reports:
+        return (f"REFUSED: the test report of {plan_rel} is written (--report): the plan is closed; DAT fixes "
+                "take the small-fix path, new work takes a new plan")
+    return None
+
+
+def register_run(root, run_dir, repo, plan_rel, phase):
+    """Record the run in the runs root under drift.lock, the lock --report holds for its final check of the plan's
+    runs and its close: a run either registers before that check (the report refuses and names it) or finds the
+    plan closed here (the refusal text). The placeholder state.json is replaced by start_state's."""
+    with open(root / "drift.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        closed = closed_refusal(repo, plan_rel)
+        if closed:
+            return closed
+        (run_dir / "state.json").write_text(json.dumps(
+            {"run_id": run_dir.name, "repo": str(repo), "plan": plan_rel, "phase": phase,
+             "started": time.time(), "registering": True}))
+    return None
+
+
+def unregister_run(run_dir):
+    """A start that failed before start_state wrote the real state leaves no open run behind."""
+    try:
+        if json.loads((run_dir / "state.json").read_text()).get("registering"):
+            (run_dir / "aborted").write_text(f"{time.time()}\n")
+    except (OSError, ValueError):
+        pass
+
+
 def plan_gates(repo, plan_rel, text, approval):
     """(exit code, refusal) before --begin or an executor run: 10 when the plan's test report is written (checked
     first, so an edited closed plan reads as closed, not as unapproved), 11 when this plan text has no plan-verifier
     APPROVE (no owner words satisfy it, --user-approved included), 10 at a DRIFT BLOCK; None otherwise."""
-    if plan_rel in (load_drift(runs_root(repo)).get("reports") or {}):
-        return 10, (f"REFUSED: the test report of {plan_rel} is written (--report): the plan is closed; DAT fixes "
-                    "take the small-fix path, new work takes a new plan")
+    closed = closed_refusal(repo, plan_rel)
+    if closed:
+        return 10, closed
     if verified_hash(text) not in (load_drift(runs_root(repo)).get("verdicts") or {}):
         return 11, ("REFUSED: this plan text has no plan-verifier APPROVE. Run --lint (it writes the plan read and "
                     "prints PLAN-READ), give that read to the plan-verifier agent and record its answer (it quotes "
@@ -2725,7 +2791,7 @@ def cmd_plan_verdict(args):
     if not read.is_file():
         die(f"no plan read for {hm.group(1)} in {read.parent}: run --lint on the plan and ask the verifier to judge "
             "that read")
-    if verified_hash(read.read_text(errors="replace")) != hm.group(1):
+    if read_hash(read.read_bytes().decode(errors="replace")) != hm.group(1):
         die(f"{read} no longer hashes to its name: it was changed after --lint wrote it; run --lint again")
     save_drift(root, "verdicts", {hm.group(1): time.time()})
     print(f"plan verdict APPROVE recorded for {hm.group(1)} (the plan read of {plan_rel}; a later edit of the "
@@ -3073,6 +3139,10 @@ def cmd_run(args, target, phase, conf):
 
     acquire_lock(root, run_dir.name, files=files)
     try:
+        closed = register_run(root, run_dir, repo, plan_rel, phase)
+        if closed:                       # the finally below releases the lock
+            print(closed)
+            return 10
         st = start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, "full", track_ignored, notes,
                          executor=executor, model=model, name=name, conf=conf, do_baseline=not args.no_baseline)
         bl = st["baseline"]
@@ -3083,6 +3153,7 @@ def cmd_run(args, target, phase, conf):
                    f"test (TEST_DEFECT); set Baseline: pass if the whole phase preserves behaviour; --force runs "
                    f"anyway. Baseline output: {run_dir / 'baseline.txt'}")
             (run_dir / "report.md").write_text(msg + "\n")
+            (run_dir / "aborted").write_text(f"{time.time()}\n")     # terminal, no executor verdict: the report skips it
             print(msg)
             return 6
         if green:
@@ -3095,6 +3166,9 @@ def cmd_run(args, target, phase, conf):
         rc, secs = run_process(cmd, env, repo, run_dir / "output.log", wall_s + 60,
                                on_start=lambda pid: record_child(root, run_dir.name, pid))
         report = finish_run(run_dir, rc, secs, json.loads(json.dumps(st)))
+    except BaseException:
+        unregister_run(run_dir)
+        raise
     finally:
         release_lock(root, run_dir.name)
     print(report)
@@ -5130,7 +5204,10 @@ def extract_head_tree(repo, head, run_dir):
         if mode == "160000":
             dest.mkdir(exist_ok=True)
         elif mode == "120000":
-            os.symlink(os.fsdecode(data[sha]), dest)
+            # every link reads as its text, as git does with core.symlinks=false: no link of the copy, alone or through
+            # another link, can lead a reader out of it
+            dest.write_bytes(data[sha])
+            dest.chmod(0o644)
         else:
             dest.write_bytes(data[sha])
             dest.chmod(0o755 if mode == "100755" else 0o644)
@@ -5393,13 +5470,19 @@ def pr_attributable_runs(repo, root, mb, head):
 
 
 def pr_blob_state(repo, rev, f):
-    """(SHA-256 of the content, Git mode) of path f at rev; ("missing", None) when rev has no such file."""
-    res = run_git(["ls-tree", "-z", rev, "--", f], repo, timeout=PR_TIMEOUT, text=False)
-    rec = res.stdout.split(b"\0")[0].decode("utf-8", "surrogateescape") if res.returncode == 0 else ""
+    """(SHA-256 of the content, Git mode) of path f at rev; ("missing", None) when rev has no such file. The path is
+    literal (no pathspec magic) and the listed entry must be that very path."""
+    res = run_git(["--literal-pathspecs", "ls-tree", "-z", rev, "--", f], repo, timeout=PR_TIMEOUT, text=False)
+    rec = ""
+    if res.returncode == 0:
+        for r in res.stdout.split(b"\0"):
+            meta, _, path = r.decode("utf-8", "surrogateescape").partition("\t")
+            if path == f:
+                rec = meta
+                break
     if not rec:
         return "missing", None
-    meta, _, _path = rec.partition("\t")
-    mode, kind, sha = meta.split()
+    mode, kind, sha = rec.split()
     blob = run_git(["cat-file", "blob", sha], repo, timeout=PR_TIMEOUT, text=False) if kind == "blob" else None
     if blob is None or blob.returncode != 0:
         return "other", mode
@@ -5408,34 +5491,40 @@ def pr_blob_state(repo, rev, f):
 
 def pr_runs_cover(repo, mb, head, f, metas):
     """True when the runs that count for file f account for its whole change from the merge base to the head: some
-    sequence of them starts from the file's merge-base state (content hash; "missing" when the merge base has no such
-    file), each next run starts from the end state of the previous one, and the last ends in the head's state (content
-    and Git mode of the run's end kind and executable bit; "missing" when the head deletes the file). A run's start
-    state is its start copy hash, or "missing" for a file it created; a start copy that follows a symlink never
-    matches a link."""
-    base = pr_blob_state(repo, mb, f)[0]
-    goal, head_mode = pr_blob_state(repo, head, f)
-    steps = []
+    sequence of them starts from the file's merge-base state, each next run starts from the end state of the previous
+    one, and the last ends in the head's state. A state is the content hash with the Git mode ("missing" with no mode
+    when the file is absent). A run's start state is its start copy hash with the mode of its start kind and
+    executable bit, or "missing" for a file it created; a run recorded without that kind and bit has no usable start
+    (it never lets a file drop below medium), and a start copy that follows a symlink never matches a link. A run's
+    end state is its end hash with the mode of its end kind and executable bit. Each complete state is visited once."""
+    def mode_of(kind, exe):
+        return "120000" if kind == "link" else ("100755" if exe else "100644") if kind == "file" and exe is not None else None
+    base, goal = pr_blob_state(repo, mb, f), pr_blob_state(repo, head, f)
+    edges = {}
     for m in metas:
         start = (m.get("backup_hashes") or {}).get(f)
-        if start is None and f in (m.get("created") or []):
-            start = "missing"
-        end = (m.get("end_hashes") or {}).get(f)
-        kind, exe = (m.get("end_kinds") or {}).get(f), (m.get("end_exec") or {}).get(f)
-        mode = "120000" if kind == "link" else ("100755" if exe else "100644") if kind == "file" and exe is not None else None
-        if start is not None and end is not None:
-            steps.append((start, end, mode))
-
-    def reach(state, used):
-        for k, (start, end, mode) in enumerate(steps):
-            if start != state or k in used:
+        if start is not None:
+            kind, exe = (m.get("start_kinds") or {}).get(f), (m.get("start_exec") or {}).get(f)
+            if kind is None or exe is None:
                 continue
-            if end == goal and (goal == "missing" or mode == head_mode):
+            start = (start, mode_of(kind, exe))
+        elif f in (m.get("created") or []):
+            start = ("missing", None)
+        else:
+            continue
+        end = (m.get("end_hashes") or {}).get(f)
+        if end is not None:
+            edges.setdefault(start, []).append(
+                (end, None if end == "missing" else mode_of((m.get("end_kinds") or {}).get(f), (m.get("end_exec") or {}).get(f))))
+    seen, todo = {base}, [base]
+    while todo:
+        for end in edges.get(todo.pop(), ()):
+            if end == goal:
                 return True
-            if reach(end, used | {k}):
-                return True
-        return False
-    return reach(base, frozenset())
+            if end not in seen:
+                seen.add(end)
+                todo.append(end)
+    return False
 
 
 def pr_needed_tiers(repo, files, ranks):
@@ -5767,6 +5856,11 @@ def cmd_begin(args, phase, conf):
     run_dir = new_run_dir(root, label, phase)
     acquire_lock(root, run_dir.name, manual=True, files=files)
     try:
+        closed = register_run(root, run_dir, repo, plan_rel, phase)
+        if closed:
+            release_lock(root, run_dir.name)
+            print(closed)
+            return 10
         notes = [plan_note] if plan_note else []
         if approval_note:
             notes.append(approval_note)
@@ -5774,6 +5868,7 @@ def cmd_begin(args, phase, conf):
                          notes, executor=executor, model=label, name=label, conf=conf,
                          do_baseline=not args.no_baseline)
     except BaseException:
+        unregister_run(run_dir)
         release_lock(root, run_dir.name)
         raise
     bl = st["baseline"]
@@ -5801,6 +5896,8 @@ def cmd_end(args, conf):
         die(f"{run_dir.name} has no state.json; was it started with --begin?")
     if (run_dir / "aborted").exists():
         die(f"{run_dir.name} was aborted; an aborted run cannot be ended")
+    if run_registering(run_dir):
+        die(f"{run_dir.name} is still starting (its start state is not written yet); end it once it has started")
     if (run_dir / "report.md").exists():
         die(f"{run_dir.name} already has a report; use --show {run_dir.name}")
     report = finish_run(run_dir, None)
@@ -6071,15 +6168,18 @@ def cmd_report(args):
     runs = plan_run_records(root, plan_rel)
     # The report is the final record of every run of the plan: a run still open, or ended with no verdict, blocks it
     # until a verdict or --abort clears the run.
-    waiting = []
-    for state, meta in runs:
-        rid = _flat(meta.get("run_id") or state.get("run_id") or "?")
-        if (root / rid / "aborted").exists() or rid.split("-", 2)[-1].startswith(("dry-", "lint-", "review-")):
-            continue
-        if not meta:
-            waiting.append(f"{rid} is open (no --end yet)")
-        elif not meta.get("verdict"):
-            waiting.append(f"{rid} has no verdict")
+    def waiting_runs(records):
+        out = []
+        for state, meta in records:
+            rid = _flat(meta.get("run_id") or state.get("run_id") or "?")
+            if (root / rid / "aborted").exists() or rid.split("-", 2)[-1].startswith(("dry-", "lint-", "review-")):
+                continue
+            if not meta:
+                out.append(f"{rid} is open (no --end yet)")
+            elif not meta.get("verdict"):
+                out.append(f"{rid} has no verdict")
+        return out
+    waiting = waiting_runs(runs)
     if waiting:
         die("REFUSED: --report needs every run of the plan closed: " + "; ".join(waiting)
             + ". Record --verdict PASS|FAIL for it, or --abort an open run; nothing was written.")
@@ -6195,9 +6295,17 @@ def cmd_report(args):
 
     out = root / "reports" / f"REPORT_{ticket}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines) + "\n")
-    print(f"report: {out}")
-    if not mark_reported(repo, plan_rel):
+    with open(root / "drift.lock", "a") as lock:     # run registration takes this lock: the final check and the close are one step
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        now = plan_run_records(root, plan_rel)
+        late = waiting_runs(now) or ([f"{len(now) - len(runs)} run(s) started since the scan"] if len(now) != len(runs) else [])
+        if late:
+            die("REFUSED: --report needs every run of the plan closed: " + "; ".join(late)
+                + ". Close it (--end and --verdict, or --abort) and run --report again; nothing was written.")
+        out.write_text("\n".join(lines) + "\n")
+        print(f"report: {out}")
+        stopped = mark_reported(repo, plan_rel, locked=True)
+    if not stopped:
         print(f"note: no gated run registered {plan_rel}; the drift clock has nothing to stop")
     return 0
 
@@ -6309,13 +6417,22 @@ def created_at(path):
     return getattr(st, "st_birthtime", None) or st.st_mtime
 
 
+def run_registering(p):
+    """True while the run's state.json is the placeholder register_run wrote and start_state has not replaced yet."""
+    try:
+        return bool(json.loads((p / "state.json").read_text()).get("registering"))
+    except (OSError, ValueError):
+        return False
+
+
 def latest_run(root, want="any"):
     """Newest run dir (by creation time) that fits `want`, or None:
     open (state, no report), endable (open and not aborted: what --end may finish), reported (has report), started
     (has state), any."""
     fits = {
         "open": lambda p: (p / "state.json").exists() and not (p / "report.md").exists(),
-        "endable": lambda p: (p / "state.json").exists() and not (p / "report.md").exists() and not (p / "aborted").exists(),
+        "endable": lambda p: (p / "state.json").exists() and not (p / "report.md").exists() and not (p / "aborted").exists()
+                             and not run_registering(p),
         "reported": lambda p: (p / "report.md").exists(),
         "started": lambda p: (p / "state.json").exists(),
         "any": lambda p: True,
@@ -6391,6 +6508,14 @@ def cmd_show(args):
     return 0
 
 
+def tracked_link(repo, head, f):
+    """True when `f` is a symlink (mode 120000) in commit `head`: the only evidence an older run leaves of a link."""
+    if not head:
+        return False
+    res = run_git(["ls-tree", head, "--", f], repo)
+    return res.returncode == 0 and res.stdout.startswith("120000 ")
+
+
 def cmd_restore(args):
     """Put the run's backed-up files back, in the checkout the run was recorded in, and only where the file still holds
     the run's end state (type, executable bit and content SHA-256 that the run records when it finishes; a symlink
@@ -6407,6 +6532,7 @@ def cmd_restore(args):
             "there", code=2)
     ends, starts = meta.get("end_hashes") or {}, meta.get("backup_hashes") or {}
     kinds, execs = meta.get("end_kinds") or {}, meta.get("end_exec") or {}
+    links = meta.get("backup_links") or {}        # a link's text at the run's start; absent in a run recorded before it existed
     modes = meta.get("end_modes") or {}          # absent in a run recorded before it existed: the old check stands
     top = repo.resolve()
     newest = 0
@@ -6439,8 +6565,19 @@ def cmd_restore(args):
         if file_hash(run_dir / "backup" / f) != starts[f]:
             print(f"{f}: not restored (the backup no longer matches the hash recorded at the run's start)")
             continue
+        # a run recorded before backup_links existed: a path committed as a link at the run's start may have been one
+        was_link = f in links or ("backup_links" not in meta and tracked_link(repo, meta.get("head_before"), f))
+        if was_link and f not in links:
+            print(f"{f}: not restored (it was a symlink and this run did not record its target; a restore never turns a link into a regular file)")
+            continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
+            if f in links:
+                if os.path.lexists(dst):           # the regular file the run left in the link's place (checked above)
+                    dst.unlink()
+                os.symlink(links[f], dst)
+                print(f"restored {f} (symlink to {links[f]})")
+                continue
             shutil.copy2(run_dir / "backup" / f, dst)
             print(f"restored {f}")
             try:
@@ -6692,8 +6829,11 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
         clock["last_end"] = time.time()
 
         # Setup on the unmutated copy: the baseline must be green here or grading is meaningless.
+        # The build goes first: the acceptance may need the build's output, which a clean checkout lacks. A build
+        # that fails here may need what the acceptance sets up (a configure step), so it runs again after it.
+        build_rc = checked(build_cmd) if build_cmd else 0
         setup_cmds = list(acceptance)
-        if build_cmd:
+        if build_rc != 0:
             setup_cmds.append(build_cmd)
         if listed:
             seen = set()

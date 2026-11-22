@@ -247,7 +247,28 @@ for f in glob.glob(os.path.join(a, "agents", "*.md")):
 assert used >= 1, "no agent preloads a skill"
 PY
 }
-s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd ee ff; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+# --link keeps a link of the user's own (any name Concord installs) and says so; a link made by another checkout of this kit
+# (same path inside the kit, a different root: a moved checkout) is Concord's and is updated
+inst_gg() { local own="$H/mine/concord-design-review" l="$H/.claude/skills/concord-design-review"
+  mkdir -p "$own" "$H/.claude/skills" && ln -s "$own" "$l" && inst --no-tests > "$H/out" 2>&1 &&
+  [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out" && [ -L "$H/.claude/agents/implementer.md" ]; }
+inst_hh() { local l="$H/.claude/skills/concord-design-review"
+  mkdir -p "$H/.claude/skills" && ln -s "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --no-tests >/dev/null &&
+  [ "$(cd "$l" && pwd -P)" = "$(cd "$ROOT/$A/skills/concord-design-review" && pwd -P)" ] &&
+  ln -sfn "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --plugin --no-tests >/dev/null && [ ! -L "$l" ]; }
+# a relative CLAUDE_HOME: the hook names an absolute script that exists
+inst_ii() { mkdir -p "$H/proj" && (cd "$H/proj" && env HOME=$H CLAUDE_HOME=rel/home bash "$ROOT/install.sh" --no-tests >/dev/null) &&
+  python3 -B -I -c "
+import json, shlex, sys, os
+c = [h['command'] for v in json.load(open(sys.argv[1]))['hooks'].values() for e in v for h in e['hooks']]
+w = shlex.split(c[0])[1]
+assert os.path.isabs(w) and os.path.isfile(w), c
+" "$H/proj/rel/home/settings.json"; }
+# a hook whose command is not a string: exit 2 naming the event, no traceback, nothing written
+inst_jj() { mkdir -p "$H/.claude" && printf '%s' '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":null}]}]}}' > "$H/.claude/settings.json" &&
+  { inst --no-tests > "$H/out" 2>&1; [ $? = 2 ]; } && grep -qF 'PostToolUse' "$H/out" && ! grep -q Traceback "$H/out" &&
+  [ ! -e "$H/.claude/concord" ] && [ ! -e "$H/.claude/CLAUDE.md" ]; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd ee ff gg hh ii jj; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.
