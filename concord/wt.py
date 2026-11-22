@@ -27,7 +27,7 @@ fork  snapshots DIR's working state (tracked and untracked, not ignored; DIR's H
       untouched) in a temporary commit and checks it out detached at
       <main>/.claude/worktrees/<TICKET>-p<N>, then copies DIR's top-level PLAN_*.md and links the folders
       `new` linked (plus the configured ones). Prints the path; exits 2 when it exists.
-join  applies the fork's changes (binary diff of its working tree, untracked included, against its HEAD) to
+join  applies the fork's changes (binary diff of its working tree, untracked included, against its fork snapshot) to
       DIR, then unlinks its links and runs `git worktree remove --force`. Before touching anything it refuses,
       keeping the fork and listing each path, while join would lose work: staged and working content that
       differ, a deletion whose working file is back, an ignored file only the fork holds, a link wt.py made
