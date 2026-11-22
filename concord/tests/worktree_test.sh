@@ -277,6 +277,17 @@ $WT join T8 10 --repo "$W8" > "$T/j10.txt" 2>&1; RJ10=$?
 [ $RJ10 -ne 0 ] && [ -d "$F10B" ] && [ -f "$F10B/build/out.txt" ] && grep -q 'build/out\.txt' "$T/j10.txt" \
   && ok "join with an ignored file staged in the fork (git add -f) is refused, the fork kept, the file named" || { bad "staged ignored file rc=$RJ10"; cat "$T/j10.txt"; }
 git -C "$F10B" reset -q build/out.txt; $WT join T8 10 --repo "$W8" --force > /dev/null 2>&1
+$WT fork T8 11 --repo "$W8" > /dev/null 2>&1; F11="$M/.claude/worktrees/T8-p11"; [ -d "$F11" ] || { echo "setup failed: fork 11"; exit 1; }
+printf 'o11 = 1\n' > "$F11/only11.py"; printf 'x = 11\n' > "$F11/a.py"; git -C "$M" worktree lock "$F11"
+B11=$(cd "$W8" && git status --porcelain -uall; cat a.py)
+$WT join T8 11 --repo "$W8" > "$T/j11.txt" 2>&1; RJ11=$?
+[ $RJ11 -ne 0 ] && [ -d "$F11" ] && [ "$(cd "$W8" && git status --porcelain -uall; cat a.py)" = "$B11" ] && [ ! -e "$W8/only11.py" ] \
+  && grep -qi "locked" "$T/j11.txt" && grep -qF "git worktree unlock $F11" "$T/j11.txt" \
+  && ok "join of a locked fork is refused before it applies anything: the origin is unchanged, the unlock command named" \
+  || { bad "locked fork join rc=$RJ11"; cat "$T/j11.txt"; }
+git -C "$M" worktree unlock "$F11"; $WT join T8 11 --repo "$W8" > "$T/j11b.txt" 2>&1; RJ11B=$?
+[ $RJ11B -eq 0 ] && [ ! -e "$F11" ] && [ "$(cat "$W8/a.py")" = "x = 11" ] && [ -f "$W8/only11.py" ] \
+  && ok "after git worktree unlock, the retried join applies the work and removes the fork" || { bad "join after unlock rc=$RJ11B"; cat "$T/j11b.txt"; }
 echo "== done and join do not over-refuse: tracked .claude files, cache folders, unchanged copies, copies of an older wt.py"
 # mkr DIR [TRACKED_CLAUDE]: a repo with mod.py, an ignored __pycache__/ and, with the argument, a tracked .claude/settings.json
 mkr(){ rm -rf "$1"; mkdir -p "$1"; ( cd "$1" && git init -q -b main && git config user.email t@t && git config user.name t

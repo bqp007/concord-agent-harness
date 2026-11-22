@@ -135,6 +135,16 @@ $DP --begin 2 --label implementer --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>
 $DP --abort "$B1" --repo "$R" > /dev/null 2>&1; run 1 PLAN_G.md; RC=$?
 [ $RC -eq 0 ] && [ -n "$(rid)" ] && ok "once the --begin run is aborted the same files are free" || { bad "after --abort rc=$RC"; tail -2 "$T/out.txt"; }
 
+echo "== an aborted run cannot be ended"
+$DP --begin 1 --label implementer --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1; BA=$(bid)
+{ [ -n "$BA" ] && $DP --abort "$BA" --repo "$R" > /dev/null 2>&1; } || { echo "setup failed: --begin, --abort"; cat "$T/out.txt"; exit 1; }
+snap(){ ( cd "$RUNS/$BA" && find . -type f | sort | xargs shasum ); }
+S0=$(snap); $DP --end last --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && [ "$(snap)" = "$S0" ] && [ ! -e "$RUNS/$BA/meta.json" ] && ok "--end last after --abort exits non-zero and writes nothing for the aborted run" \
+  || { bad "--end last on an aborted run: rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --end "$BA" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && [ "$(snap)" = "$S0" ] && ok "--end <id> on an aborted run is refused (exit 2) and writes nothing" || { bad "--end $BA on an aborted run: rc=$RC"; tail -2 "$T/out.txt"; }
+
 echo "== plugin names (agents are concord:<name> inside the Claude Code plugin)"
 run 3 PLAN_G.md; P=$(rid); [ -n "$P" ] || { echo "setup failed: run 3"; cat "$T/out.txt"; exit 1; }
 $DP --review "$P" --packet --repo "$R" > "$T/out.txt" 2>&1

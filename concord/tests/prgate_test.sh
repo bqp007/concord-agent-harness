@@ -12,11 +12,13 @@
 # file group is neither listed nor resolved by a review of another group. (11) A run counts for the files whose content
 # after the run is in one of the PR's own commits, or feeds a run that counts; its branch name plays no part; a run below
 # Risk medium counts only when the PR made its exact change (the same content and file mode, or the deletion of its start
-# copy). (12) PR records belong to one repository. (13) Status and packets stop (exit 75) while gh's head and the pull
+# copy), and keeps a file below medium only when the runs account for its whole change from the merge base to the head.
+# (12) PR records belong to one repository. (13) Status and packets stop (exit 75) while gh's head and the pull
 # ref differ or one of them cannot be read, a wait re-reads the base, and the report leaves the findings unjudged.
 # (14) A finding path names a PR file (an a/ or b/ before one is dropped); any other path is resolved only by a review of
-# every file; an older ledger's finding is mapped against the files of the review that raised it. (15) A PR packet names
-# a read-only copy of the reviewed head as the repository to read, and a direct review runs inside that copy.
+# every file of the diff at each later head; an older ledger's finding is mapped against the files of the review that
+# raised it before the current diff. (15) A PR packet names a read-only copy of the committed tree of the reviewed head
+# (no export attributes) as the repository to read, and a direct review runs inside that copy.
 # No network: fake gh, fake qwen reviewer and executor, a local bare repository as the remote.
 # Run: bash ~/.claude/concord/tests/prgate_test.sh   (exit 0 = every check passed)
 set -u
@@ -147,6 +149,11 @@ has "REVIEWED at" && ! has "UNREVIEWED" && [ $RC -eq 0 ] && ok "3 a clean opus55
 TREE=$(sed -n 's/^REPOSITORY (read-only, head [0-9a-f]*): //p' "$PK" | head -1)
 [ -n "$TREE" ] && [ "$(cat "$TREE/m.py" 2>/dev/null)" = "m = 63" ] && [ "$(cat "$TREE/README" 2>/dev/null)" = "readme" ] \
   && ok "3 the packet names a read-only copy of the reviewed head as the repository to read" || bad "3 no copy of the head named in the packet: '${TREE:-none}'"
+newpr 130 caller.py 'c = 130' v.txt '$Format:%H$' .gitattributes $'caller.py export-ignore\nv.txt export-subst'
+opus 130 medium concord:reviewer-opus55 "$T/clean.txt"; TREE=$(sed -n 's/^REPOSITORY (read-only, head [0-9a-f]*): //p' "$PK" | head -1)
+[ "$(cat "$TREE/caller.py" 2>/dev/null)" = "c = 130" ] && [ "$(cat "$TREE/v.txt" 2>/dev/null)" = '$Format:%H$' ] \
+  && ok "3 the head tree holds the committed tree: an export-ignore file is there and an export-subst file keeps its committed bytes" \
+  || bad "3 export attributes changed the head tree: caller.py='$(cat "$TREE/caller.py" 2>&1)' v.txt='$(cat "$TREE/v.txt" 2>&1)'"
 newpr 120 m.py 'm = 120'
 flash 120 fake/m --tier medium --dry-run; D=$(sed -n 's|.*prompt [0-9]* chars at \(.*\)/prompt.txt|\1|p' "$T/out.txt" | head -1)
 grep -qF "REPOSITORY (read-only, head $(hd 120)): $D/tree" "$D/prompt.txt" && [ "$(cat "$D/tree/m.py" 2>/dev/null)" = "m = 120" ] \
@@ -296,6 +303,23 @@ $DP --review-pr 192 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
   || { bad "8 a low run with another mode lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
 $DP --review-pr 192 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && ! grep -qF "PLAN-MARK-1920" "$PK" && ok "8 that mode run's plan stays out of the packet" || { bad "8 mode run packet '$PK'"; tail -2 "$T/out.txt"; }
+
+# a Risk: low run changed a.txt A -> B while the PR changed it X -> B: the run does not account for the PR's change
+( set -e; cd "$C"; git checkout -q main; printf 'X\n' > cover1.txt; git add cover1.txt; git commit -qm "cover1 X"; git push -q origin main
+  git checkout -qb pr195; printf 'B\n' > cover1.txt; git commit -qam "pr195 X to B"; git push -qf origin "HEAD:refs/pull/195/head"
+  git checkout -q main; git branch -qD pr195; printf 'A\n' > cover1.txt; git commit -qam "cover1 A"; git push -q origin main ) || { echo "setup failed: pr195"; exit 1; }
+runpr 1950 low cover1.txt "printf 'B\n' > cover1.txt"
+prjson 195
+$DP --review-pr 195 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a Risk: low run that changed A to B while the PR changed X to B lowers nothing: --tier low is refused" \
+  || { bad "8 a low run from another start lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
+# a Risk: low run changed cover2.txt X -> B, then an unrecorded commit of the PR changed B -> C
+( set -e; cd "$C"; git checkout -q main; printf 'X\n' > cover2.txt; git add cover2.txt; git commit -qm "cover2"; git push -q origin main ) || { echo "setup failed: cover2"; exit 1; }
+runpr 1960 low cover2.txt "printf 'B\n' > cover2.txt" pr1960
+pushpr 1960 cover2.txt C
+$DP --review-pr 1960 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a Risk: low run followed by an unrecorded commit of the PR lowers nothing: --tier low is refused" \
+  || { bad "8 a low run before unrecorded work lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
 
 # a run made in a fork of the PR's worktree is the PR's run: it records the fork's origin branch and HEAD
 WT="python3 $T/concord/wt.py"
@@ -550,6 +574,10 @@ st 120
 has "HEAD UNVERIFIED" && ! has "CURRENT HEAD" && ! has "REVIEWED" && [ $RC -eq 75 ] \
   && ok "16 gh's head is in the clone but the pull ref cannot be fetched: --pr-status says HEAD UNVERIFIED and judges no head (exit 75)" \
   || { bad "16 one observation was enough for a verdict, rc=$RC"; head -3 "$T/out.txt"; }
+$DP --review-pr 120 --packet --tier medium --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+has "head unverified" && [ $RC -eq 75 ] && ! grep -q '^PACKET' "$T/out.txt" \
+  && ok "16 --review-pr --packet at a valid gh head with no pull ref on the remote: the shared retry runs, exit 75 as --pr-status, no packet" \
+  || { bad "16 packet creation disagrees with status on a missing pull ref, rc=$RC"; tail -2 "$T/out.txt"; }
 # (b) the report at a PR whose gh head and pull ref differ lists the findings as not judged
 printf '{"baseRefName": "main", "headRefName": "pr113", "headRefOid": "%s", "title": "t", "body": "b"}\n' "$LAG" > "$T/pr113.json"
 git -C "$C" checkout -q --detach "$(hd 113)" && $DP --report --plan .claude/PLAN_R13.md --repo "$C" > "$T/rep16.txt" 2>&1; REP16=$(sed -n 's/^report: //p' "$T/rep16.txt" | head -1); git -C "$C" checkout -q main; prjson 113
@@ -582,6 +610,18 @@ opus 99 medium concord:reviewer-opus55 "$T/res99.txt"; st 99
 has "REVIEWED at" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
   && ok "17 a review of every PR file resolves both: REVIEWED (exit 0)" || { bad "17 the review of every file did not resolve them, rc=$RC"; head -4 "$T/out.txt"; }
 
+newpr 98 api.py 'a = 98'
+printf 'REVIEW-JSON\n{"findings": [%s], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$(fnd zz/ghost.py)" > "$T/ghost98.txt"
+opus 98 medium concord:reviewer-opus55 "$T/ghost98.txt"
+pushpr 98 client.py 'c = 98'
+printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN", "resolutions": [{"finding": "F1", "fixed": "yes", "evidence": "fixed"}]}\nEND-REVIEW-JSON\n' > "$T/res98.txt"
+opus 98 medium concord:reviewer-opus55 "$T/res98.txt" --files api.py; st 98
+has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "17 an outside-diff finding recorded when the PR held only api.py keeps the whole diff as its scope: after client.py enters, an api.py review leaves it open" \
+  || bad "17 the scope shrank to api.py, rc=$RC: $(sed -n 1p "$T/out.txt")"
+opus 98 medium concord:reviewer-opus55 "$T/res98.txt" --files api.py,client.py; st 98
+has "REVIEWED at" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] && ok "17 a review of api.py and client.py resolves it: REVIEWED (exit 0)" \
+  || bad "17 the review of both files did not resolve it, rc=$RC: $(sed -n 1p "$T/out.txt")"
+
 echo "== 18 a ledger of an earlier version keeps its findings: 2.4 stored no head, 3.0.0 an a/ path"
 legacy(){ python3 -I -c 'import json,sys,os; n,run,head,files,ent,r=sys.argv[1:7]; r+="/"
 f=dict({"id": "F1", "severity": "HIGH", "line": 1, "problem": "kept", "run": run, "reviewer": "opus55", "status": "open"}, **json.loads(ent))
@@ -599,5 +639,22 @@ resolves F1 "launch is fixed" "$T/resolve67.txt"
 opus 67 medium concord:reviewer-opus55 "$T/resolve67.txt" --files docs.md; st 67
 has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "18 a 3.0.0 finding scoped a/launch (file launch in the diff): a review of docs.md alone neither covers nor resolves it" \
   || bad "18 a docs-only review resolved the finding of a/launch, rc=$RC: $(sed -n 1p "$T/out.txt")"
+newpr 68 launch 'l = 68' docs.md 'd = 68'
+legacy 68 old68-run '["launch", "docs.md"]' '{"path": "a/launch", "scope": ["a/launch"]}'
+( set -e; cd "$C"; git fetch -q origin refs/pull/68/head; git checkout -q FETCH_HEAD; mkdir a; printf 'x = 68\n' > a/launch; git add -A; git commit -qm "add a/launch"
+  git push -q origin HEAD:refs/pull/68/head; git checkout -q main ) || { echo "setup failed: a/launch"; exit 1; }
+prjson 68
+resolves F1 "launch is fixed" "$T/resolve68.txt"
+opus 68 medium concord:reviewer-opus55 "$T/resolve68.txt" --files a/launch,docs.md; st 68
+has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "18 a legacy a/launch finding whose originating review listed launch keeps meaning launch when a literal file a/launch enters the diff: a review of a/launch and docs.md leaves it open" \
+  || bad "18 the literal a/launch covered the legacy finding, rc=$RC: $(sed -n 1p "$T/out.txt")"
+# 3.0.1 and 3.0.2 stored an outside-diff path with the diff's files of that head as its scope
+newpr 69 api.py 'a = 69'
+legacy 69 old69-run '["api.py"]' '{"path": "zz/ghost.py", "scope": ["api.py"]}'
+pushpr 69 client.py 'c = 69'
+resolves F1 "fixed" "$T/resolve69.txt"
+opus 69 medium concord:reviewer-opus55 "$T/resolve69.txt" --files api.py; st 69
+has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "18 an outside-diff finding stored with the diff's files of its head keeps the whole diff: after client.py enters, an api.py review leaves it open" \
+  || bad "18 the stored file list stood in for the whole diff, rc=$RC: $(sed -n 1p "$T/out.txt")"
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

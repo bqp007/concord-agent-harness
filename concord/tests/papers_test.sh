@@ -179,6 +179,23 @@ newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && ! grep -qF "(forced)" "$T/v.txt" \
   && ok "every result from after the run is the expected one: PASS recorded, not forced" || { bad "green run: rc=$RC"; cat "$T/v.txt"; }
+# acceptance passed at the run's end, then the file is edited so it would fail: the old exit 0 is stale evidence
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+printf 'z = 3\n' > "$R/a.py"
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] && grep -qF "a.py" "$T/v.txt" \
+  && ok "a file edited after the run's acceptance: PASS refused (exit 7), the file named, nothing recorded" || { bad "stale PASS: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+$DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
+PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && grep -F "STALE" "$PK" | grep -qF "a.py" \
+  && ok "the review packet marks the acceptance results stale and names the file" || bad "packet '$PK' has no stale mark"
+$DP --verdict "$RID" PASS --force --note "owner accepts" --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && grep -qF "PASS (forced)" "$T/v.txt" \
+  && ok "--force still records the stale PASS, marked forced" || { bad "forced stale PASS rc=$RC"; cat "$T/v.txt"; }
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+$DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
+PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && ! grep -qF "STALE" "$PK" && ok "an unedited run's packet carries no stale mark" || bad "false stale mark in '$PK'"
 newrepo 'true'
 printf '# Plan\n## Phase 1 - tests first\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `python3 tests/red.py` (fails until phase 2)\n' > "$R/PLAN_T.md"
 printf 'import sys\nsys.exit(1)\n' > "$R/tests/red.py"; approve PLAN_T.md "$R" || exit 1

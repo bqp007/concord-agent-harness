@@ -266,7 +266,12 @@ FAKE_ACTIONS='printf "x = 99\n" > a.py' $DP 1 --plan .claude/PLAN_99.md --via qw
 [ -n "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" ] || { echo "setup failed: run for PR 99"; cat "$T/out.txt"; exit 1; }
 ( set -e; cd "$R"; git add -A; git commit -qm "run 99"; git push -qf origin HEAD:refs/pull/99/head; git checkout -q main; git branch -qD pr99 ) || { echo "setup failed: commit 99"; exit 1; }
 prjson 99; opus 99 low concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: PR 99 low review"; cat "$T/out.txt"; exit 1; }
-pushn 99 "printf 'x = 100\n' > a.py"
+# the fix commit is a second low run, so the runs account for a.py's whole change and the needed tier stays low
+( set -e; cd "$R"; git fetch -q origin refs/pull/99/head; git checkout -qb pr99 FETCH_HEAD ) || { echo "setup failed: branch pr99 fix"; exit 1; }
+FAKE_ACTIONS='printf "x = 100\n" > a.py' $DP 1 --plan .claude/PLAN_99.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
+[ -n "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" ] || { echo "setup failed: fix run for PR 99"; cat "$T/out.txt"; exit 1; }
+( set -e; cd "$R"; git add -A; git commit -qm "fix 99"; git push -q origin HEAD:refs/pull/99/head; git checkout -q main; git branch -qD pr99 ) || { echo "setup failed: commit fix 99"; exit 1; }
+prjson 99
 FAKE_SEV=MEDIUM FAKE_PATH=a.py $DP --review-pr 99 --delta --via qwen --model fake/m --tier low --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"
 [ $RC -eq 0 ] && [ "$(mj "$RD/meta.json" 'm["tier"]')" = low ] && [ -n "$(mj "$RD/meta.json" 'm.get("since") or ""')" ] \
   || { echo "setup failed: low-tier delta review rc=$RC"; tail -3 "$T/out.txt"; exit 1; }
@@ -304,6 +309,18 @@ printf '{"kind": "pr-review", "pr": 14, "head": "%s", "tier": "medium", "run_id"
 st 14
 has "UNREVIEWED" && ! has "Traceback" && [ $RC -eq 1 ] && ok "--pr-status: a reviewed head missing from this clone gets a status, no traceback, exit 1" || { bad "missing head rc=$RC"; cat "$T/out.txt"; }
 [ -z "$(git -C "$R" for-each-ref refs/review/)" ] && ok "no temp refs left behind by status or delta reviews" || bad "refs left: $(git -C "$R" for-each-ref refs/review/)"
+
+echo "== credit never passes through a head where the file was binary: text, then binary, then text with an explained delta"
+newpr 101 "printf 'v = 1\n' > t101.txt"; hfinding "$T/f1.txt" t101.txt 1 "v is wrong"
+opus 101 high concord:reviewer-opus55 "$T/f1.txt" || { echo "setup failed: PR 101 review at head 1"; cat "$T/out.txt"; exit 1; }
+pushn 101 "printf 'v\\0\\n' > t101.txt"
+opus 101 high concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: PR 101 review at the binary head"; cat "$T/out.txt"; exit 1; }
+pushn 101 "printf 'v = 2\n' > t101.txt"
+dans "$T/d.txt" '[{"finding": "F1", "fixed": "yes", "evidence": "t101.txt:1 v is 2"}]' '[{"hunk": "H1", "explained_by": "F1"}]'
+opus 101 high reviewer-delta "$T/d.txt" --delta || { echo "setup failed: PR 101 delta"; cat "$T/out.txt"; exit 1; }
+st 101
+has "UNREVIEWED" && ! has "t101.txt: high by" && ! has ": REVIEWED" && ! has "FINDINGS OPEN" && [ $RC -eq 1 ] \
+  && ok "a delta that explains every hunk of a file that was binary at the reviewed head below it: the file gets no credit (UNREVIEWED, exit 1)" || { bad "credit passed through the binary head rc=$RC"; cat "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]

@@ -334,6 +334,14 @@ $DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCX=$?
 [ "$(cat "$R/a.py")" = "$AY" ] && [ -x "$R/a.py" ] && has "a.py: not restored" \
   && ok "8 a chmod +x after the run (bytes unchanged): --restore leaves a.py as it is, executable, and lists it as not restored" \
   || { bad "8 later chmod overwritten rc=$RCX: x=$([ -x "$R/a.py" ] && echo yes || echo no) a.py='$(tr '\n' '|' < "$R/a.py")'"; cat "$T/out.txt"; }
+fmode(){ python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o7777))' "$1"; }   # BSD and GNU stat disagree on flags
+mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); AY=$(cat "$R/a.py")
+{ [ -n "$G" ] && grep -q '^y$' "$R/a.py" && chmod 600 "$R/a.py" && [ "$(fmode "$R/a.py")" = 600 ]; } || { echo "setup failed: run, then chmod 600 a.py"; exit 1; }
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCM=$?
+MODE=$(fmode "$R/a.py")
+[ "$(cat "$R/a.py")" = "$AY" ] && [ "$MODE" = 600 ] && has "a.py: not restored" \
+  && ok "8 a chmod 600 after the run (bytes unchanged): --restore keeps the bytes and the 0600 mode and lists a.py as not restored" \
+  || { bad "8 later chmod 600 undone rc=$RCM: mode=$MODE a.py='$(tr '\n' '|' < "$R/a.py")'"; cat "$T/out.txt"; }
 mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); AY=$(cat "$R/a.py")
 printf '%s\n' "$AY" > "$R/same-bytes.py"   # inside the repository: a link out of it is refused by the path rule, not tested here
 { [ -n "$G" ] && grep -q '^y$' "$R/a.py" && rm "$R/a.py" && ln -s same-bytes.py "$R/a.py" && [ "$(cat "$R/a.py")" = "$AY" ]; } || { echo "setup failed: a.py replaced by a link to the same bytes"; exit 1; }
