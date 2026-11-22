@@ -14,6 +14,7 @@ err() { echo "error: $*" >&2; exit 2; }
 
 [ -n "${CLAUDE_HOME:-}" ] || [ -n "${HOME:-}" ] || err "HOME and CLAUDE_HOME are both unset"
 DEST="${CLAUDE_HOME:-$HOME/.claude}"
+case "$DEST" in /*) ;; *) DEST="$PWD/${DEST#./}" ;; esac   # a relative CLAUDE_HOME resolves from here, before any use
 while [ $# -gt 0 ]; do
   case $1 in
     --link) MODE=link ;;
@@ -96,6 +97,12 @@ if os.path.exists(snippet):
                                                      and all(isinstance(h, dict) for h in e.get("hooks", []))
                                                      for e in entries):
             refuse(f"holds hooks.{event} in another shape than a list of {{\"hooks\": [{{...}}]}} entries")
+    for event, entries in have_hooks.items():
+        for e in entries:
+            for h in e.get("hooks", []):
+                if "command" in h and not isinstance(h["command"], str):
+                    refuse(f"holds a hook in hooks.{event} whose command is a {type(h['command']).__name__}, not a string "
+                           f"(entry {json.dumps(h)})")
     merge(base, snip, "")
     # A hook is replaced only when its whole command equals one this installer ships or shipped before:
     # `python3 "$HOME/.claude/concord/concord.py" --drift-hook 2>/dev/null || true` (or --lessons-hook), or
@@ -158,18 +165,23 @@ done
 
 # commands, agents and skills: symlink into the checkout in --link (edits are live; an existing non-link file is kept and
 # reported), remove the links in --plugin that point into this checkout (any other link of the name is kept and reported).
+# One ownership rule for both: a link is Concord's when it points to this checkout's source for that name, or to the same
+# path inside another checkout of this kit (a moved checkout); any other link is kept and reported.
+ours() { local t rel="${2#"$SRC"/}"; t="$(readlink "$1")"; [ "$t" = "$2" ] || case "$t" in */"$rel") true;; *) false;; esac; }
+keep_note() { echo "keep $1 (a link to $(readlink "$1"), not made by Concord; left as is)"; }
 link_one() { if [ -e "$2" ] && [ ! -L "$2" ]; then echo "keep $2 (not a link; left as is)"; return 0; fi
+  if [ -L "$2" ] && ! ours "$2" "$1"; then keep_note "$2"; return 0; fi
   if [ "$DRY" = 1 ]; then echo "would link $2"; return 0; fi
   mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; echo "link $2"; }
 unlink_one() { [ -L "$1" ] || return 0
-  case "$(readlink "$1")" in "$SRC"/*) ;; *) echo "keep $1 (a link to $(readlink "$1"), not made by this checkout; left as is)"; return 0;; esac
+  ours "$1" "$2" || { keep_note "$1"; return 0; }
   if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; echo "remove link $1"; fi; }
 if [ "$MODE" = link ]; then
   link_one "$A/commands" "$DEST/commands/concord"; for n in $AGENTS; do link_one "$A/agents/$n.md" "$DEST/agents/$n.md"; done
   for n in $SKILLS; do link_one "$A/skills/$n" "$DEST/skills/$n"; done
 else
-  unlink_one "$DEST/commands/concord"; for n in $AGENTS; do unlink_one "$DEST/agents/$n.md"; done
-  for n in $SKILLS; do unlink_one "$DEST/skills/$n"; done
+  unlink_one "$DEST/commands/concord" "$A/commands"; for n in $AGENTS; do unlink_one "$DEST/agents/$n.md" "$A/agents/$n.md"; done
+  for n in $SKILLS; do unlink_one "$DEST/skills/$n" "$A/skills/$n"; done
 fi
 
 # CLAUDE.md: keep the Concord rules between the markers and replace that block where it stands; a file with

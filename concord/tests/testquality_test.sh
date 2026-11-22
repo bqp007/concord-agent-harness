@@ -45,6 +45,9 @@ run 'echo y >> a.py; touch ran.txt'; RC=$?
   || { bad "partial green rc=$RC"; tail -4 "$T/out.txt"; }
 RD=$(ls -d "$R"/.git/concord/*-p1 2>/dev/null | tail -1)
 [ -n "$RD" ] && grep -q "NOT RUN" "$RD/report.md" 2>/dev/null && ok "refused run keeps a report.md (not an open session run)" || bad "no report.md in refused run dir '$RD'"
+$DP --report --plan PLAN_T.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && ok "--report does not wait for a run the baseline refused (exit 6): that run is closed without a verdict" \
+  || { bad "report after a baseline refusal rc=$RC"; tail -2 "$T/out.txt"; }
 newrepo "$(printf "$BASE" " (characterization)")"
 run 'echo y >> a.py'; RC=$?
 [ $RC -eq 0 ] && has "changed in scope: a.py" && ! has "NOT RUN" && ! has "forced: acceptance" \
@@ -173,6 +176,15 @@ $DP --mutate "$RID" --max 2 --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 cp "$R/.git/concord/$RID/meta.json" "$T/meta.keep"; printf '{"run_id": ' > "$R/.git/concord/$RID/meta.json"
 $DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; cp "$T/meta.keep" "$R/.git/concord/$RID/meta.json"
 [ $RC -eq 2 ] && has "not valid JSON" && ok "truncated meta.json: exit 2, no traceback" || { bad "bad meta rc=$RC"; head -2 "$T/out.txt"; }
+
+echo "== --mutate --build: the build runs before the unmutated copy is graded"
+newrepo 'Files: lib.py\nAcceptance:\n- `test -f built.flag && python3 -c "import lib; assert lib.clamp(5) == 5"`\n'
+run 'touch built.flag; printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
+rm -f "$R/built.flag"                                           # a clean checkout: only the build creates it
+$DP --mutate "$RID" --max 4 --build "touch built.flag" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && has "MUTATION $RID:" && ! has "the unmutated copy fails" \
+  && ok "acceptance that needs the build output: the build runs first, the unmutated copy is green and mutants are graded" \
+  || { bad "build before baseline rc=$RC"; head -3 "$T/out.txt"; }
 
 echo "== --mutate: the run's own lines, first failing check, characterization excluded"
 newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.mid(5)"`\n'

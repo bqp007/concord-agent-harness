@@ -363,6 +363,43 @@ $DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCD=$?
 [ $RCD -eq 0 ] && [ "$(cat "$R/b.py" 2>/dev/null)" = "keep = 1" ] && [ "$(cat "$R/local.cfg" 2>/dev/null)" = "secret = 1" ] && has "restored b.py" && has "restored local.cfg" \
   && ok "8 a tracked file and an ignored in-scope file the run deleted and nobody recreated: --restore brings both back from the backup" \
   || { bad "8 deleted files not restored rc=$RCD: b.py=$([ -e "$R/b.py" ] && echo present || echo absent) local.cfg=$([ -e "$R/local.cfg" ] && echo present || echo absent)"; cat "$T/out.txt"; }
+mkrepo "${BASIC/Files: a.py/Files: l.py}"
+( cd "$R" && ln -s a.py l.py && git add l.py && git commit -qm link ) || { echo "setup failed: tracked link l.py"; exit 1; }
+run "rm l.py"; G=$(rid)
+{ [ -n "$G" ] && [ ! -e "$R/l.py" ] && [ ! -L "$R/l.py" ]; } || { echo "setup failed: a run that deleted the link l.py"; cat "$T/out.txt"; exit 1; }
+cp "$R/.git/concord/$G/meta.json" "$T/meta.keep"
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCK=$?
+[ $RCK -eq 0 ] && [ -L "$R/l.py" ] && [ "$(readlink "$R/l.py")" = a.py ] \
+  && ok "8 a symlink the run deleted: --restore brings back a symlink with the same target, not a regular file" \
+  || { bad "8 deleted symlink restored as $([ -L "$R/l.py" ] && echo a link || { [ -e "$R/l.py" ] && echo a regular file || echo nothing; }) rc=$RCK"; cat "$T/out.txt"; }
+rm -f "$R/l.py"; cp "$T/meta.keep" "$R/.git/concord/$G/meta.json"
+python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m.pop("backup_links", None); json.dump(m,open(p,"w"))' "$R/.git/concord/$G/meta.json"
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
+[ ! -e "$R/l.py" ] && [ ! -L "$R/l.py" ] && has "l.py: not restored" \
+  && ok "8 a deleted symlink in a run that holds no link evidence: l.py is left absent and listed as not restored, never written as a regular file" \
+  || { bad "8 link without evidence: l.py is $([ -e "$R/l.py" ] && echo present || echo absent)"; cat "$T/out.txt"; }
+mkrepo "${BASIC/Files: a.py/Files: l.py}"
+( cd "$R" && ln -s a.py l.py && git add l.py && git commit -qm link ) || { echo "setup failed: tracked link l.py"; exit 1; }
+run "rm l.py && echo plain > l.py"; G=$(rid)
+{ [ -n "$G" ] && [ -f "$R/l.py" ] && [ ! -L "$R/l.py" ]; } || { echo "setup failed: a run that replaced the link l.py with a file"; cat "$T/out.txt"; exit 1; }
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1; RCLF=$?
+[ $RCLF -eq 0 ] && [ -L "$R/l.py" ] && [ "$(readlink "$R/l.py")" = a.py ] \
+  && ok "8 a symlink the run replaced with a regular file: --restore brings the symlink back" \
+  || { bad "8 link replaced by a file not restored rc=$RCLF: l.py is $([ -L "$R/l.py" ] && echo a link || echo not a link)"; cat "$T/out.txt"; }
+rm -f "$R/l.py"; echo plain > "$R/l.py"      # back to the file the run left
+python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m.pop("backup_links", None); json.dump(m,open(p,"w"))' "$R/.git/concord/$G/meta.json"
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
+[ ! -L "$R/l.py" ] && [ "$(cat "$R/l.py")" = plain ] && has "l.py: not restored" \
+  && ok "8 a link the run replaced with a file, in a run that holds no link evidence: the run's file stays and l.py is listed as not restored" \
+  || { bad "8 legacy replaced link: l.py is $([ -L "$R/l.py" ] && echo a link || echo "a file holding '$(cat "$R/l.py")'")"; cat "$T/out.txt"; }
+mkrepo "${BASIC/Files: a.py/Files: l.py}"
+( cd "$R" && ln -s a.py l.py && git add l.py && git commit -qm link && rm l.py && echo mine > l.py ) || { echo "setup failed: a committed link replaced by a file"; exit 1; }
+run "rm l.py"; G=$(rid)
+{ [ -n "$G" ] && [ ! -e "$R/l.py" ]; } || { echo "setup failed: a run that deleted the file l.py"; cat "$T/out.txt"; exit 1; }
+$DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
+[ ! -L "$R/l.py" ] && [ "$(cat "$R/l.py" 2>/dev/null)" = mine ] \
+  && ok "8 a file the run deleted where the commit holds a link: a run that records link evidence restores the file it backed up" \
+  || { bad "8 a regular file refused as a link: l.py is $([ -e "$R/l.py" ] && echo present || echo absent)"; cat "$T/out.txt"; }
 fi
 
 echo "passed $pass, failed $fail"

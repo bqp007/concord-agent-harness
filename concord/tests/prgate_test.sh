@@ -77,10 +77,12 @@ pushpr(){ ( set -e; cd "$C"; git fetch -q origin "refs/pull/$1/head"; git checko
   git add -A; git commit -qm fix; git push -q origin "HEAD:refs/pull/$1/head"; git checkout -q main ) || { echo "setup failed: push $1"; exit 1; }
   prjson "$1"; }
 # runpr N RISK FILES ACTIONS [BRANCH]: a Concord run (fake executor, Risk RISK, plan marker PLAN-MARK-N) of FILES on a branch of the clone,
-# committed and pushed as PR N's head; BRANCH (default prN) is the branch the run is recorded on
+# committed and pushed as PR N's head; BRANCH (default prN) is the branch the run is recorded on; PRE (a shell command, default none)
+# runs on the new branch and is committed before the run starts (an unrecorded change of the PR)
 runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
   mkdir -p "$C/.claude"; printf '# Plan\n## Phase 1 - run %s\nExecutor: deepseek-flash\nRisk: %s\nPurpose: PLAN-MARK-%s\nFiles: %s\nAcceptance:\n- `true`\n' "$n" "$risk" "$n" "$files" > "$C/.claude/PLAN_$n.md"
-  ( set -e; cd "$C"; git checkout -q main; git checkout -qb "$br" ) || { echo "setup failed: branch $br"; exit 1; }
+  ( set -e; cd "$C"; git checkout -q main; git checkout -qb "$br"; if [ -n "${PRE:-}" ]; then sh -c "$PRE"; git add -A; git commit -qm "before run $n"; fi ) \
+    || { echo "setup failed: branch $br"; exit 1; }
   approve ".claude/PLAN_$n.md" "$C" || exit 1
   FAKE_ACTIONS="$actions" $DP 1 --plan ".claude/PLAN_$n.md" --via qwen --model fake/m --no-baseline --repo "$C" > "$T/out.txt" 2>&1
   RUNID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$RUNID" ] || { echo "setup failed: run for PR $n"; cat "$T/out.txt"; exit 1; }
@@ -154,6 +156,21 @@ opus 130 medium concord:reviewer-opus55 "$T/clean.txt"; TREE=$(sed -n 's/^REPOSI
 [ "$(cat "$TREE/caller.py" 2>/dev/null)" = "c = 130" ] && [ "$(cat "$TREE/v.txt" 2>/dev/null)" = '$Format:%H$' ] \
   && ok "3 the head tree holds the committed tree: an export-ignore file is there and an export-subst file keeps its committed bytes" \
   || bad "3 export attributes changed the head tree: caller.py='$(cat "$TREE/caller.py" 2>&1)' v.txt='$(cat "$TREE/v.txt" 2>&1)'"
+printf 'outside v1\n' > "$T/outside131.txt"
+( set -e; cd "$C"; git checkout -q main; git checkout -qb pr131; printf 'm = 131\n' > m.py
+  ln -s "$T/outside131.txt" abs.txt; ln -s ../../outside131.txt up.txt; ln -s m.py in.txt
+  mkdir t p; printf 't\n' > t/f; ln -s ../t p/q; ln -s p/q/../.. chain   # chain stays inside on paper, leaves through p/q
+  git add -A; git commit -qm pr131; git push -qf origin HEAD:refs/pull/131/head; git checkout -q main; git branch -qD pr131 ) \
+  || { echo "setup failed: pr131"; exit 1; }
+prjson 131
+opus 131 medium concord:reviewer-opus55 "$T/clean.txt"; TREE=$(sed -n 's/^REPOSITORY (read-only, head [0-9a-f]*): //p' "$PK" | head -1)
+printf 'outside v2\n' > "$T/outside131.txt"
+links131=$(cd "$TREE" && find . -type l | wc -l | tr -d ' ')
+{ [ "$links131" = 0 ] && [ "$(cat "$TREE/abs.txt" 2>/dev/null)" = "$T/outside131.txt" ] \
+  && [ "$(cat "$TREE/up.txt" 2>/dev/null)" = ../../outside131.txt ] && [ "$(cat "$TREE/in.txt" 2>/dev/null)" = m.py ] \
+  && [ "$(cat "$TREE/chain" 2>/dev/null)" = p/q/../.. ]; } \
+  && ok "3 every committed link reads as its link text in the head tree: none leads out, directly or through another link, and outside content never shows" \
+  || bad "3 head tree links: links=$links131 abs='$(cat "$TREE/abs.txt" 2>&1)' up='$(cat "$TREE/up.txt" 2>&1)' in='$(cat "$TREE/in.txt" 2>&1)' chain-is-link=$([ -L "$TREE/chain" ] && echo yes || echo no)"
 newpr 120 m.py 'm = 120'
 flash 120 fake/m --tier medium --dry-run; D=$(sed -n 's|.*prompt [0-9]* chars at \(.*\)/prompt.txt|\1|p' "$T/out.txt" | head -1)
 grep -qF "REPOSITORY (read-only, head $(hd 120)): $D/tree" "$D/prompt.txt" && [ "$(cat "$D/tree/m.py" 2>/dev/null)" = "m = 120" ] \
@@ -320,6 +337,51 @@ pushpr 1960 cover2.txt C
 $DP --review-pr 1960 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 a Risk: low run followed by an unrecorded commit of the PR lowers nothing: --tier low is refused" \
   || { bad "8 a low run before unrecorded work lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
+
+# a manual commit made launcher3.sh 0755, then a Risk: low run edited its text: the run's start mode is not the merge base's
+( set -e; cd "$C"; git checkout -q main; printf 'run\n' > launcher3.sh; git add launcher3.sh; git commit -qm "launcher3"; git push -q origin main ) || { echo "setup failed: launcher3"; exit 1; }
+PRE='chmod 755 launcher3.sh' runpr 1970 low launcher3.sh "printf 'run 2\n' > launcher3.sh"
+$DP --review-pr 1970 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 an unrecorded mode change (0644 to 0755) before a Risk: low run: --tier low is refused" \
+  || { bad "8 a low run after an unrecorded mode change lowered the tier rc=$RC"; tail -2 "$T/out.txt"; }
+# 20 alternating runs A -> B, B -> A on stall.txt, then an unrecorded commit B -> C: the head's state is unreachable, and the search must end
+# (a watchdog without `timeout`: poll, then kill)
+( set -e; cd "$C"; git checkout -q main; printf 'A\n' > stall.txt; git add stall.txt; git commit -qm "stall A"; git push -q origin main
+  git checkout -qb pr198; printf 'B\n' > stall.txt; git commit -qam "stall B"; printf 'C\n' > stall.txt; git commit -qam "stall C"
+  git push -qf origin "HEAD:refs/pull/198/head"; git checkout -q main; git branch -qD pr198 ) || { echo "setup failed: pr198"; exit 1; }
+prjson 198
+python3 - "$RUNS" <<'PY'
+import hashlib, json, os, sys
+h = lambda t: hashlib.sha256(t.encode()).hexdigest()
+for i in range(20):
+    a, b = ("A\n", "B\n") if i % 2 == 0 else ("B\n", "A\n")
+    d = os.path.join(sys.argv[1], f"stall-{i:02d}"); os.makedirs(d)
+    json.dump({"run_id": f"stall-{i:02d}", "plan": "x", "risk": "low", "changed": ["stall.txt"], "backup_hashes": {"stall.txt": h(a)},
+               "start_kinds": {"stall.txt": "file"}, "start_exec": {"stall.txt": False}, "end_hashes": {"stall.txt": h(b)},
+               "end_kinds": {"stall.txt": "file"}, "end_exec": {"stall.txt": False}}, open(os.path.join(d, "meta.json"), "w"))
+PY
+$DP --review-pr 198 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1 & PID=$!
+for _ in $(seq 1 120); do kill -0 "$PID" 2> /dev/null || break; sleep 0.5; done
+if kill -0 "$PID" 2> /dev/null; then kill "$PID" 2> /dev/null; sleep 1; kill -9 "$PID" 2> /dev/null; wait "$PID" 2> /dev/null; bad "8 the attribution search over repeated A/B history did not end in 60 s"
+else wait "$PID"; RC=$?; [ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 20 alternating runs whose chain cannot reach the head: the search ends and --tier low is refused" \
+  || { bad "8 alternating runs rc=$RC"; tail -2 "$T/out.txt"; }; fi
+# two tracked files, ':(top)guide.txt' and guide.txt: a Risk: low run changed the first P -> Q, an unrecorded commit made it R; guide.txt is P at the
+# merge base and Q at the head, and its own Risk: low run covers it (only the first name needs medium)
+( set -e; cd "$C"; git checkout -q main; printf 'P\n' > guide.txt; printf 'P\n' > ':(top)guide.txt'; git add -A; git commit -qm "guide"; git push -q origin main
+  git checkout -qb pr199; printf 'Q\n' > guide.txt; printf 'Q\n' > ':(top)guide.txt'; git add -A; git commit -qm "guide Q"; printf 'R\n' > ':(top)guide.txt'; git add -A; git commit -qm "guide R"
+  git push -qf origin "HEAD:refs/pull/199/head"; git checkout -q main; git branch -qD pr199 ) || { echo "setup failed: pr199"; exit 1; }
+prjson 199
+python3 - "$RUNS" <<'PY'
+import hashlib, json, os, sys
+h = lambda t: hashlib.sha256(t.encode()).hexdigest()
+for f, name in ((":(top)guide.txt", "guide-run-top"), ("guide.txt", "guide-run")):    # guide.txt's run covers its whole change
+    d = os.path.join(sys.argv[1], name); os.makedirs(d)
+    json.dump({"run_id": name, "plan": "x", "risk": "low", "changed": [f], "backup_hashes": {f: h("P\n")}, "start_kinds": {f: "file"},
+               "start_exec": {f: False}, "end_hashes": {f: h("Q\n")}, "end_kinds": {f: "file"}, "end_exec": {f: False}}, open(os.path.join(d, "meta.json"), "w"))
+PY
+$DP --review-pr 199 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" && ok "8 the file ':(top)guide.txt' is read by its literal name, not as the pathspec for guide.txt: --tier low is refused" \
+  || { bad "8 a pathspec-named file read another file's state rc=$RC"; tail -2 "$T/out.txt"; }
 
 # a run made in a fork of the PR's worktree is the PR's run: it records the fork's origin branch and HEAD
 WT="python3 $T/concord/wt.py"
