@@ -77,10 +77,10 @@ ETA: <N> min, lands at <hh:mm> local
 - Acceptance: fast, deterministic offline commands in backticks that check behaviour, not wiring, tell right from
   plausible wrong code, and fail on the untouched code (red run) unless marked `(characterization)`. A
   behaviour-preserving phase sets `Baseline: pass`, optionally `Characterize: <command>` (output diffed before and
-  after). Acceptance leaves tracked files and the phase's Files as it found them (exit 7 otherwise): output goes to
-  ignored or untracked paths.
+  after). Acceptance leaves the checkout as it found it (exit 7 otherwise): output goes to ignored paths or to
+  untracked build or cache output (`generated_globs`).
 - Test plan: one row per touched behavior; ADD only when no test covers it. `Tests:` is a planning estimate: the report
   prints it beside the actual test lines and it decides nothing. Home names the test file: an executor phase that changes a Home file its Files: does
-  not list cannot pass (ACCEPTANCE FILES CHANGED, exit 7).
+  not list is rejected and cannot pass (exit 7).
 - One phase: about 5 files and 7 steps at most; Notes, Interfaces, Decisions, Out of scope only when needed.
 -->

@@ -640,12 +640,11 @@ def read_copies(gitdir):
 
 
 def graded_check(fork):
-    """(exit code, line) of `concord.py --fork-graded` for the fork: 0 no run or a match, 1 no matching PASS candidate."""
+    """(exit code, line) of `concord.py --fork-graded` for the fork: 0 for no run or a match; any other code, a fork
+    without a matching PASS candidate or a check that could not run, refuses the join unless --ungraded."""
     res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork)],
                          capture_output=True, text=True)
-    if res.returncode not in (0, 1):
-        die(f"the grading check of the fork {fork.name} failed, fork kept: {(res.stderr or res.stdout).strip()}")
-    return res.returncode, res.stdout.strip()
+    return res.returncode, (res.stdout or res.stderr).strip() or f"the grading check exited {res.returncode}"
 
 
 def join_blockers(fork, origin, record):

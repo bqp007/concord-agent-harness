@@ -45,7 +45,7 @@ newrepo; run 'echo y >> a.py; echo w >> b.py; rm c.py; git add a.py; echo "# edi
 line "OUT OF SCOPE (source):" "b.py" && ok "out-of-scope edit reported" || { bad "out of scope"; grep -i "scope" "$T/out.txt"; }
 line "DELETED:" "c.py" && ok "deletion reported" || bad "deleted: $(grep '^DELETED' "$T/out.txt")"
 line "STAGED BY EXECUTOR:" "a.py" && ok "staged edit reported" || bad "staged: $(grep -i staged "$T/out.txt")"
-has "PLAN FILE MODIFIED" && ok "plan edit reported" || bad "plan modified not reported"
+grep "^REJECTED" "$T/out.txt" | grep -qF "PLAN_T.md" && ok "plan edit rejects the run" || bad "plan edit not in the rejection"
 line "GIT INTERNALS CHANGED:" ".git/hooks/pre-commit (new)" && ok "new git hook reported" || bad "internals: $(grep -i internals "$T/out.txt")"
 
 echo "== guards"

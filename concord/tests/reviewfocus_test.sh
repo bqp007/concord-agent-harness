@@ -56,9 +56,9 @@ git init -q --bare -b main "$O" && git clone -q "$O" "$R" 2> /dev/null || { echo
   mkdir sec docs big lib other; printf 'm = 1\n' > lib/m.py; printf 'o = 1\n' > other/o.py; printf 'x = 1\n' > a.py; printf 'k = 1\n' > sec/key.py; printf 'o = 1\n' > sec/old.py
   printf 't = 1\n' > sec/key_test.py; printf 'doc\n' > docs/x.md; printf 'b = 1\n' > big/f.py; printf '.claude/\n' > .gitignore
   { echo '# Plan'; phase 1 medium sec/key.py; phase 2 medium a.py; phase 3 low docs/x.md; phase 4 high docs/x.md
-    phase 5 low sec/key_test.py; phase 6 medium sec/old.py; phase 7 medium big/f.py; phase 8 low lib/m.py
+    phase 5 low sec/key_test.py; phase 6 medium 'sec/old.py, a.py'; phase 7 medium big/f.py; phase 8 low lib/m.py
     phase 9 medium 'lib/m.py, other/o.py'; phase 10 medium lib/m.py | sed 's/^Risk: medium$/&\nBaseline: skip/'
-    phase 11 high lib/m.py | sed 's/^Risk: high$/&\nBaseline: skip/'; } > PLAN_F.md
+    phase 11 high lib/m.py | sed 's/^Risk: high$/&\nBaseline: skip/'; phase 12 medium docs/x.md; phase 13 medium 'sec/key.py, a.py'; } > PLAN_F.md
   git add -A && git commit -qm init && git push -q origin main
   git checkout -qb pr7; printf 'x = 2\n' > a.py; git commit -qam pr7; git push -q origin HEAD:refs/pull/7/head
   git checkout -q main; git checkout -qb pr9; printf 'x = 3\n' > a.py; printf 'k = 9\n' > sec/key.py
@@ -109,7 +109,7 @@ run 3 "echo '# r' >> docs/x.md"; L=$(rid); flash "$L"; packet "$L"
 has "risk floor medium" && has "docs/x.md matches docs/*" && has "needs concord:reviewer-opus55" \
   && ok "low phase on a medium-floor path: --packet names the floor and reviewer-opus55" \
   || { bad "medium floor"; tail -2 "$T/out.txt"; }
-run 2 "echo '# m' >> docs/x.md"; Q=$(rid); packet "$Q"
+run 12 "echo '# m' >> docs/x.md"; Q=$(rid); packet "$Q"
 [ -n "$(pk)" ] && ! has "risk floor" && ok "medium phase on a medium-floor path: no floor note (the floor must rank above the tier)" \
   || { bad "floor note at an equal tier"; tail -3 "$T/out.txt"; }
 run 4 "echo '# s' >> docs/x.md"; H=$(rid); packet "$H"
@@ -137,7 +137,7 @@ mv "$NOTES" "$T/notes.off"
 run 1 "echo '# u' >> sec/key.py"; U=$(rid); packet "$U"
 [ -n "$(pk)" ] && ! has "risk floor" && ok "no notes file: medium phase on sec/key.py has no floor note" || { bad "no notes file"; tail -2 "$T/out.txt"; }
 mv "$T/notes.off" "$NOTES"
-run 1 "echo '# v' >> sec/key.py; echo '# v' >> a.py"; X=$(rid)
+run 13 "echo '# v' >> sec/key.py; echo '# v' >> a.py"; X=$(rid)
 $DP --review "$X" --packet --files a.py --repo "$R" > "$T/out.txt" 2>&1
 has "risk floor high" && has "sec/key.py matches sec/*" && ok "--review --packet --files a.py still names the run's floor (--files never narrows it)" \
   || { bad "phase --files narrowed the floor"; tail -3 "$T/out.txt"; }
