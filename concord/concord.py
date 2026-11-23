@@ -548,6 +548,17 @@ def file_identity(path):
     return "file", bool(st.st_mode & 0o100), file_hash(p)
 
 
+def grading_identity(path):
+    """The identity of a grading file as it runs: file_identity of the path itself and, for a symlink, also of what it
+    resolves to, so a new link text, an edited target and a target that lost its executable bit each change it. A link
+    gives ("link", the target's executable bit, a hash of its own identity and the target's)."""
+    kind, executable, digest = file_identity(path)
+    if kind != "link":
+        return kind, executable, digest
+    t_kind, t_exec, t_digest = file_identity(os.path.realpath(path))
+    return "link", t_exec, hashlib.sha256(f"{digest}\0{t_kind}\0{t_digest}".encode()).hexdigest()
+
+
 def end_state_drift(repo, meta):
     """The files whose state now differs from the end state the run recorded after its acceptance re-run: every file
     the run backed up (its scope as it stood at the start), changed, created or deleted, compared by kind, executable
@@ -556,11 +567,12 @@ def end_state_drift(repo, meta):
     they did not test."""
     ends, kinds, execs = meta.get("end_hashes") or {}, meta.get("end_kinds") or {}, meta.get("end_exec") or {}
     drift = {f for f, h in ends.items() if file_identity(Path(repo) / f) != (kinds.get(f), execs.get(f), h)}
-    # The grading files too (acceptance_end_hashes): their state when the acceptance results were taken, by identity
-    # when the run recorded kinds (3.0.5 and later), else by content only.
+    # The grading files too (acceptance_end_hashes): their state when the acceptance results were taken, by
+    # grading_identity (a symlink also by what it points to) when the run recorded kinds (3.0.5 and later), else by
+    # content only.
     gkinds, gexecs = meta.get("acceptance_end_kinds"), meta.get("acceptance_end_exec") or {}
     for f, h in (meta.get("acceptance_end_hashes") or {}).items():
-        now = file_identity(Path(repo) / f) if gkinds else ("", False, file_hash(Path(repo) / f))
+        now = grading_identity(Path(repo) / f) if gkinds else ("", False, file_hash(Path(repo) / f))
         if now != ((gkinds[f], gexecs.get(f), h) if gkinds else ("", False, h)):
             drift.add(f)
     return sorted(drift)
@@ -1958,7 +1970,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     # hashes as absent, so one the executor creates counts as added.
     grading = acceptance_list(repo, plan_text(plan), files)
     acceptance_hashes = {p: file_hash(repo / p) for p in grading}
-    acceptance_ids = {p: file_identity(repo / p) for p in grading}
+    acceptance_ids = {p: grading_identity(repo / p) for p in grading}
     expect = ["red" if FAILS_UNTIL.search(tail) else "green" for _cmd, tail in acceptance_tails(phase_text)]
     origin_branch, origin_head = fork_origin(repo)
     state = {
@@ -2177,10 +2189,10 @@ def finish_run(run_dir, rc, secs=None, st=None):
     # start_state hashed; a run whose state predates this feature has no hashes, so skip the comparison. Their
     # state right after the run is kept here; the comparison itself runs after the post-run acceptance commands,
     # which can rewrite a grading file too (a snapshot test that refreshes its golden file).
-    # A state with recorded identities (3.0.5 and later) compares kind, executable bit and content; an older one
-    # compares content only.
+    # A state with recorded identities (3.0.5 and later) compares kind, executable bit and content, a symlink also by
+    # what it points to (grading_identity); an older one compares content only.
     ids = st.get("acceptance_ids")
-    grading_state = (lambda p: tuple(file_identity(repo / p))) if ids else (lambda p: file_hash(repo / p))
+    grading_state = (lambda p: tuple(grading_identity(repo / p))) if ids else (lambda p: file_hash(repo / p))
     acc_after_run = {p: grading_state(p) for p in st.get("acceptance_hashes") or {}}
     touched = changed + created
     stats = numstat(repo, [p for p in changed if post.get(p, ["??"])[0] not in ("??", "!!")])

@@ -234,6 +234,23 @@ $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
   && ok "a grading script replaced during the run by a symlink with the same bytes: PASS refused (exit 7), the file named" \
   || { bad "grading script swapped for a symlink during the run: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+# a symlinked grading script is compared by its link text and by the script it points to (not itself a grading file)
+linkrepo(){ newrepo 'python3 tests/test_a.py'; mv "$R/tests/test_a.py" "$R/tests/real_a.py"; chmod +x "$R/tests/real_a.py"
+  ln -s real_a.py "$R/tests/test_a.py"; git -C "$R" add -A; git -C "$R" commit -qm link; }
+linkrepo; sessionrun
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(verdict_of "$BID")" = "PASS" ] \
+  && ok "an unchanged symlinked grading script: PASS recorded" || { bad "unchanged symlinked grader: rc=$RC"; cat "$T/v.txt"; }
+linkrepo; sessionrun; printf 'raise SystemExit(1)\n' > "$R/tests/real_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "the script a symlinked grading file points to is edited after --end: PASS refused (exit 7), the grading file named" \
+  || { bad "link target edited after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+linkrepo; sessionrun; chmod -x "$R/tests/real_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "the script a symlinked grading file points to loses its executable bit after --end: PASS refused (exit 7), the grading file named" \
+  || { bad "link target chmod -x after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
 # post-run acceptance must leave the tree as it found it: the first command checks a.py, the second rewrites it
 accplan(){ newrepo true; printf 'build/\n' >> "$R/.gitignore"; printf 'b\n' > "$R/b.txt"; git -C "$R" add -A; git -C "$R" commit -qm ign
   printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `%s`\n' "$1" > "$R/PLAN_T.md"
