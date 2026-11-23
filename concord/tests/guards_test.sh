@@ -68,6 +68,11 @@ mkv v3; $DP --lint 1 --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; PRD=$(sed
 if [ -f "$PRD" ]; then printf '\nsneaked in after the read\n' >> "$PRD"; vverdict "$(basename "$PRD" .md)"; RC=$?; vrun; RC2=$?
   [ $RC -ne 0 ] && [ $RC2 -eq 11 ] && ok "a plan read whose content no longer hashes to its name is refused and opens nothing" || bad "altered read: verdict rc=$RC, then run rc=$RC2"
 else bad "altered read: --lint wrote no plan read to alter"; fi
+mkv v3s; approve PLAN_V.md "$V" || exit 1; HV=$(vhash "$V/PLAN_V.md")
+printf '\nsneaked in after the APPROVE\n' >> "$V/.git/concord/plan-reads/$HV.md"; vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort; vrun; RC2=$?
+[ $RC -eq 11 ] && [ $RC2 -eq 11 ] && grep -qF "$HV" "$T/out.txt" \
+  && ok "a plan read altered after the APPROVE opens nothing: --begin and an executor run exit 11, naming the read" \
+  || { bad "plan read altered after the APPROVE: --begin rc=$RC, run rc=$RC2"; tail -2 "$T/out.txt"; }
 mkv v3b '\n## Handoff\n```\nnotes\n## Passes\nprose of passes\n```\n'
 $DP --lint 1 --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; PRD=$(sed -n 's/^PLAN-READ: //p' "$T/out.txt" | head -1)
 if [ -f "$PRD" ]; then vverdict "$(basename "$PRD" .md)"; RC=$?

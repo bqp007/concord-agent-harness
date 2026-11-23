@@ -111,17 +111,6 @@ $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1
 [ $? -eq 7 ] && has "REJECTED (not graded)" && ok "implementer session run editing acceptance files -> rejected, PASS refused (only planner exempt)" \
   || { bad "implementer session not refused ($BID)"; cat "$T/v.txt"; }
-newrepo 'grep -q y a.py'
-# the characterization command rewrites a grading file (a Test plan home) only while a.py has no y, so only the red run before the change does
-printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | test_b | KEEP | tests/test_b.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `python3 tests/test_a.py && { grep -q y a.py || date +%%N > tests/test_b.py; }` (characterization)\n' > "$R/PLAN_T.md"
-approve PLAN_T.md "$R" || exit 1
-FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RID=$(rid)
-[ -n "$RID" ] && [ -n "$(git -C "$R" status --porcelain -- tests/test_b.py)" ] && [ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] \
-  || { echo "setup failed: a run whose red run rewrote tests/test_b.py and whose acceptance then passed twice"; cat "$T/out.txt"; exit 1; }
-$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-line "changed in scope:" "a.py" && ! has "POST-RUN COMMAND CHANGED THE TREE" && [ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] \
-  && ok "a grading file rewritten only by the red run before the change is blamed on nobody: PASS accepted" \
-  || { bad "red-run artifact blamed rc=$RC"; grep -e ACCEPT -e '^status' "$T/out.txt"; cat "$T/v.txt"; }
 cat > "$T/rig.py" <<'PY'
 import glob, json, os
 for f in glob.glob(os.environ["R"] + "/.git/concord/*/state.json"):    # the executor widens the scope its run state records
@@ -137,7 +126,7 @@ head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "tests/test_a.
 # S42: the grading file is rewritten by a post-run acceptance command (a snapshot test that refreshes its golden file)
 newrepo 'python3 tests/test_a.py && echo "# refreshed golden" >> tests/test_a.py'
 run 'echo y >> a.py'; RID=$(rid)
-if [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ "$(tail -1 "$R/tests/test_a.py")" = "# refreshed golden" ]; then
+if [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ]; then
   $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
   [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" && grep -qF "refreshed golden" "$T/v.txt" \
     && has "POST-RUN COMMAND CHANGED THE TREE" \
@@ -148,7 +137,7 @@ if [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ "$(tail -1 "$R/tests/te
   sed -n '/^## Overrides/,/^## [^O]/p' "$REP" | grep -qF "tests/test_a.py" \
     && ok "the report's Overrides names the grading file that an acceptance command rewrote" \
     || { bad "report does not name the rewritten grading file"; sed -n '/^## Overrides/,/^## [^O]/p' "$REP"; }
-else bad "S42 setup: the acceptance command did not rewrite tests/test_a.py (after rc $(meta "$RID" acceptance_after_rc))"; fi
+else bad "S42 setup: the acceptance command did not pass (after rc $(meta "$RID" acceptance_after_rc))"; fi
 
 echo "== candidate grading"
 # a dirty start (an untracked planner test and an uncommitted earlier change) is in the start tree S: the review diff shows the
@@ -210,6 +199,48 @@ $DP --grade "$RID" --repo "$R" > "$T/g.txt" 2>&1; RC=$?
   && ls "$R/.git/concord/$RID"/acceptance.after-*.txt > /dev/null 2>&1 \
   && ok "--grade on edited files keeps the earlier acceptance.after.txt, updates the results and leaves the recorded verdict" \
   || { bad "re-grade rc=$RC"; cat "$T/g.txt"; }
+# PASS judges the grade it records: a failing regrade that lands while the verdict waits for the run's meta lock
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+python3 -I - "$R/.git/concord/$RID" "$T/concord/concord.py" "$R" > "$T/v.txt" 2>&1 <<'PY'; RC=$?
+import fcntl, json, os, subprocess, sys, time
+rd, dp, repo = sys.argv[1:4]
+fd = os.open(f"{rd}/meta.lock", os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+p = subprocess.Popen([sys.executable, dp, "--verdict", os.path.basename(rd), "PASS", "--repo", repo],
+                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+time.sleep(2)                   # the verdict has read the passing grade; a regrade of a failing candidate lands now
+m = json.load(open(f"{rd}/meta.json")); m["acceptance_after_rc"] = [1]
+json.dump(m, open(f"{rd}/meta.json", "w"))
+os.close(fd)
+out, _ = p.communicate(timeout=60)
+print(out, end="")
+sys.exit(p.returncode)
+PY
+[ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "exit 1, expected green" "$T/v.txt" \
+  && ok "PASS judges the grade it records: a failing regrade that lands while the verdict waits for the run's lock refuses it (exit 7)" \
+  || { bad "verdict recorded over a failing regrade: rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
+# grading runs in a copy of the tree: the build output the red run and the acceptance commands write never reaches the checkout
+newrepo 'mkdir -p out && echo x >> out/grade.log; grep -q y a.py'; printf 'out/\n' >> "$R/.git/info/exclude"
+FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ -n "$RID" ] && [ "$(meta "$RID" baseline_rc)" = "[1]" ] && [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ ! -e "$R/out" ] && [ $RC -eq 0 ] \
+  && ok "the red run and the post-run acceptance run in a copy of the tree: the output they write lands in the copy, not the checkout, and PASS stands" \
+  || { bad "grading wrote into the checkout: baseline $(meta "$RID" baseline_rc), after $(meta "$RID" acceptance_after_rc), PASS rc=$RC"; ls "$R"; cat "$T/v.txt"; }
+# PASS needs the checkout to hold the whole candidate: a file the tests read changes outside the phase's diff
+newrepo 'grep -q y a.py && grep -q ok dep.txt'; printf 'ok\n' > "$R/dep.txt"; git -C "$R" add dep.txt; git -C "$R" commit -qm dep
+run 'echo y >> a.py'; RID=$(rid); printf 'broken\n' > "$R/dep.txt"
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "dep.txt" "$T/v.txt" \
+  && ok "a file outside the phase's diff that changed after the grade (a test dependency): PASS refused (exit 7), naming it" \
+  || { bad "stale dependency: PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
+# a grading file that is a symlink into an ignored folder: its content is pinned when graded, and a later change refuses PASS
+newrepo 'python3 tests/test_a.py'; ( cd "$R" && mkdir golden && printf 'assert True\n' > golden/test_a.py && printf 'golden/\n' >> .gitignore \
+  && rm tests/test_a.py && ln -s ../golden/test_a.py tests/test_a.py && git add -A && git commit -qm link ) || { echo "setup failed: linked grader"; exit 1; }
+run 'echo y >> a.py'; RID=$(rid); A1=$(meta "$RID" acceptance_after_rc); printf 'assert True  # changed\n' > "$R/golden/test_a.py"
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$A1" = "[0]" ] && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "a grading file linked into an ignored folder is graded on its content, and a change of that content refuses PASS (exit 7)" \
+  || { bad "ignored grader target: after $A1, PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
 # --grade refuses a change outside the run's write scope and lists it
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
 echo z >> "$R/b.py"
@@ -258,9 +289,11 @@ run 'echo y >> a.py; echo s > locked.txt; chmod 000 locked.txt'; RID=$(rid)
 head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "the tree could not be captured" && [ "$(meta "$RID" candidate)" = "None" ] \
   && ok "a file the executor left unreadable rejects the run, and the run is reported" || { bad "capture failure: rc lost or not rejected"; head -8 "$T/out.txt"; }
 chmod 644 "$R/locked.txt"
-# a background child the executor leaves behind is killed before grading
-newrepo 'true'; run 'echo y >> a.py; (sleep 2; echo x > late.txt) &'; sleep 3.5
-[ ! -e "$R/late.txt" ] && ok "a background child the executor leaves behind is killed before grading" || bad "late.txt appeared: the child outlived the run"
+# a background child the executor leaves behind is killed when the executor ends, before grading
+newrepo 'true'; rm -f "$T/child.pid"; run "echo y >> a.py; (sleep 30; echo x > late.txt) & echo \$! > '$T/child.pid'"
+CP=$(cat "$T/child.pid" 2>/dev/null)
+[ -n "$CP" ] && ! kill -0 "$CP" 2>/dev/null && [ ! -e "$R/late.txt" ] && ok "a background child the executor leaves behind is killed before grading" \
+  || { bad "the executor's background child (pid '$CP') outlived the run"; [ -n "$CP" ] && kill "$CP" 2>/dev/null; }
 
 echo "== acceptance after run"
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
@@ -355,13 +388,13 @@ $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
   && ok "an unchanged symlinked grading script: PASS recorded" || { bad "unchanged symlinked grader: rc=$RC"; cat "$T/v.txt"; }
 linkrepo; sessionrun; printf 'raise SystemExit(1)\n' > "$R/tests/real_a.py"
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
-  && ok "the script a symlinked grading file points to is edited after --end: PASS refused (exit 7), the grading file named" \
+[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/real_a.py" "$T/v.txt" \
+  && ok "the script a symlinked grading file points to is edited after --end: PASS refused (exit 7), the changed script named" \
   || { bad "link target edited after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
 linkrepo; sessionrun; chmod -x "$R/tests/real_a.py"
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
-  && ok "the script a symlinked grading file points to loses its executable bit after --end: PASS refused (exit 7), the grading file named" \
+[ $RC -eq 7 ] && grep -qF "tests/real_a.py" "$T/v.txt" \
+  && ok "the script a symlinked grading file points to loses its executable bit after --end: PASS refused (exit 7), the changed script named" \
   || { bad "link target chmod -x after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
 # post-run acceptance must leave the tree as it found it: the first command checks a.py, the second rewrites it
 accplan(){ newrepo true; printf 'build/\n' >> "$R/.gitignore"; printf 'b\n' > "$R/b.txt"; git -C "$R" add -A; git -C "$R" commit -qm ign
@@ -386,7 +419,7 @@ $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 accplan 'mkdir -p build && echo o > build/out.o'
 run 'echo y >> a.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ -f "$R/build/out.o" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
+[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
   && ok "acceptance writing an ignored build file: PASS still accepted" \
   || { bad "ignored acceptance write refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
 accplan 'mkdir -p __pycache__ && echo p > __pycache__/m.cpython-313.pyc'

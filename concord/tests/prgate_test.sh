@@ -78,7 +78,8 @@ pushpr(){ ( set -e; cd "$C"; git fetch -q origin "refs/pull/$1/head"; git checko
   prjson "$1"; }
 # runpr N RISK FILES ACTIONS [BRANCH] (PASSIT=1 records the run's PASS before it is committed): a Concord run (fake executor, Risk RISK, plan marker PLAN-MARK-N) of FILES on a branch of the clone,
 # committed and pushed as PR N's head; BRANCH (default prN) is the branch the run is recorded on; PRE (a shell command, default none)
-# runs on the new branch and is committed before the run starts (an unrecorded change of the PR)
+# runs on the new branch and is committed before the run starts (an unrecorded change of the PR); MID (a shell command,
+# default none, $RUNID set, output to $T/mid.txt) runs after the run and before the commit
 runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
   mkdir -p "$C/.claude"; printf '# Plan\n## Phase 1 - run %s\nExecutor: deepseek-flash\nRisk: %s\nPurpose: PLAN-MARK-%s\nFiles: %s\nAcceptance:\n- `true`\n' "$n" "$risk" "$n" "$files" > "$C/.claude/PLAN_$n.md"
   ( set -e; cd "$C"; git checkout -q main; git checkout -qb "$br"; if [ -n "${PRE:-}" ]; then sh -c "$PRE"; git add -A; git commit -qm "before run $n"; fi ) \
@@ -87,6 +88,7 @@ runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
   FAKE_ACTIONS="$actions" $DP 1 --plan ".claude/PLAN_$n.md" --via qwen --model fake/m --no-baseline --repo "$C" > "$T/out.txt" 2>&1
   RUNID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$RUNID" ] || { echo "setup failed: run for PR $n"; cat "$T/out.txt"; exit 1; }
   if [ -n "${PASSIT:-}" ]; then $DP --verdict "$RUNID" PASS --repo "$C" > "$T/passit.txt" 2>&1 || { echo "setup failed: PASS of the run for PR $n"; cat "$T/passit.txt"; exit 1; }; fi
+  if [ -n "${MID:-}" ]; then eval "$MID" || { echo "setup failed: MID of the run for PR $n"; cat "$T/mid.txt" 2>/dev/null; exit 1; }; fi
   ( set -e; cd "$C"; git add -A; git commit -qm "run $n"; git push -qf origin "HEAD:refs/pull/$n/head"; git checkout -q main; git branch -qD "$br" ) || { echo "setup failed: commit $n"; exit 1; }
   prjson "$n"; }
 # flash N MODEL [ARGS]: a fake-model PR review
@@ -733,5 +735,16 @@ st 70
 grep -q "^NOT GRADED: .*$RUN70" "$T/out.txt" && grep -q "^NOT GRADED: .*1 file" "$T/out.txt" \
   && ok "19 a head edited after the graded run prints NOT GRADED naming the newest graded candidate's run and how many files differ" \
   || { bad "19 no NOT GRADED line after an edit"; cat "$T/out.txt"; }
+
+# 20 a run counts for the content its regrade graded, at the run's Risk and with its plan
+MID='printf "c = 2100\n" > "$C/core.py" && $DP --grade "$RUNID" --repo "$C" > "$T/mid.txt" 2>&1 && $DP --verdict "$RUNID" PASS --repo "$C" >> "$T/mid.txt" 2>&1' \
+  runpr 210 high core.py "echo 'c = 210' > core.py"
+$DP --review-pr 210 --packet --tier medium --files core.py --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && ! grep -q '^PACKET' "$T/out.txt" \
+  && ok "20 core.py as the regrade of a Risk: high run left it (graded, PASS) still needs high: --tier medium is refused" \
+  || { bad "20 the regraded Risk: high run no longer counts, rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --review-pr 210 --packet --repo "$C" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && grep -qF "PLAN-MARK-210" "$PK" && ok "20 the packet of the regraded content holds the run's plan snapshot" \
+  || { bad "20 the regraded run's plan is missing from the packet '$PK'"; tail -2 "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

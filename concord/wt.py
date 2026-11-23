@@ -36,10 +36,17 @@ join  applies the fork's changes (binary diff of its working tree, untracked inc
       anyway and drops those. A patch that does not apply exits 2 naming the files and keeps the fork. Prints the
       files applied. A fork with Concord runs must also match the candidate of its newest PASS run (`concord.py
       --fork-graded`: the tree concord.py graded, under that run's rule); otherwise it refuses, applying nothing, and
-      names the files that differ. --ungraded joins it anyway and says so (--force does not: it drops join
-      blockers only). A fork with no runs joins as before and says no run graded it.
+      names the files that differ. A graded join applies the change from the fork snapshot to that candidate, not
+      the working tree, so cache and build output in the fork stay behind. When DIR changed since the fork, the
+      joined result (DIR with that change) must first pass that run's acceptance in a grading copy; a failure, or a
+      change that does not apply to DIR, refuses with nothing applied and the fork kept. --ungraded skips these
+      checks, joins the working tree and says so (--force does not: it drops join blockers only). A fork with an
+      open run (begun and neither ended nor aborted, or a live holder of its run lock) is refused even with
+      --ungraded or --force, and no run can start in the fork from that check to its removal. A fork with no runs
+      joins as before and says no run graded it.
 """
 import argparse
+import fcntl
 import hashlib
 import os
 import re
@@ -639,12 +646,17 @@ def read_copies(gitdir):
     return out
 
 
-def graded_check(fork):
-    """(exit code, line) of `concord.py --fork-graded` for the fork: 0 for no run or a match; any other code, a fork
-    without a matching PASS candidate or a check that could not run, refuses the join unless --ungraded."""
-    res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork)],
-                         capture_output=True, text=True)
-    return res.returncode, (res.stdout or res.stderr).strip() or f"the grading check exited {res.returncode}"
+def graded_check(fork, dest=None):
+    """(exit code, text, patch) of `concord.py --fork-graded` for the fork, joined into `dest` when given: 0 for no run
+    or a match (the patch, when concord.py names one, is the graded change to apply); 4, a run in the fork is not
+    finished, always refuses the join; any other code, a fork or joined result without a matching PASS or a check that
+    could not run, refuses it unless --ungraded."""
+    res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork)]
+                         + (["--dest", str(dest)] if dest else []), capture_output=True, text=True)
+    lines = (res.stdout or res.stderr).strip().splitlines()
+    patch = next((Path(ln[len("patch: "):]) for ln in lines if ln.startswith("patch: ")), None)
+    text = "\n".join(ln for ln in lines if not ln.startswith("patch: ")) or f"the grading check exited {res.returncode}"
+    return res.returncode, text, patch
 
 
 def join_blockers(fork, origin, record):
@@ -726,22 +738,37 @@ def cmd_join(args):
     if blockers and not args.force:
         die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "
             + "\n  ".join(blockers[:15]))
-    code, graded = graded_check(fork)
-    if code and not args.ungraded:
-        die(f"{graded}; nothing was applied, fork kept (join --ungraded joins it anyway)")
-    patch, names = fork_patch(fork, record.get("snapshot") or "HEAD")
-    if patch.strip():
-        res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
-                             capture_output=True)
+    # The fork's Concord lock mutex is held from the grading check to the fork's removal: no run starts or ends in the
+    # fork in between, so the check sees every run there is.
+    mutex = os.open(Path(git(fork, "rev-parse", "--path-format=absolute", "--git-dir")) / "concord.lock.mutex",
+                    os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(mutex, fcntl.LOCK_EX)
+        code, graded, graded_patch = graded_check(fork, None if args.ungraded else dirpath)
+        if code == 4:
+            die(f"{graded}; nothing was applied, fork kept")
+        if code and not args.ungraded:
+            die(f"{graded}; nothing was applied, fork kept (join --ungraded joins it anyway)")
+        if graded_patch:             # the graded change: the fork's snapshot to the candidate its PASS run graded
+            patch = graded_patch.read_bytes()
+            names = [rec.split("\t", 2)[2] for rec in
+                     git(fork, "apply", "--numstat", "-z", str(graded_patch)).split("\0") if rec]
+        else:
+            patch, names = fork_patch(fork, record.get("snapshot") or "HEAD")
+        if patch.strip():
+            res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
+                                 capture_output=True)
+            if res.returncode != 0:
+                die(f"{dirpath}: the fork's patch does not apply; fork kept at {fork}; files: "
+                    f"{', '.join(names) or 'none'}\n  {res.stderr.decode(errors='replace').strip()}")
+        for rel in marked_links(fork)[0]:
+            (fork / rel).unlink()
+        res = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(fork)],
+                             capture_output=True, text=True)
         if res.returncode != 0:
-            die(f"{dirpath}: the fork's patch does not apply; fork kept at {fork}; files: "
-                f"{', '.join(names) or 'none'}\n  {res.stderr.decode(errors='replace').strip()}")
-    for rel in marked_links(fork)[0]:
-        (fork / rel).unlink()
-    res = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(fork)],
-                         capture_output=True, text=True)
-    if res.returncode != 0:
-        die(f"git worktree remove --force {fork} failed: {res.stderr.strip()}")
+            die(f"git worktree remove --force {fork} failed: {res.stderr.strip()}")
+    finally:
+        os.close(mutex)
     git(repo, "worktree", "prune", check=False)
     print(f"applied: {', '.join(names) or 'nothing'}")
     if blockers:
