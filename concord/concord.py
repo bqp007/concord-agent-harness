@@ -227,15 +227,19 @@ def executor_blocked(log_text):
 
 # Out-of-scope paths that are build, cache or runtime output: reported separately and not counted.
 # A path is generated only when it is untracked or gitignored AND its basename or any parent directory
-# name matches one of these globs (executors.conf `generated =` adds more). Tracked files always count,
-# and so does any gitignored file that is not build output (local configs, data, model files, payloads).
+# name matches one of these globs (executors.conf `generated =` adds more), or when it is gitignored below
+# a BUILD_GLOBS folder. Tracked files always count, and so does any gitignored file that is not build output
+# (local configs, data, model files, payloads).
 GENERATED_GLOBS = (
     "*.pyc", "*.pyo", "*.o", "*.obj", "*.a", "*.so", "*.dylib", "*.dll", "*.class", "*.log", "*.tmp", "*.swp",
     "*.orig", "*.rej", ".DS_Store", "Thumbs.db", ".coverage", ".coverage.*", "coverage.xml", "*.lcov",
-    "__pycache__", "build", "dist", "out", "target", "bin", "obj", "node_modules", ".venv", "venv", ".tox",
-    ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".cache", "htmlcov", ".eggs",
-    "*.egg-info", ".gradle", "cmake-build-*", "CMakeFiles", "DerivedData", ".build", "Pods", "logs", "tmp", "temp",
+    "__pycache__", "node_modules", ".venv", "venv", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".hypothesis", ".cache", "htmlcov", ".eggs", "*.egg-info", ".gradle", "cmake-build-*", "CMakeFiles",
+    "DerivedData", ".build", "Pods",
 )
+# Folder names that hold build output in some projects and source in others (bin/ scripts, a tmp/ package): a path
+# below one is generated only when .gitignore ignores it.
+BUILD_GLOBS = ("build", "dist", "out", "target", "bin", "obj", "logs", "tmp", "temp")
 # Never classed as generated: secrets and credentials always count.
 PROTECTED_GLOBS = (".env", ".env.*", ".netrc", ".npmrc", ".pypirc", "*.pem", "*.key", "*.p12", "*.pfx",
                    "id_rsa*", "id_ed25519*", "*secret*", "*credential*")
@@ -828,12 +832,14 @@ def is_generated(path, globs):
 
 
 def split_out_of_scope(paths, post, globs=GENERATED_GLOBS):
-    """Split out-of-scope paths into (source, generated). Generated = untracked or gitignored AND named
-    like build/cache output. Tracked files, secrets and credentials always count as source."""
+    """Split out-of-scope paths into (source, generated). Generated = untracked or gitignored AND named like build or
+    cache output (`globs`), or gitignored below a BUILD_GLOBS folder. Tracked files, secrets and credentials always
+    count as source."""
     source, generated = [], []
     for p in paths:
         status = post.get(p, ["", None])[0]
-        gen = status in ("!!", "??") and is_generated(p, globs) and not path_matches(p, PROTECTED_GLOBS)
+        named = globs + BUILD_GLOBS if status == "!!" else globs
+        gen = status in ("!!", "??") and is_generated(p, named) and not path_matches(p, PROTECTED_GLOBS)
         (generated if gen else source).append(p)
     return sorted(source), sorted(generated)
 
@@ -1212,11 +1218,11 @@ class TreeError(Exception):
 def capture_tree(repo, globs=GENERATED_GLOBS, keep=frozenset()):
     """The tree grading compares: the checkout's files as `git add -A` sees them (tracked and untracked, ignored ones
     left out), without the top-level PLAN_*.md plans (revisions govern a plan, grading does not) and without untracked
-    build output: an untracked path named like build or cache output (`globs`, the rule that keeps such output out of
-    OUT OF SCOPE) that is no protected file and not in `keep` (a run's own and grading files). So `.gitignore` and the
-    generated_globs setting declare the writable build output. The tree is built in a temporary index seeded from the
-    real one: the real index and every ref stay as they are, and build output is never read. Raises TreeError when git
-    fails."""
+    cache output: an untracked path named like it (`globs`, the rule that keeps such output out of OUT OF SCOPE) that is
+    no protected file and not in `keep` (a run's own and grading files). So `.gitignore` and the `generated` setting
+    declare the writable build output. The tree is built in a temporary index seeded from the real one, without its
+    assume-unchanged bits, which would hide a changed file: the real index and every ref stay as they are, and build
+    output is never read. Raises TreeError when git fails."""
     index = git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index").strip()
     with tempfile.TemporaryDirectory(prefix="concord-tree-") as tmp:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
@@ -1230,6 +1236,9 @@ def capture_tree(repo, globs=GENERATED_GLOBS, keep=frozenset()):
                 raise TreeError(res.stderr.strip() or f"git exited {res.returncode}")
             return res.stdout
 
+        unwatched = [e[2:] for e in run("ls-files", "-v", "-z").split("\0") if e[:1].islower()]
+        if unwatched:
+            run("update-index", "--no-assume-unchanged", "-z", "--stdin", stdin="\0".join(unwatched))
         run("add", "-u", "--", ".", ":(exclude,glob)PLAN_*.md")
         new = [p for p in run("ls-files", "--others", "--exclude-standard", "-z").split("\0")
                if p and not ("/" not in p and fnmatch.fnmatch(p, "PLAN_*.md"))
@@ -1252,9 +1261,10 @@ def trees_stored(repo, *trees):
     return all(run_git(["cat-file", "-e", t], repo).returncode == 0 for t in trees)
 
 
-def tree_paths(repo, old, new):
-    """The files that differ between two trees."""
-    return sorted(p for p in git(repo, "diff-tree", "-r", "--name-only", "-z", old, new).split("\0") if p)
+def tree_paths(repo, old, new, diff_filter=None):
+    """The files that differ between two trees (`diff_filter`: git's --diff-filter, D for the files `new` lacks)."""
+    flags = [f"--diff-filter={diff_filter}"] if diff_filter else []
+    return sorted(p for p in git(repo, "diff-tree", "-r", "--name-only", "-z", *flags, old, new).split("\0") if p)
 
 
 def beside(rec):
@@ -2305,7 +2315,10 @@ def acceptance_text(results):
 
 def finish_run(run_dir, rc, secs=None, st=None):
     """Snapshot after the run and write report.md + meta.json. Returns the report text. An executor run passes its
-    start state from memory, so the executor cannot rewrite the hashes that grade it (state.json is only a record)."""
+    start state from memory, so the executor cannot rewrite the hashes that grade it; that state is written back to
+    state.json, which --grade reads."""
+    if st is not None:
+        write_state(run_dir, st)
     st = st if st is not None else json.loads((run_dir / "state.json").read_text())
     repo = Path(st["repo"])
     plan = repo / st["plan"]
@@ -2377,6 +2390,10 @@ def finish_run(run_dir, rc, secs=None, st=None):
             candidate = graded_tree(repo, rule)
         except TreeError as exc:
             rejected.append(f"the tree could not be captured ({exc})")
+    if candidate:       # the trees also see a change that git status misses (an assume-unchanged file)
+        rejected += [f"{p} (out of scope)" for p in tree_paths(repo, st["start_tree"], candidate)
+                     if not in_write_scope(st, p) and (in_scope(p, files) or not in_scope(p, concurrent))]
+        candidate = None if rejected else candidate
     watch = TreeWatch(repo, candidate, lambda: graded_tree(repo, rule), beside(rule)) if candidate else None
     # Static checks: same tools on the touched files; only findings absent before the run are new.
     static_line, static_new = "", {}
@@ -2468,8 +2485,8 @@ def finish_run(run_dir, rc, secs=None, st=None):
         lines.append("POST-RUN COMMAND CHANGED THE TREE: " + "; ".join(
             f"{t['path']} by `{t['command']}`" for t in grading_changed)
             + " (a post-run command must leave the tree as it found it; a file it generates belongs in the phase's "
-            "own changes, in ignored output or in untracked build or cache output (generated_globs); PASS is refused "
-            "until --grade)")
+            "own changes or in output that .gitignore or the `generated` setting declares; PASS is refused until "
+            "--grade)")
     if staged_new:
         lines.append("STAGED BY EXECUTOR: " + ", ".join(staged_new)
                      + " (git add; plain `git diff` hides these, review with `git diff HEAD -- <path>`)")
@@ -3536,12 +3553,7 @@ def tree_entry_mode(ls_tree_z, f):
 def review_diff(repo, meta, files, cap=REVIEW_DIFF_CAP):
     """The run's graded change: `git diff <start tree> <candidate> -- <files>` as the reviewer reads it (text forced, a
     binary file by name only), whatever the checkout holds now, cut at `cap` characters unless it is None."""
-    start, cand = meta["start_tree"], meta["candidate"]
-    if not trees_stored(repo, start, cand):
-        run = meta.get("run_id") or "the run"
-        die(f"the trees of {run} are no longer stored (git gc prunes unreferenced objects after gc.pruneExpire): "
-            + (f"concord.py --grade {run} grades the current files" if trees_stored(repo, start)
-               else "run the phase again"), code=2)
+    start, cand = stored_trees(repo, meta)
     parts = []
     for f in files:
         if is_binary_change(repo, start, cand, f):
@@ -4477,14 +4489,33 @@ def _process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, app
             "finding_ids": [f["id"] for f in findings] + [c["id"] for c in fails]}
 
 
-def review_files(repo, meta, deleted=False):
-    """The run's changed + created files that still exist, minus what the report classed as generated (cache and
-    build output such as __pycache__, .pytest_cache, .ruff_cache): reviewers see the phase's work, not tool debris.
-    `deleted` adds the files the run deleted (a packet shows them with their diff)."""
+def review_files(repo, meta, deleted=False, live=False):
+    """The files of the run's graded change (start tree to candidate) that are its own: not a concurrent run's (in its
+    Files: and not in this run's) and not what the report classed as generated (cache and build output such as
+    __pycache__, .pytest_cache), so reviewers see the phase's work, not tool debris. `deleted` keeps the files the run
+    deleted (a packet shows them with their diff). `live` (--mutate, which mutates the checkout) and a run without a
+    candidate: the run's changed and created files that still exist."""
     gen = set(meta.get("generated", []))
-    gone = set(meta.get("deleted", [])) if deleted else set()
-    return [f for f in sorted(set(meta.get("changed", []) + meta.get("created", [])) | gone)
-            if f not in gen and ((repo / f).is_file() or f in gone)]
+    if live or not meta.get("candidate"):
+        return [f for f in sorted(set(meta.get("changed", []) + meta.get("created", [])))
+                if f not in gen and (repo / f).is_file()]
+    start, cand = stored_trees(repo, meta)
+    files, concurrent = meta["files"], meta.get("concurrent_files") or []
+    gone = set() if deleted else set(tree_paths(repo, start, cand, "D"))
+    return [f for f in tree_paths(repo, start, cand)
+            if f not in gen and f not in gone and (in_scope(f, files) or not in_scope(f, concurrent))]
+
+
+def stored_trees(repo, meta):
+    """(start tree, candidate) of a graded run; exit 2 when git no longer holds them: --grade grades the current files
+    while the start tree is stored, else the phase runs again."""
+    start, cand = meta["start_tree"], meta["candidate"]
+    if not trees_stored(repo, start, cand):
+        run = meta.get("run_id") or "the run"
+        die(f"the trees of {run} are no longer stored (git gc prunes unreferenced objects after gc.pruneExpire): "
+            + (f"concord.py --grade {run} grades the current files" if trees_stored(repo, start)
+               else "run the phase again"), code=2)
+    return start, cand
 
 
 def reviewer_rank(reviewer):
@@ -6196,6 +6227,9 @@ def cmd_end(args, conf):
         die(f"{run_dir.name} is still starting (its start state is not written yet); end it once it has started")
     if (run_dir / "report.md").exists():
         die(f"{run_dir.name} already has a report; use --show {run_dir.name}")
+    if "start_tree" not in json.loads((run_dir / "state.json").read_text()):
+        die(f"{run_dir.name} was begun before 3.1.0 candidate grading: concord.py --abort {run_dir.name}, then run the "
+            "phase again")
     report = finish_run(run_dir, None)
     release_lock(root, run_dir.name)
     print(report)
@@ -6229,8 +6263,8 @@ def candidate_problems(repo, meta):
         hits = [t["command"] for t in meta["grading_changed"] if t["path"] == path]
         out.append(f"post-run command changed {path} ({'; '.join(f'`{c}`' for c in hits)}): the results do not "
                    "describe the candidate; a command must leave the tree as it found it, and a file it generates "
-                   "belongs in the phase's own changes, in ignored output or in untracked build or cache output "
-                   "(generated_globs)")
+                   "belongs in the phase's own changes or in output that .gitignore or the `generated` setting "
+                   "declares")
     top = Path(repo).resolve()
     watched = dict.fromkeys(tree_paths(repo, meta["start_tree"], meta["candidate"]))      # path -> the grading file it serves
     watched.update(dict.fromkeys(meta.get("grading_files") or []))
@@ -6382,7 +6416,7 @@ def cmd_fork_graded(args):
     passed = [m for m in runs if m.get("verdict") == "PASS" and m.get("verdict_candidate")]
     if not passed:
         print(f"the fork {repo.name} has Concord runs but none passed with a graded candidate: grade it with "
-              f"`concord.py --grade RUN --repo {repo}` and record PASS there")
+              f"`concord.py --grade RUN --repo {repo}` and record PASS there (a run recorded before 3.1.0 runs again)")
         return 1
     newest = max(passed, key=lambda m: m.get("verdict_at") or 0)
     try:
@@ -6402,9 +6436,10 @@ def cmd_fork_graded(args):
 
 
 def cmd_grade(args):
-    """Grade the current checkout for a reported run that has a start tree: refuse when the tree differs from the start
-    tree outside the run's write scope or the checkout differs from the run's start state in a way that rejects a run
-    (state_changes), else take it as the new candidate and run the run's recorded acceptance
+    """Grade the current checkout for a reported run that has a start tree: refuse when the run wrote through a linked
+    folder, the tree differs from the start tree outside the run's write scope, the checkout differs from the run's
+    start state in a way that rejects a run (state_changes), or an ignored file that rejected the run (no tree holds
+    it) differs from the start, else take it as the new candidate and run the run's recorded acceptance
     commands on it, watching the tree after each one. The earlier acceptance.after.txt is kept as
     acceptance.after-<k>.txt. A recorded verdict stays, with the candidate it was given for."""
     repo = repo_root(args.repo or os.getcwd())
@@ -6415,6 +6450,9 @@ def cmd_grade(args):
         die(f"{run_dir.name} was recorded in {meta.get('repo') or 'an unknown checkout'}, not in {repo}; run --grade there")
     if not meta.get("start_tree"):
         die(f"{run_dir.name} predates 3.1.0 candidate grading: run the phase again")
+    if linked := [r for r in meta.get("rejected") or [] if "linked folder" in r]:
+        die(f"{run_dir.name} wrote through a linked folder ({'; '.join(linked)}), which --grade cannot check again: "
+            "restore it, then run the phase again", code=7)
     st = json.loads((run_dir / "state.json").read_text())
     if not trees_stored(repo, meta["start_tree"]):
         die(f"the start tree of {run_dir.name} is no longer stored (git gc prunes unreferenced objects after "
@@ -6433,6 +6471,12 @@ def cmd_grade(args):
     if moved := state_changes(repo, st):
         die("the checkout differs from the run's start besides its files: " + "; ".join(moved)
             + "; restore that state, then grade again", code=7)
+    pre, post = st["pre"], snapshot(repo, st["track_ignored"])
+    stray = meta.get("out_of_scope", []) + [d for d in meta.get("deleted", []) if not in_write_scope(meta, d)]
+    ignored = [p for p in stray if "!!" in (pre.get(p, [""])[0], post.get(p, [""])[0]) and pre.get(p) != post.get(p)]
+    if ignored:
+        die("ignored files the run changed outside its write scope differ from the start: " + ", ".join(ignored)
+            + "; delete the ones the run created; one it changed or deleted means running the phase again", code=7)
     watch = TreeWatch(repo, current, lambda: graded_tree(repo, meta), beside(meta))
     char_line = characterization_line(run_dir, st, repo, watch) if st.get("characterize") else None
     results = run_acceptance(repo, meta.get("acceptance") or [], st.get("check_timeout", CHECK_TIMEOUT_S), watch)
@@ -7179,7 +7223,7 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
     else:
         candidates = []
         mutate_base = run_diff_base(repo, meta)
-        for f in review_files(repo, meta):
+        for f in review_files(repo, meta, live=True):
             ext = os.path.splitext(f)[1].lower()
             is_cpp = ext in C_SOURCE_EXTS
             is_py = f.endswith(".py")
@@ -7596,8 +7640,9 @@ def main():
                         help="skip the pre-run acceptance check (red run) and characterization baseline")
     parser.add_argument("--force", action="store_true",
                         help="run the executor even when acceptance already passes before the change; with "
-                             "--verdict PASS, record the PASS anyway as PASS (forced) when an acceptance result is "
-                             "missing or not the expected one, or acceptance files changed")
+                             "--verdict PASS, record the PASS anyway as PASS (forced) over any refusal: an acceptance "
+                             "result missing or not the expected one, a rejected run, a post-run command that changed "
+                             "the tree, or a checkout that no longer holds the graded candidate")
     parser.add_argument("--user-approved", metavar="QUOTE",
                         help="the user's words: they lift a DRIFT BLOCK (exit 10) or the PR review-round cap (exit 8) "
                              "and, with --review-pr --exclude, waive an excluded file they name; they never open "

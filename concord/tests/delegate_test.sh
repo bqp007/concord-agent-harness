@@ -110,6 +110,9 @@ run 'echo y >> a.py' "$W"
 run 'echo y >> a.py; echo z > data/new.csv; mkdir -p data/__pycache__ && echo c > data/__pycache__/m.pyc; echo x >> "$R/.claude/hookify.t.local.md"' "$W"
 line "OUTSIDE CHECKOUT CHANGED:" "data/new.csv (linked folder)" && ok "write through a linked folder into the main checkout reported" \
   || { bad "linked-folder write not reported"; grep -i -e outside -e status "$T/out.txt"; }
+$DP --grade "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" --repo "$W" > "$T/g.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && grep -qF "linked folder" "$T/g.txt" && ok "--grade refuses a run that wrote through a linked folder: it runs again" \
+  || { bad "--grade after a linked-folder write rc=$RC"; cat "$T/g.txt"; }
 ! grep "^OUTSIDE CHECKOUT CHANGED:" "$T/out.txt" | grep -q "__pycache__" && ok "cache output inside linked folders not reported" \
   || bad "cache output reported: $(grep '^OUTSIDE' "$T/out.txt")"
 line "OUTSIDE CHECKOUT CHANGED:" "$R/.claude/hookify.t.local.md (modified)" && ok "edit of the main checkout's rule file from a worktree run reported" \
