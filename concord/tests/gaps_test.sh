@@ -248,19 +248,19 @@ approve PLAN_E.md "$R" 2 || exit 1
 FA="echo 'PARENT_LINE = 1' >> b.py; echo PARENT_BIG >> big.txt" run 2 PLAN_E.md; EP=$(rid)
 FA="echo 'SUB_LINE = 2' >> b.py; printf 'NEW_FILE = 1\n' > c.py" run 2.1 PLAN_E.md; ES=$(rid)
 packet "$ES"
-[ -n "$ES" ] && pk "+SUB_LINE = 2" && pk "+NEW_FILE = 1" && ! pk "PARENT_LINE" \
+[ -n "$ES" ] && pk "+SUB_LINE = 2" && pk "+NEW_FILE = 1" && ! pk "+PARENT_LINE" \
   && pk "Sub-phase 2.1: the diff shows only this run's change, from the files as they were when it started" \
   && ok "E.4 a 2.1 packet holds only its own change, a new file whole, and the header" || { bad "E.4 $ES"; tail -3 "$T/out.txt"; }
 flash "$ES"; lastp -review- > "$T/p.txt"
-[ -n "$ES" ] && grep -qF "+SUB_LINE = 2" "$T/p.txt" && ! grep -qF "PARENT_LINE" "$T/p.txt" && ok "E.5 the flash review of 2.1 sends only its own change" || { bad "E.5"; tail -3 "$T/rev.txt"; }
+[ -n "$ES" ] && grep -qF "+SUB_LINE = 2" "$T/p.txt" && ! grep -qF "+PARENT_LINE" "$T/p.txt" && ok "E.5 the flash review of 2.1 sends only its own change" || { bad "E.5"; tail -3 "$T/rev.txt"; }
 FA="seq 1 60000 >> big.txt" run 2.2 PLAN_E.md; E2=$(rid)
 packet "$E2"
-[ -n "$E2" ] && pk "[diff truncated at" && ! pk "PARENT_BIG" && ok "E.6 a sub-phase delta over the cap is cut and still holds no parent hunk" || { bad "E.6 $E2"; tail -3 "$T/out.txt"; }
+[ -n "$E2" ] && pk "[diff truncated at" && ! pk "+PARENT_BIG" && ok "E.6 a sub-phase delta over the cap is cut and still holds no parent hunk" || { bad "E.6 $E2"; tail -3 "$T/out.txt"; }
 packet "$EP"
-pk "+PARENT_LINE = 1" && pk "+SUB_LINE = 2" && ! pk "Re-run of phase" && ok "E.7 a whole-phase run that started clean shows every change since its start commit, no re-run header" || { bad "E.7"; tail -3 "$T/out.txt"; }
+pk "+PARENT_LINE = 1" && ! pk "+SUB_LINE = 2" && ! pk "Re-run of phase" && ok "E.7 a whole-phase run that started clean shows its own change (start tree to candidate), not a later run's, and no re-run header" || { bad "E.7"; tail -3 "$T/out.txt"; }
 FA="echo 'FIX_LINE = 3' >> b.py" run 2 PLAN_E.md; ER=$(rid)
 packet "$ER"
-[ -n "$ER" ] && pk "+FIX_LINE = 3" && ! pk "PARENT_LINE" && ! pk "SUB_LINE" && pk "Re-run of phase 2: the diff shows only this run's change" \
+[ -n "$ER" ] && pk "+FIX_LINE = 3" && ! pk "+PARENT_LINE" && ! pk "+SUB_LINE" && pk "Re-run of phase 2: the diff shows only this run's change" \
   && ok "E.8 a whole-phase re-run on changed files shows only its own change, with the header" || { bad "E.8 $ER"; tail -3 "$T/out.txt"; }
 fi
 

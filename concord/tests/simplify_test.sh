@@ -105,7 +105,7 @@ newrepo; tplan a.py   # a fork run: it starts at a snapshot commit that holds ea
 run 'echo "# r" >> a.py'; RID=$(rid)
 ( cd "$R" && git reset -q --soft HEAD~1 ) || { echo "setup failed: reset"; exit 1; }
 $DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1; PK=$(pk)
-[ -n "$PK" ] && grep -qF '+# r' "$PK" && ! grep -qF '# earlier' "$PK" \
+[ -n "$PK" ] && grep -qF '+# r' "$PK" && ! grep -qF '+# earlier' "$PK" \
   && ok "B.3 a run whose start commit is no ancestor of HEAD shows only its own change" \
   || bad "B.3 packet '$PK' earlier=$(grep -cF '# earlier' "$PK" 2> /dev/null)"
 fi
@@ -170,27 +170,27 @@ if sel F; then echo "== F. acceptance files come from the Test plan and the repo
 printf '# repo: binding facts\nCases: cases.md\n' > "$T/concord/repo-notes/repo.md"
 newrepo; tplan a.py
 run 'echo "# r" >> a.py; echo "# t" >> tests/test_a.py'; RID=$(rid)
-line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" \
-  && ok "F.1 an edit of a Test plan Home file is reported" || { bad "F.1 no acceptance line"; grep -i accept "$T/out.txt" | head -3; }
+line "REJECTED (not graded)" "tests/test_a.py" \
+  && ok "F.1 an edit of a Test plan Home file is outside the write scope: the run is rejected" || { bad "F.1 not rejected"; head -3 "$T/out.txt"; }
 newrepo; tplan a.py
 run 'echo "# r" >> a.py; echo "# t" >> tests/test_b.py'
-! has "ACCEPTANCE FILES CHANGED" \
-  && ok "F.3 a test an acceptance command names but the Test plan does not list is no acceptance file" \
-  || bad "F.3: $(grep -F "ACCEPTANCE FILES CHANGED" "$T/out.txt" | head -2)"
+RID=$(rid); python3 -I -c "import json,sys; g=json.load(open(sys.argv[1]))['grading_files']; sys.exit(0 if g and 'tests/test_b.py' not in g else 1)" "$R/.git/concord/$RID/meta.json" \
+  && ok "F.3 a test an acceptance command names but the Test plan does not list is no grading file" \
+  || bad "F.3: grading files of $RID"
 newrepo; tplan 'a.py, tests/test_a.py'
 run 'echo "# t" >> tests/test_a.py'
-! has "ACCEPTANCE FILES CHANGED" && ok "F.4 a Home file that the phase's Files: lists is no acceptance file" \
-  || bad "F.4: $(grep -F "ACCEPTANCE FILES CHANGED" "$T/out.txt" | head -2)"
+! has "REJECTED" && ok "F.4 a Home file that the phase's Files: lists is no grading file: editing it is in scope" \
+  || bad "F.4: $(grep -F "REJECTED" "$T/out.txt" | head -2)"
 newrepo; tplan 'a.py, cases.md'
 run 'echo "case 2" >> cases.md'
-line "ACCEPTANCE FILES CHANGED:" "cases.md (modified)" \
-  && ok "F.5 the repository's Cases file stays an acceptance file when Files: lists it" \
-  || { bad "F.5 no acceptance line"; grep -i accept "$T/out.txt" | head -3; }
+line "REJECTED (not graded)" "cases.md" \
+  && ok "F.5 the repository's Cases file stays a grading file when Files: lists it: an edit rejects the run" \
+  || { bad "F.5 not rejected"; head -3 "$T/out.txt"; }
 newrepo; tplan a.py 'mode full\|edit'
 run 'echo "# r" >> a.py; echo "# t" >> tests/test_a.py'
-line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" \
+line "REJECTED (not graded)" "tests/test_a.py" \
   && ok "F.6 an escaped pipe in a Test plan cell leaves the Home column in place" \
-  || { bad "F.6 no acceptance line"; grep -i accept "$T/out.txt" | head -3; }
+  || { bad "F.6 not rejected"; head -3 "$T/out.txt"; }
 fi
 
 echo; echo "passed $pass, failed $fail"

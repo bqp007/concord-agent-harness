@@ -6,7 +6,7 @@ Usage:
   wt.py list [--repo DIR]
   wt.py done TICKET [--repo DIR] [--force]
   wt.py fork TICKET N [--repo DIR]
-  wt.py join TICKET N [--repo DIR] [--force]
+  wt.py join TICKET N [--repo DIR] [--force] [--ungraded]
 
 new   creates <main>/.claude/worktrees/<TICKET> on branch NAME (default feature/<TICKET>; an existing local
       branch is checked out instead of created), starting from --base (default: <repo>.base in
@@ -34,7 +34,10 @@ join  applies the fork's changes (binary diff of its working tree, untracked inc
       staged and working content that differ, a deletion whose working file is back, an ignored file only the fork
       holds (in content or permission bits), a link wt.py made that now points somewhere else. --force joins
       anyway and drops those. A patch that does not apply exits 2 naming the files and keeps the fork. Prints the
-      files applied.
+      files applied. A fork with Concord runs must also match the candidate of its newest PASS run (`concord.py
+      --fork-graded`: the tree concord.py graded, under that run's rule); otherwise it refuses, applying nothing, and
+      names the files that differ. --ungraded joins it anyway and says so (--force does not: it drops join
+      blockers only). A fork with no runs joins as before and says no run graded it.
 """
 import argparse
 import hashlib
@@ -636,6 +639,15 @@ def read_copies(gitdir):
     return out
 
 
+def graded_check(fork):
+    """(exit code, line) of `concord.py --fork-graded` for the fork: 0 no run or a match, 1 no matching PASS candidate."""
+    res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork)],
+                         capture_output=True, text=True)
+    if res.returncode not in (0, 1):
+        die(f"the grading check of the fork {fork.name} failed, fork kept: {(res.stderr or res.stdout).strip()}")
+    return res.returncode, res.stdout.strip()
+
+
 def join_blockers(fork, origin, record):
     """What `join` would lose or get wrong: a path whose staged content differs from its working file; a path deleted
     in the fork, staged or committed, whose working file exists again; an ignored file staged in the fork (git add -f),
@@ -715,6 +727,9 @@ def cmd_join(args):
     if blockers and not args.force:
         die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "
             + "\n  ".join(blockers[:15]))
+    code, graded = graded_check(fork)
+    if code and not args.ungraded:
+        die(f"{graded}; nothing was applied, fork kept (join --ungraded joins it anyway)")
     patch, names = fork_patch(fork, record.get("snapshot") or "HEAD")
     if patch.strip():
         res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
@@ -732,6 +747,7 @@ def cmd_join(args):
     print(f"applied: {', '.join(names) or 'nothing'}")
     if blockers:
         print("dropped (--force): " + "; ".join(blockers))
+    print(f"joined ungraded (--ungraded): {graded}" if code else graded)
     return 0
 
 
@@ -791,6 +807,7 @@ def main():
     f = sub.add_parser("fork"); f.add_argument("ticket"); f.add_argument("n", type=int); f.add_argument("--repo")
     j = sub.add_parser("join"); j.add_argument("ticket"); j.add_argument("n", type=int); j.add_argument("--repo")
     j.add_argument("--force", action="store_true")
+    j.add_argument("--ungraded", action="store_true", help="join a fork that does not match its graded candidate")
     args = ap.parse_args()
     return {"new": cmd_new, "list": cmd_list, "done": cmd_done, "fork": cmd_fork, "join": cmd_join}[args.cmd](args)
 

@@ -126,8 +126,8 @@ $DP --lint 1 --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1; $DP --lint 2 --pl
 has "PLAN LINT: phase 1 lists the Cases file cases.md" && ! has 'no `Tests:` line' && ! grep -q "lists the Cases file" "$T/out2.txt" \
   && ok "C.2 an executor phase listing the Cases file is linted; a planner phase may list it" || { bad "C.2"; cat "$T/out.txt" "$T/out2.txt"; }
 FAKE_ACTIONS='echo "x = 2" > a.py; echo "case 2" >> cases.md' $DP 1 --plan PLAN_C.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
-has "ACCEPTANCE FILES CHANGED: cases.md (modified)" \
-  && ok "C.3 an executor edit of the Cases file is an acceptance change" || { bad "C.3"; grep -i "acceptance" "$T/out.txt"; }
+has "REJECTED (not graded)" && grep "^REJECTED" "$T/out.txt" | grep -qF "cases.md" \
+  && ok "C.3 an executor edit of the Cases file is out of its write scope: the run is rejected" || { bad "C.3"; head -4 "$T/out.txt"; }
 rm -f "$T/concord/repo-notes/repo.md"
 fi
 

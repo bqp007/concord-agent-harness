@@ -142,8 +142,8 @@ PI
 chmod +x "$T/bin/pi"
 newrepo; FAKE_ACTIONS="echo 'y = 9' >> a.py" $DP 1 --plan PLAN_T.md --via pi --model opencode-go/x#high --no-baseline --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 X="$R/.git/concord/$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)"; S="$X/pi"
-grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && grep -qxF -- "$S" "$S/argv.txt" && ! grep -qx -- "--no-session" "$S/argv.txt" \
-  && ok "pi gets --model provider/id:high and --session-dir <run>/pi" || { bad "pi argv rc=$RC"; cat "$S/argv.txt" 2>/dev/null | head -20; tail -3 "$T/out.txt"; }
+grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && [ -L "$S" ] && grep -qxF -- "$(readlink "$S")" "$S/argv.txt" && ! grep -qx -- "--no-session" "$S/argv.txt" \
+  && ok "pi gets --model provider/id:high and a --session-dir outside the run folder that <run>/pi links to" || { bad "pi argv rc=$RC"; cat "$S/argv.txt" 2>/dev/null | head -20; tail -3 "$T/out.txt"; }
 [ "$(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)" = "key-ok offline=1 agent-ok " ] && ! grep -rqF test-key-123 "$X" \
   && ok "pi gets the key file's key, PI_OFFLINE=1 and its own agent folder with models.json; the run folder never holds the key" \
   || { bad "pi env: $(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)"; grep -rlF test-key-123 "$X"; }
