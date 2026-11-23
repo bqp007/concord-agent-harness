@@ -186,6 +186,15 @@ $DP --mutate "$RID" --max 4 --build "touch built.flag" --repo "$R" > "$T/out.txt
   && ok "acceptance that needs the build output: the build runs first, the unmutated copy is green and mutants are graded" \
   || { bad "build before baseline rc=$RC"; head -3 "$T/out.txt"; }
 
+echo "== --mutate --build: a build that cannot succeed on a clean copy is refused before grading"
+newrepo 'Files: lib.py\nAcceptance:\n- `echo configure >> "$T/alog"; touch config.flag; test -f built.flag`\n'
+run 'touch built.flag; printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
+rm -f "$R/built.flag" "$R/config.flag" "$T/alog"
+$DP --mutate "$RID" --max 4 --build "test -f config.flag && touch built.flag" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && has "test -f config.flag && touch built.flag" && has "clean copy" && [ ! -e "$T/alog" ] && ! has "MUTATION $RID:" \
+  && ok "a build that needs a configure step only the acceptance runs: refused before grading (exit 2), the message names the build, no acceptance ran" \
+  || { bad "unconfigured build rc=$RC log=$([ -e "$T/alog" ] && echo ran)"; head -3 "$T/out.txt"; }
+
 echo "== --mutate: the run's own lines, first failing check, characterization excluded"
 newrepo 'Files: lib.py\nAcceptance:\n- `python3 -c "import lib; assert lib.mid(5)"`\n'
 printf 'def lo(x):\n    return x < 0\n' > "$R/lib.py"; git -C "$R" add lib.py; git -C "$R" commit -qm lib

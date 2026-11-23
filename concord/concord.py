@@ -556,8 +556,13 @@ def end_state_drift(repo, meta):
     they did not test."""
     ends, kinds, execs = meta.get("end_hashes") or {}, meta.get("end_kinds") or {}, meta.get("end_exec") or {}
     drift = {f for f, h in ends.items() if file_identity(Path(repo) / f) != (kinds.get(f), execs.get(f), h)}
-    # The grading files too (acceptance_end_hashes): their content when the acceptance results were taken.
-    drift |= {f for f, h in (meta.get("acceptance_end_hashes") or {}).items() if file_hash(Path(repo) / f) != h}
+    # The grading files too (acceptance_end_hashes): their state when the acceptance results were taken, by identity
+    # when the run recorded kinds (3.0.5 and later), else by content only.
+    gkinds, gexecs = meta.get("acceptance_end_kinds"), meta.get("acceptance_end_exec") or {}
+    for f, h in (meta.get("acceptance_end_hashes") or {}).items():
+        now = file_identity(Path(repo) / f) if gkinds else ("", False, file_hash(Path(repo) / f))
+        if now != ((gkinds[f], gexecs.get(f), h) if gkinds else ("", False, h)):
+            drift.add(f)
     return sorted(drift)
 
 
@@ -1122,6 +1127,27 @@ def compare(pre, post, repo):
     return sorted(changed), sorted(created), sorted(deleted)
 
 
+def tracked_modes(repo):
+    """Permission bits (st_mode & 0o7777, read without following links) of every tracked file that exists. `git
+    status` shows only the executable bit, so a run's report needs this record to see any other permission change."""
+    res = run_git(["ls-files", "-z"], repo, text=False)
+    modes = {}
+    for raw in res.stdout.split(b"\0"):
+        if raw:
+            name = raw.decode("utf-8", "surrogateescape")
+            with contextlib.suppress(FileNotFoundError):
+                modes[name] = os.lstat(Path(repo) / name).st_mode & 0o7777
+    return modes
+
+
+def mode_changes(repo, before):
+    """Tracked files whose permission bits differ from the `before` record (tracked_modes at the run's start), for a
+    file that still exists. A state recorded before the record existed (None) reports nothing."""
+    if before is None:
+        return []
+    return sorted(p for p, mode in tracked_modes(repo).items() if p in before and before[p] != mode)
+
+
 def staged(repo):
     """Paths with changes in the index (a `git add` hides them from plain `git diff`)."""
     res = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], capture_output=True)
@@ -1256,7 +1282,7 @@ def numstat(repo, paths):
     """Line counts against HEAD, so staged edits (`git add`) are counted like unstaged ones."""
     if not paths:
         return {}
-    res = subprocess.run(["git", "-C", str(repo), "diff", "HEAD", "--numstat", "--", *paths],
+    res = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs", "diff", "HEAD", "--numstat", "--", *paths],
                          capture_output=True, text=True)
     stats = {}
     for line in res.stdout.splitlines():
@@ -1930,8 +1956,9 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     # Hash the acceptance files AFTER the baseline/characterize commands: a red run may rewrite them (e.g. an
     # acceptance command that regenerates a fixture), and that must not be blamed on the executor. A missing file
     # hashes as absent, so one the executor creates counts as added.
-    acceptance_hashes = {p: file_hash(repo / p)
-                         for p in acceptance_list(repo, plan_text(plan), files)}
+    grading = acceptance_list(repo, plan_text(plan), files)
+    acceptance_hashes = {p: file_hash(repo / p) for p in grading}
+    acceptance_ids = {p: file_identity(repo / p) for p in grading}
     expect = ["red" if FAILS_UNTIL.search(tail) else "green" for _cmd, tail in acceptance_tails(phase_text)]
     origin_branch, origin_head = fork_origin(repo)
     state = {
@@ -1940,6 +1967,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "start_kinds": start_kinds, "start_exec": start_exec, "backup_links": backup_links,
         "phase": phase, "who": who, "executor": executor, "model": model, "name": name, "mode": mode,
         "files": files, "acceptance": acceptance, "acceptance_hashes": acceptance_hashes,
+        "acceptance_ids": acceptance_ids,
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
@@ -1949,8 +1977,9 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "staged_before": staged(repo), "git_internals": git_internals(repo),
         "generated_globs": list(generated_globs(conf)), "static_on": static_on, "static_pre": static_pre,
         "started": time.time(), "outside": outside_files(repo), "pre": snapshot(repo, track_ignored),
+        "modes_before": tracked_modes(repo),
     }
-    (run_dir / "state.json").write_text(json.dumps(state))
+    write_state(run_dir, state)
     return state
 
 
@@ -2092,6 +2121,36 @@ def index_append(record):
               file=sys.stderr)
 
 
+def acceptance_candidates(snap, repo, files, ident):
+    """Record in `ident` the file identity of every tracked path and every path inside Files: of a snapshot."""
+    for p, (status, _sig) in snap.items():
+        if status not in ("??", "!!") or in_scope(p, files):
+            ident[p] = file_identity(repo / p)
+
+
+def acceptance_tree_changes(before, after, repo, files, concurrent, command, globs, ident):
+    """What one post-run acceptance command did to the tree, as a list of {path, command, how}: tracked files and
+    files inside the phase's Files: that it changed, added or removed. Ignored files, untracked generated output and
+    untracked files outside Files: may change freely, and so may files in a concurrent run's Files:. A path whose git
+    status is the same before and after counts only when its identity differs from `ident` (a rewrite with the same
+    bytes is no change); `ident` is brought up to date for the next command."""
+    out = []
+    for how, group in zip(("modified", "added", "removed"), compare(before, after, repo)):
+        for p in group:
+            status = (after.get(p) or before.get(p))[0]
+            own = in_scope(p, files)
+            if status == "!!" or (in_scope(p, concurrent) and not own):
+                continue
+            if status == "??" and (is_generated(p, globs) and not path_matches(p, PROTECTED_GLOBS) or not own):
+                continue
+            if p in before and p in after and before[p][0] == after[p][0] and p in ident \
+                    and file_identity(repo / p) == ident[p]:
+                continue
+            out.append({"path": p, "command": command, "how": how})
+    acceptance_candidates(after, repo, files, ident)
+    return out
+
+
 def finish_run(run_dir, rc, secs=None, st=None):
     """Snapshot after the run and write report.md + meta.json. Returns the report text. An executor run passes its
     start state from memory, so the executor cannot rewrite the hashes that grade it (state.json is only a record)."""
@@ -2108,6 +2167,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
     record_found_notes(repo, st.get("plan"), run_dir / "output.log")
 
     changed, created, deleted = compare(pre, post, repo)
+    changed = sorted(set(changed) | (set(mode_changes(repo, st.get("modes_before"))) - set(created) - set(deleted)))
     # The Files of a run that held the lock beside this one: its changes are that run's work, not this run's, so
     # they leave DELETED, the diff size, diff_lines and OUT OF SCOPE alike.
     concurrent = lock_shared(run_dir.parent, st["run_id"])
@@ -2117,7 +2177,11 @@ def finish_run(run_dir, rc, secs=None, st=None):
     # start_state hashed; a run whose state predates this feature has no hashes, so skip the comparison. Their
     # state right after the run is kept here; the comparison itself runs after the post-run acceptance commands,
     # which can rewrite a grading file too (a snapshot test that refreshes its golden file).
-    acc_after_run = {p: file_hash(repo / p) for p in st.get("acceptance_hashes") or {}}
+    # A state with recorded identities (3.0.5 and later) compares kind, executable bit and content; an older one
+    # compares content only.
+    ids = st.get("acceptance_ids")
+    grading_state = (lambda p: tuple(file_identity(repo / p))) if ids else (lambda p: file_hash(repo / p))
+    acc_after_run = {p: grading_state(p) for p in st.get("acceptance_hashes") or {}}
     touched = changed + created
     stats = numstat(repo, [p for p in changed if post.get(p, ["??"])[0] not in ("??", "!!")])
     scope_in = [p for p in touched if in_scope(p, files)]
@@ -2215,12 +2279,19 @@ def finish_run(run_dir, rc, secs=None, st=None):
     # are not blamed on the executor. A run stopped by the wall limit or the watchdog (rc 124, 125) is skipped.
     acceptance_after_rc = []
     acceptance_after_line = ""
+    tree_changed = []                # {path, command, how}: what a post-run acceptance command did to the tree
     if conf_flag(load_conf(), "acceptance_after", True) and st.get("acceptance") and rc not in (124, RESOURCE_RC):
         results = []
+        measured, identities = snapshot(repo, st["track_ignored"]), {}
+        acceptance_candidates(measured, repo, files, identities)
         for c in st["acceptance"]:
             r, out = run_check(c, repo, st.get("check_timeout", CHECK_TIMEOUT_S))
             acceptance_after_rc.append(r)
             results.append((c, r, out))
+            now_tree = snapshot(repo, st["track_ignored"])
+            tree_changed += acceptance_tree_changes(measured, now_tree, repo, files, concurrent, c,
+                                                    tuple(st.get("generated_globs") or GENERATED_GLOBS), identities)
+            measured = now_tree
         (run_dir / "acceptance.after.txt").write_text(
             "\n\n".join(f"$ {c}\n[exit {r}]\n" + "\n".join(out.strip().splitlines()[-12:])
                         for c, r, out in results) + "\n")
@@ -2232,12 +2303,15 @@ def finish_run(run_dir, rc, secs=None, st=None):
     acceptance_changed_by = {}       # path -> "the run" or "an acceptance command"
     known = st.get("acceptance_hashes") or {}
     acceptance_end = {}              # grading files as the acceptance results saw them (after the post-run commands)
+    acceptance_end_ids = {}
     for p in sorted(known):
-        before, now = known[p], file_hash(repo / p)
-        acceptance_end[p] = now
+        before, now = (tuple(ids[p]) if ids else known[p]), grading_state(p)
+        acceptance_end_ids[p] = now if ids else (None, None, now)
+        acceptance_end[p] = now[2] if ids else now
         if before == now:
             continue
-        how = "added" if before == "missing" else "removed" if now == "missing" else "modified"
+        gone, here = (before[0], now[0]) if ids else (before, now)
+        how = "added" if gone == "missing" else "removed" if here == "missing" else "modified"
         if in_scope(p, concurrent):
             # A file that was there at the start stays (fail closed); one absent then is that run's work.
             if how == "added":
@@ -2285,6 +2359,11 @@ def finish_run(run_dir, rc, secs=None, st=None):
     if by_command:
         lines.append("ACCEPTANCE COMMAND CHANGED GRADING FILE: " + ", ".join(by_command)
                      + " (a post-run acceptance command rewrote it; PASS is refused)")
+    if tree_changed:
+        lines.append("ACCEPTANCE COMMAND CHANGED THE TREE: " + "; ".join(
+            f"{t['path']} ({t['how']}) by `{t['command']}`" for t in tree_changed)
+            + " (acceptance must leave tracked files and the phase's Files: as it found them; a file a command "
+            "generates belongs in the phase's own changes or in ignored or untracked output; PASS is refused)")
     if staged_new:
         lines.append("STAGED BY EXECUTOR: " + ", ".join(staged_new)
                      + " (git add; plain `git diff` hides these, review with `git diff HEAD -- <path>`)")
@@ -2383,6 +2462,9 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "changed": changed, "created": created,
         "acceptance_files_changed": [p for p, _ in acceptance_changed],
         "acceptance_end_hashes": acceptance_end,
+        "acceptance_end_kinds": {p: i[0] for p, i in acceptance_end_ids.items()} if ids else None,
+        "acceptance_end_exec": {p: i[1] for p, i in acceptance_end_ids.items()} if ids else None,
+        "acceptance_tree_changed": tree_changed,
         "acceptance_files_changed_by": acceptance_changed_by,
         "acceptance_after_rc": acceptance_after_rc,
         "tool_calls": tool_calls["tool_calls"] if tool_calls else None,
@@ -2702,18 +2784,32 @@ def closed_refusal(repo, plan_rel):
     return None
 
 
+def write_state(run_dir, state):
+    """A run's state.json, written whole through a temp file in the run folder and os.replace: every write of the
+    file is atomic, so a reader (the --report scan) never sees a half-written one."""
+    fd, tmp = tempfile.mkstemp(dir=str(run_dir), prefix=".state-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(state))
+        os.replace(tmp, str(run_dir / "state.json"))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def register_run(root, run_dir, repo, plan_rel, phase):
     """Record the run in the runs root under drift.lock, the lock --report holds for its final check of the plan's
     runs and its close: a run either registers before that check (the report refuses and names it) or finds the
-    plan closed here (the refusal text). The placeholder state.json is replaced by start_state's."""
+    plan closed here (the refusal text). The placeholder state.json is replaced by start_state's; both writes are
+    atomic (write_state), so the placeholder is never torn."""
     with open(root / "drift.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         closed = closed_refusal(repo, plan_rel)
         if closed:
             return closed
-        (run_dir / "state.json").write_text(json.dumps(
-            {"run_id": run_dir.name, "repo": str(repo), "plan": plan_rel, "phase": phase,
-             "started": time.time(), "registering": True}))
+        write_state(run_dir, {"run_id": run_dir.name, "repo": str(repo), "plan": plan_rel, "phase": phase,
+                              "started": time.time(), "registering": True})
     return None
 
 
@@ -3158,7 +3254,7 @@ def cmd_run(args, target, phase, conf):
             return 6
         if green:
             st["notes"].append("forced: acceptance already green before the change: " + "; ".join(green))
-            (run_dir / "state.json").write_text(json.dumps(st))
+            write_state(run_dir, st)
         bl_note = (f"; baseline: {sum(b['rc'] != 0 for b in bl)}/{len(bl)} acceptance commands fail before the change"
                    if bl else "")
         print(f"delegate: started {run_dir.name}: {who}, wall {wall_text}{bl_note}; "
@@ -3274,6 +3370,15 @@ def change_diff(repo, files, cap=REVIEW_DIFF_CAP, base="HEAD"):
     return diff
 
 
+def tree_entry_mode(ls_tree_z, f):
+    """The mode in `git ls-tree -z` output for the entry whose path is exactly `f` ("" when there is none)."""
+    for rec in ls_tree_z.split(b"\0"):
+        meta, _, path = rec.decode("utf-8", "surrogateescape").partition("\t")
+        if path == f:
+            return meta.split(" ", 1)[0]
+    return ""
+
+
 def started_dirty(repo, run_dir, meta, files):
     """True when an in-scope file has a start copy that differs from the file at the run's start commit, in content or
     in the owner execute bit that git records (a file missing at that commit counts as different). No head_before or no
@@ -3290,13 +3395,13 @@ def started_dirty(repo, run_dir, meta, files):
         try:
             done = subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{f}"],
                                   capture_output=True, timeout=PR_TIMEOUT)
-            tree = subprocess.run(["git", "-C", str(repo), "ls-tree", sha, "--", f],
-                                  capture_output=True, text=True, timeout=PR_TIMEOUT)
+            tree = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs", "ls-tree", "-z", sha, "--", f],
+                                  capture_output=True, timeout=PR_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if done.returncode != 0 or done.stdout != before:
             return True
-        mode = tree.stdout.split(" ", 1)[0]
+        mode = tree_entry_mode(tree.stdout, f)
         if mode in ("100644", "100755") and (mode == "100755") != executable:
             return True
     return False
@@ -4159,25 +4264,43 @@ def ledger_block(text):
     return f"\n{LEDGER_BANNER}\n<<<LEDGER-{tok}>>>\n{text.rstrip()}\n<<<END-LEDGER-{tok}>>>\n"
 
 
+def plan_phase_text(meta):
+    """The run's phase as the plan on disk reads now; "" when the plan or the phase is gone or unreadable
+    (extract_phase calls die() when the phase is gone, so its output is swallowed)."""
+    try:
+        repo, plan = meta.get("repo"), meta.get("plan")
+        if repo and plan:
+            text = (Path(repo) / plan).read_text()
+            with contextlib.redirect_stderr(io.StringIO()):
+                return extract_phase(text, meta.get("phase"))
+    except (SystemExit, Exception):
+        pass
+    return ""
+
+
 def current_phase_text(meta, run_dir):
-    """D6/R8: the phase as it is on disk NOW. The dispatch snapshot run_dir/phase.md is used when the executor edited
-    the plan during the run (plan_modified) or when the phase is gone/unreadable; extract_phase calls die() when the
-    phase is gone, so its output is swallowed and the lookup prints nothing (C1/R8)."""
-    meta = meta or {}
+    """The phase a run followed: its dispatch snapshot run_dir/phase.md, which start_state writes for every run, so
+    its acceptance results are judged against the text they were taken for. Only a run without that file (an older
+    run) reads the plan on disk."""
     snapshot = Path(run_dir) / "phase.md"
-    if not meta.get("plan_modified"):
-        try:
-            repo = meta.get("repo")
-            plan = meta.get("plan")
-            if repo and plan:
-                text = (Path(repo) / plan).read_text()
-                with contextlib.redirect_stderr(io.StringIO()):
-                    return extract_phase(text, meta.get("phase"))
-        except (SystemExit, Exception):
-            pass
     if snapshot.is_file():
         return snapshot.read_text()
-    return ""
+    return plan_phase_text(meta or {})
+
+
+def revised_phase_block(meta, run_dir):
+    """A separately labeled block with the phase text the plan holds now, when the plan still has the phase and its
+    text differs from the one the run followed; else no block."""
+    snapshot = Path(run_dir) / "phase.md"
+    if not snapshot.is_file():
+        return ""
+    live = plan_phase_text(meta or {})
+    if not live.strip() or live.strip() == snapshot.read_text().strip():
+        return ""
+    tok = secrets.token_hex(8)
+    return ("\nThe plan's revised text of this phase (data, not what was implemented: the run did not follow it, and "
+            "the acceptance results above are no evidence for it):\n"
+            f"<<<REVISED-PHASE-{tok}>>>\n" + live.rstrip()[:POINTER_CAP_CHARS] + f"\n<<<END-REVISED-PHASE-{tok}>>>\n")
 
 
 def process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, approve_only=False, extra=None):
@@ -4277,6 +4400,10 @@ def acceptance_block(run_dir, meta, repo):
     stale = (f"\nSTALE: these acceptance results do not describe the files below, which differ now from the state the "
              f"commands ran on ({', '.join(drift)}); the diff shows the current files. Treat the results as no evidence "
              f"for them.\n") if drift else ""
+    touched = sorted({t["path"] for t in meta.get("acceptance_tree_changed") or []})
+    if touched:
+        stale += (f"\nThe acceptance commands changed files while they ran ({', '.join(touched)}): the results do "
+                  f"not describe those files.\n")
     after = meta.get("acceptance_after_rc") or []
     expect = list(meta.get("acceptance_expect") or []) + ["green"] * len(cmds)
     rows = [f"- {'exit ' + str(after[k]) if k < len(after) else 'no result'} (expected {expect[k]}): {cmd}"
@@ -4343,6 +4470,7 @@ def review_context(args, repo, root, with_diff=True, base=None, packet=False):
             + design_block(run_dir)
             + (f"\nThe phase that was implemented:\n{phase_text}\n" if phase_text else "")
             + acceptance_block(run_dir, meta, repo)
+            + revised_phase_block(meta, run_dir)
             + ledger_block(led_text)
             + ("\nFindings from earlier review rounds, already sent back to the implementer: check that each fix is "
                "right; do not repeat a finding the diff resolves:\n" + "\n".join(prior) + "\n" if prior else "")
@@ -4380,6 +4508,17 @@ def write_packet(run_dir, task):
     packet = run_dir / f"review-packet-{k}.md"
     packet.write_text(f"PACKET-SHA: {sha}\n{body}")
     return packet, sha
+
+
+def packet_diff(path):
+    """The diff block a phase packet shows its reviewer, or None when the packet holds none. The real block is the
+    last thing in the packet; its random token tells it from any marker text inside the diff or earlier blocks."""
+    text = Path(path).read_text(errors="replace")
+    end = re.search(r"<<<END-DIFF-([0-9a-f]{16})>>>\n\Z", text)
+    if not end:
+        return None
+    start = text.find(f"<<<DIFF-{end.group(1)}>>>\n")
+    return None if start < 0 else text[start + len(f"<<<DIFF-{end.group(1)}>>>\n"):end.start()]
 
 
 def packet_hash(path):
@@ -4505,9 +4644,11 @@ def cmd_review_record(args):
         packet = packets[quoted]
     diff_text = None
     if meta.get("kind") != "pr-review":       # a PR run has no phase diff here; its reviewer saw the PR diff
-        files = review_files(repo, meta)
-        if files:                             # no surviving files = no diff to anchor to: keep findings as written
-            diff_text = review_diff(repo, run_dir, meta, files, base=run_diff_base(repo, meta))
+        diff_text = packet_diff(packet) if packet else None     # the diff the quoted packet showed, not the checkout now
+        if diff_text is None:
+            files = review_files(repo, meta)
+            if files:                         # no surviving files = no diff to anchor to: keep findings as written
+                diff_text = review_diff(repo, run_dir, meta, files, base=run_diff_base(repo, meta))
     approve_only = (meta.get("tier") == "low" if meta.get("kind") == "pr-review"
                     else meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"])
     with ledger_lock(root, ledger_key(meta)):      # findings, resolutions and the entry of this review, in one lock
@@ -5955,6 +6096,14 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
                             + ", ".join(f"{f} by {by[f]}" if by.get(f) == "an acceptance command" else f
                                         for f in changed_files) + "): an "
                             "implementer may not edit the tests that grade it")
+        grading = set(meta.get("acceptance_files_changed") or [])
+        tree = meta.get("acceptance_tree_changed") or []
+        for path in sorted({t["path"] for t in tree} - grading):     # a grading file is already refused above
+            hits = [t["command"] for t in tree if t["path"] == path]
+            problems.append(f"acceptance command changed {path} ({'; '.join(f'`{c}`' for c in hits)}): "
+                            "the results do not describe the files they ran on; acceptance must leave tracked "
+                            "files and the phase's Files: as it found them, and a file a command generates belongs "
+                            "in the phase's own changes or in ignored or untracked output")
         drift = end_state_drift(repo, meta)
         if drift:
             problems.append("files differ from the state the acceptance results were taken in (" + ", ".join(drift)
@@ -6020,6 +6169,15 @@ def cmd_verdict(args):
     run_dir = find_run(runs_root(repo), run_id, want="reported")
     meta_path = run_dir / "meta.json"
     meta = json.loads(meta_path.read_text())
+    if verdict.upper() == "PASS":
+        # A run id resolves from the runs root shared by every checkout; PASS measures a checkout, so it must be the
+        # one the run was made in. FAIL measures nothing and works from any checkout.
+        # A fork joined and removed (wt.py join) no longer exists: its changes live in the ticket checkout, which
+        # is then the one to measure.
+        made_in = Path(str(meta.get("repo") or ""))
+        if made_in.is_dir() and made_in.resolve() != repo.resolve():
+            die(f"{run_dir.name} was made in {made_in.resolve()}, not in {repo.resolve()}; "
+                f"pass --repo {made_in.resolve()} so PASS measures the run's checkout")
     return record_verdict(repo, run_dir, meta_path, meta, verdict, cause=args.cause, note=args.note,
                           tokens=args.tokens, force=args.force)
 
@@ -6046,6 +6204,25 @@ def drift_entry_key(data, repo, plan_rel):
         return str(repo)
     return next((k for k, e in data.items() if k not in DRIFT_KEYS and isinstance(e, dict)
                  and e.get("plan") == plan_rel and Path(k).is_dir()), None)
+
+
+def unreadable_runs(root):
+    """Names of the run folders whose state.json cannot be read and that have no report: a run that is still
+    starting or was torn, which the report treats as open (its plan is unknown, so it blocks every plan)."""
+    out = []
+    for path in sorted(root.glob("*/state.json")):
+        run = path.parent
+        if (run / "report.md").exists() or (run / "aborted").exists():
+            continue
+        if run.name.split("-", 2)[-1].startswith(("dry-", "lint-", "review-")):
+            continue
+        try:
+            ok = isinstance(json.loads(path.read_text()), dict)
+        except (OSError, ValueError):
+            ok = False
+        if not ok:
+            out.append(_flat(run.name))
+    return out
 
 
 def plan_run_records(root, plan_rel):
@@ -6178,7 +6355,8 @@ def cmd_report(args):
                 out.append(f"{rid} is open (no --end yet)")
             elif not meta.get("verdict"):
                 out.append(f"{rid} has no verdict")
-        return out
+        return out + [(f"{rid} has an unreadable state.json (still starting, or damaged: "
+                       f"--abort {rid} once no executor runs it)") for rid in unreadable_runs(root)]
     waiting = waiting_runs(runs)
     if waiting:
         die("REFUSED: --report needs every run of the plan closed: " + "; ".join(waiting)
@@ -6512,8 +6690,8 @@ def tracked_link(repo, head, f):
     """True when `f` is a symlink (mode 120000) in commit `head`: the only evidence an older run leaves of a link."""
     if not head:
         return False
-    res = run_git(["ls-tree", head, "--", f], repo)
-    return res.returncode == 0 and res.stdout.startswith("120000 ")
+    res = run_git(["--literal-pathspecs", "ls-tree", "-z", head, "--", f], repo, text=False)
+    return res.returncode == 0 and tree_entry_mode(res.stdout, f) == "120000"
 
 
 def cmd_restore(args):
@@ -6829,12 +7007,14 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
         clock["last_end"] = time.time()
 
         # Setup on the unmutated copy: the baseline must be green here or grading is meaningless.
-        # The build goes first: the acceptance may need the build's output, which a clean checkout lacks. A build
-        # that fails here may need what the acceptance sets up (a configure step), so it runs again after it.
-        build_rc = checked(build_cmd) if build_cmd else 0
+        # The build goes first: the acceptance may need the build's output, which a clean checkout lacks. The build
+        # command owns configuration and build, so it must succeed on a clean copy before any acceptance runs.
+        if build_cmd:
+            build_rc = checked(build_cmd)
+            if build_rc != 0:
+                die(f"the build command fails on the unmutated copy (exit {build_rc}): {build_cmd}; it must "
+                    "configure and build from a clean copy", code=2)
         setup_cmds = list(acceptance)
-        if build_rc != 0:
-            setup_cmds.append(build_cmd)
         if listed:
             seen = set()
             for m in mutants:
@@ -7160,8 +7340,8 @@ def main():
     parser.add_argument("--max", type=int, default=10, help="with --mutate: sample at most N mutants (default 10)")
     parser.add_argument("--mutants", metavar="FILE", help="with --mutate: a JSON list of planner-written mutants "
                         "{id, file, old, new, occ?, check?, what?} to grade in an isolated copy")
-    parser.add_argument("--build", metavar="CMD", help="with --mutate (isolated): build command; a mutant whose "
-                        "build fails is stillborn")
+    parser.add_argument("--build", metavar="CMD", help="with --mutate (isolated): build command; it must configure and "
+                        "build from a clean copy (it runs before the acceptance); a mutant whose build fails is stillborn")
     args = parser.parse_intermixed_args()   # allows: kimi --via dsh 2
     for name in ("reviewer", "label"):     # plugin agents are named concord:<agent>; record the bare name
         value = getattr(args, name, None)

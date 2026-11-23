@@ -253,9 +253,36 @@ inst_gg() { local own="$H/mine/concord-design-review" l="$H/.claude/skills/conco
   mkdir -p "$own" "$H/.claude/skills" && ln -s "$own" "$l" && inst --no-tests > "$H/out" 2>&1 &&
   [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out" && [ -L "$H/.claude/agents/implementer.md" ]; }
 inst_hh() { local l="$H/.claude/skills/concord-design-review"
-  mkdir -p "$H/.claude/skills" && ln -s "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --no-tests >/dev/null &&
+  mkdir -p "$H/.claude/skills" "$H/oldkit/concord" && : > "$H/oldkit/install.sh" && : > "$H/oldkit/concord/concord.py" &&
+  ln -s "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --no-tests >/dev/null &&
   [ "$(cd "$l" && pwd -P)" = "$(cd "$ROOT/$A/skills/concord-design-review" && pwd -P)" ] &&
-  ln -sfn "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --plugin --no-tests >/dev/null && [ ! -L "$l" ]; }
+  rm -f "$H/.claude/concord/links.tsv" && ln -sfn "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --plugin --no-tests >/dev/null && [ ! -L "$l" ]; }
+# a personal link that ends in the same adapter-relative path, into a folder that is no Concord checkout, is not Concord's:
+# the default install keeps it and names it, and --plugin keeps it
+inst_kk() { local own="$H/mine/adapters/claude-code/skills/concord-design-review" l="$H/.claude/skills/concord-design-review"
+  mkdir -p "$own" "$H/.claude/skills" && ln -s "$own" "$l" && inst --no-tests > "$H/out" 2>&1 &&
+  [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out" &&
+  inst --plugin --no-tests > "$H/out" 2>&1 && [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out"; }
+# a link the manifest records stays Concord's after its clone is moved or deleted: the next install from a new clone updates it
+inst_ll() { local d="$H/x" r f
+  for r in kit1 kit2; do mkdir "$H/$r" && for f in install.sh concord adapters; do cp -R "$f" "$H/$r/"; done; done
+  env HOME=$H CLAUDE_HOME=$d bash "$H/kit1/install.sh" --no-tests >/dev/null &&
+  rm -rf "$H/kit1" && env HOME=$H CLAUDE_HOME=$d bash "$H/kit2/install.sh" --no-tests >/dev/null &&
+  [ "$(readlink "$d/skills/concord-design-review")" = "$(cd "$H/kit2" && pwd -P)/$A/skills/concord-design-review" ]; }
+# settings.json edited between the preflight and the write keeps that edit: a python3 shim edits it right after the preflight ran
+inst_mm() { local d="$H/x" real; real=$(command -v python3); mkdir -p "$H/shim" "$d" && printf '{"a": 1}\n' > "$d/settings.json" &&
+  cat > "$H/shim/python3" <<SHIM
+#!/bin/bash
+"$real" "\$@"; rc=\$?
+case " \$* " in *settings.json*) [ -e "$H/shim/done" ] || { : > "$H/shim/done"; printf '{"a": 1, "mine": 2}\n' > "$d/settings.json"; };; esac
+exit \$rc
+SHIM
+  chmod +x "$H/shim/python3" && PATH="$H/shim:$PATH" env HOME=$H CLAUDE_HOME=$d bash install.sh --no-tests >/dev/null &&
+  [ -e "$H/shim/done" ] && python3 -B -I -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get('mine') == 2 and 'hooks' in d, d
+" "$d/settings.json"; }
 # a relative CLAUDE_HOME: the hook names an absolute script that exists
 inst_ii() { mkdir -p "$H/proj" && (cd "$H/proj" && env HOME=$H CLAUDE_HOME=rel/home bash "$ROOT/install.sh" --no-tests >/dev/null) &&
   python3 -B -I -c "
@@ -268,7 +295,7 @@ assert os.path.isabs(w) and os.path.isfile(w), c
 inst_jj() { mkdir -p "$H/.claude" && printf '%s' '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":null}]}]}}' > "$H/.claude/settings.json" &&
   { inst --no-tests > "$H/out" 2>&1; [ $? = 2 ]; } && grep -qF 'PostToolUse' "$H/out" && ! grep -q Traceback "$H/out" &&
   [ ! -e "$H/.claude/concord" ] && [ ! -e "$H/.claude/CLAUDE.md" ]; }
-s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd ee ff gg hh ii jj; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.

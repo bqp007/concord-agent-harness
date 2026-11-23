@@ -170,6 +170,29 @@ prpacket 11; P=$(pk)
 python3 -I -B -c "import sys; sys.path.insert(0, sys.argv[1]); import concord as d; sys.exit(0 if d.parse_risk_floors('\ufeff- Risk floor high: sec/*\n') == [('high', ['sec/*'])] else 1)" "$T/concord" 2> /dev/null \
   && ok "a floor line right after a UTF-8 byte-order mark still parses" || bad "a byte-order mark hid the first floor line"
 
+echo "== a review judges the phase the run followed"
+run 9 "echo '# o1' >> other/o.py"; V=$(rid)
+python3 -I -c "
+import sys; p = sys.argv[1]; s = open(p).read(); h = s.index('## Phase 9 '); e = s.index('## Phase 10 ')
+open(p, 'w').write(s[:h] + s[h:e].replace('- \`true\`', '- \`echo REVISED-ACCEPTANCE-4c1\`') + s[e:])" "$R/PLAN_F.md"
+packet "$V"; P=$(pk)
+[ -n "$P" ] && grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && before "$P" "The phase that was implemented" "REVISED-ACCEPTANCE-4c1" \
+  && sed -n '/The phase that was implemented/,/REVISED-ACCEPTANCE-4c1/p' "$P" | grep -qF '`true`' \
+  && ok "after the plan's acceptance changes, the packet shows the phase the run followed and the new text only apart from it" \
+  || { bad "packet shows the revised phase as implemented ('$P')"; sed -n '/The phase that was implemented/,/Acceptance/p' "$P" 2>/dev/null; }
+python3 -I -c "
+import sys; p = sys.argv[1]; s = open(p).read(); open(p, 'w').write(s.replace('- \`echo REVISED-ACCEPTANCE-4c1\`', '- \`true\`'))" "$R/PLAN_F.md"
+printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "other/o.py", "line": 8, "problem": "late line", "fix": "Guard it", "repro": {"input": "i", "expected": "e", "actual": "a"}}], "clauses": [], "tests": [], "verdict": "BLOCK"}\nEND-REVIEW-JSON\n' > "$T/late.json"
+run 9 "printf 'a = 1\\nb = 2\\nc = 3\\nd = 4\\ne = 5\\nf = 6\\ng = 7\\n' >> other/o.py"; W=$(rid); packet "$W"; PW=$(pk)
+printf 'o = 1\nz = 0\n' > "$R/other/o.py"
+cp "$T/late.json" "$T/late.sig.json"; sign "$T/late.sig.json" "$PW"
+$DP --review-record "$W" --reviewer reviewer-opus55 --file "$T/late.sig.json" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+REP=$(python3 -I -c "import json,sys; print(json.load(open(sys.argv[1]+'/meta.json'))['reviews'][-1]['report'])" "$RUNS/$W")
+[ $RC -eq 0 ] && grep -q '^\[HIGH\] other/o.py:L8:' "$REP" && ! grep -q '^\[HIGH\] other/o.py:L8:.*outside diff' "$REP" \
+  && ok "an answer quoting a packet is anchored to that packet's diff after the files changed" \
+  || { bad "finding judged against the later checkout: rc=$RC"; cat "$REP" 2>/dev/null; }
+printf 'o = 1\n' > "$R/other/o.py"
+
 echo "== approve-only low tier"
 lastrev(){ python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or [{}]; print(r[-1].get(sys.argv[2]))" "$RUNS/$1" "$2"; }
 nrevs(){ python3 -I -c "import json,sys; print(len(json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or []))" "$RUNS/$1"; }

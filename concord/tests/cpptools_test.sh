@@ -471,7 +471,7 @@ if sel 3; then
 H0=$(sha "$C/src/calc.cpp"); M0=$(mtime "$C/src/calc.cpp"); B0=$(sha "$C/build/calc_print")
 $DP --begin 2 --label implementer --plan PLAN_C.md --no-baseline --repo "$C" > "$T/out.txt" 2>&1; HB=$(bid)
 [ -n "$HB" ] || { echo "setup failed: --begin"; tail -3 "$T/out.txt"; exit 1; }
-TMPDIR="$T/tmp" $DP --mutate "$CR" --max 20 --build "cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+TMPDIR="$T/tmp" $DP --mutate "$CR" --max 20 --build "cmake -S . -B build -DBUILD_TESTING=ON > /dev/null && cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "MUTATION $CR:" && has "killed 1, survived 1, stillborn 1" && grep -q "^SURVIVED src/calc.cpp:L3: compare: " "$T/out.txt" \
   && [ "$(mj "$RUN/meta.json" '(m["mutation"]["mode"], m["mutation"]["stillborn"])')" = "('isolated', 1)" ] \
   && ok "3 generated C++ mutants in an isolated copy: one killed, the untested boundary survives, a mutant that does not build is stillborn" \
@@ -486,7 +486,7 @@ cat > "$T/mutants.json" <<'J'
  {"id": "M4", "file": "src/calc.cpp", "old": "return 10;", "new": "return 10", "what": "does not compile"},
  {"id": "M5", "file": "src/calc.cpp", "old": "> 10", "new": "> 11", "check": "grep -q '> 10' src/calc.cpp", "what": "structural check"}]
 J
-TMPDIR="$T/tmp" $DP --mutate "$CR" --mutants "$T/mutants.json" --build "cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
+TMPDIR="$T/tmp" $DP --mutate "$CR" --mutants "$T/mutants.json" --build "cmake -S . -B build -DBUILD_TESTING=ON > /dev/null && cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "killed 3, survived 0, stillborn 1" && grep "^SKIP M2: " "$T/out.txt" | grep -q "occurs 2 times" \
   && [ "$(sha "$C/src/calc.cpp")" = "$H0" ] && [ -z "$(ls -A "$T/tmp")" ] \
   && ok "3 listed mutants: killed by the acceptance or by their own structural check, one stillborn, the ambiguous one skipped" \

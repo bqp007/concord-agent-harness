@@ -255,15 +255,15 @@ try:
     (repo / "PLAN_T.md").write_text("# Plan\n## Phase 1 - x\nPurpose: NEW\nFiles: a.py\n")
     (run_dir / "phase.md").write_text("## Phase 1 - x\nPurpose: OLD\n")
     meta = {"repo": str(repo), "plan": "PLAN_T.md", "phase": 1}
-    if "Purpose: NEW" not in d.current_phase_text(meta, run_dir):
-        p.append("current plan text not used")
-    if "Purpose: OLD" not in d.current_phase_text({**meta, "plan_modified": True}, run_dir):
-        p.append("plan edited during the run: snapshot not used")
+    if "Purpose: OLD" not in d.current_phase_text(meta, run_dir):
+        p.append("the run's snapshot not used")
     (repo / "PLAN_T.md").write_text("# Plan\n## Phase 2 - y\nPurpose: OTHER\n")
     if "Purpose: OLD" not in d.current_phase_text(meta, run_dir):
-        p.append("missing phase does not fall back to the snapshot")
-    if "Purpose: OLD" not in d.current_phase_text({"repo": str(repo), "plan": "gone.md", "phase": 1}, run_dir):
-        p.append("missing plan does not fall back to the snapshot")
+        p.append("a plan without the phase hides the snapshot")
+    (run_dir / "phase.md").unlink()
+    (repo / "PLAN_T.md").write_text("# Plan\n## Phase 1 - x\nPurpose: NEW\nFiles: a.py\n")
+    if "Purpose: NEW" not in d.current_phase_text(meta, run_dir):
+        p.append("a run without a snapshot does not read the plan")
 except AttributeError as exc:
     p.append(f"missing: {exc}")
 print("  ok   ledger: keys, ids, open and note findings, atomic save, sections, corrupt file refused; current phase text"

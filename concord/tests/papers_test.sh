@@ -209,6 +209,57 @@ $DP --review "$BID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && grep -F "STALE" "$PK" | grep -qF "tests/test_a.py" \
   && ok "the packet marks the results stale and names the grading file" || bad "packet '$PK' has no stale mark for the grading file"
+# a grading script is compared by identity (kind, executable bit, bytes), not bytes alone
+sessionrun(){ $DP --begin 1 --label implementer --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
+  BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
+  echo y >> "$R/a.py"; $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1; }
+newrepo 'python3 tests/test_a.py'; chmod +x "$R/tests/test_a.py"; git -C "$R" add -A; git -C "$R" commit -qm exec
+sessionrun; chmod -x "$R/tests/test_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "a grading script loses its executable bit after --end: PASS refused (exit 7), the file named" \
+  || { bad "grading script chmod -x after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+newrepo 'python3 tests/test_a.py'
+sessionrun; cp "$R/tests/test_a.py" "$R/tests/real_a.py"; rm "$R/tests/test_a.py"; ln -s real_a.py "$R/tests/test_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "a grading script replaced after --end by a symlink with the same bytes: PASS refused (exit 7), the file named" \
+  || { bad "grading script swapped for a symlink after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+newrepo 'python3 tests/test_a.py'
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
+BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
+echo y >> "$R/a.py"; cp "$R/tests/test_a.py" "$R/tests/real_a.py"; rm "$R/tests/test_a.py"; ln -s real_a.py "$R/tests/test_a.py"
+$DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "a grading script replaced during the run by a symlink with the same bytes: PASS refused (exit 7), the file named" \
+  || { bad "grading script swapped for a symlink during the run: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+# post-run acceptance must leave the tree as it found it: the first command checks a.py, the second rewrites it
+accplan(){ newrepo true; printf 'build/\n' >> "$R/.gitignore"; printf 'b\n' > "$R/b.txt"; git -C "$R" add -A; git -C "$R" commit -qm ign
+  printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `%s`\n' "$1" > "$R/PLAN_T.md"
+  approve PLAN_T.md "$R" || exit 1; }
+accplan 'echo "# touched" >> a.py && echo "# touched" >> b.txt'
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+$DP --review "$RID" --packet --repo "$R" > "$T/pk.txt" 2>&1; PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/pk.txt" | head -1)
+[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] \
+  && grep -qF "acceptance command changed a.py" "$T/v.txt" && grep -qF "acceptance command changed b.txt" "$T/v.txt" \
+  && grep -qF "# touched" "$T/v.txt" && grep -qF "ACCEPTANCE COMMAND CHANGED THE TREE" "$R/.git/concord/$RID/report.md" \
+  && [ -f "$PK" ] && grep -F "changed files while they ran" "$PK" | grep -qF "b.txt" \
+  && ok "a later acceptance command rewrites a file an earlier one checked and a tracked file outside Files: PASS refused (exit 7) naming both and the command; the report and the review packet say so" \
+  || { bad "acceptance command rewrote a.py and b.txt: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+accplan 'python3 -c "import pathlib; p=pathlib.Path(\"a.py\"); p.write_bytes(p.read_bytes())"'
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
+  && ok "acceptance rewriting a modified in-scope file with the same bytes: PASS still accepted" \
+  || { bad "same-bytes rewrite refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+accplan 'mkdir -p build && echo o > build/out.o && echo n > scratch.txt'
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ -f "$R/build/out.o" ] && [ -f "$R/scratch.txt" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
+  && ok "acceptance writing an untracked file outside Files: and an ignored build file: PASS still accepted" \
+  || { bad "harmless acceptance writes refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
 newrepo 'true'
 printf '# Plan\n## Phase 1 - tests first\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `python3 tests/red.py` (fails until phase 2)\n' > "$R/PLAN_T.md"
 printf 'import sys\nsys.exit(1)\n' > "$R/tests/red.py"; approve PLAN_T.md "$R" || exit 1
