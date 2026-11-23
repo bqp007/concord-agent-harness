@@ -366,6 +366,42 @@ $WT done T10F --repo "$T/r10" > "$T/d10f.txt" 2>&1; RD10F=$?
   && ok "done with a user symlink to a file under an ignored .claude/ is refused without --force, the link kept and named" || { bad "done with a symlink to a file under .claude rc=$RD10F"; cat "$T/d10f.txt"; }
 $WT done T10D --repo "$T/r10" --force > /dev/null 2>&1; $WT done T10F --repo "$T/r10" --force > /dev/null 2>&1
 $WT done T9L --repo "$T/r9" --force > /dev/null 2>&1
+echo "== join checks the branch; done and join compare permission bits; file names stay literal (3.0.5)"
+mkr "$T/r11"; $WT new T11B --repo "$T/r11" --no-fetch > /dev/null 2>&1; W11B="$T/r11/.claude/worktrees/T11B"
+$WT fork T11B 1 --repo "$W11B" > /dev/null 2>&1; F11B="$T/r11/.claude/worktrees/T11B-p1"; [ -d "$F11B" ] || { echo "setup failed: fork for the branch check"; exit 1; }
+printf 'x = 2\n' > "$F11B/mod.py"; git -C "$W11B" switch -q -c elsewhere
+$WT join T11B 1 --repo "$W11B" > "$T/j11c.txt" 2>&1; RJ11C=$?
+[ $RJ11C -ne 0 ] && [ -d "$F11B" ] && [ "$(cat "$W11B/mod.py")" = "x = 1" ] && [ "$(git -C "$W11B" branch --show-current)" = "elsewhere" ] \
+  && grep -q "feature/T11B" "$T/j11c.txt" && grep -q "elsewhere" "$T/j11c.txt" \
+  && ok "join after the origin checkout switched branches is refused naming both branches, nothing applied, the fork kept" || { bad "join on another branch rc=$RJ11C"; cat "$T/j11c.txt"; }
+git -C "$W11B" switch -q feature/T11B; printf 'n = 1\n' > "$W11B/progress.py"; git -C "$W11B" add progress.py; git -C "$W11B" commit -qm progress
+$WT join T11B 1 --repo "$W11B" > "$T/j11d.txt" 2>&1; RJ11D=$?
+[ $RJ11D -eq 0 ] && [ ! -e "$F11B" ] && [ "$(cat "$W11B/mod.py")" = "x = 2" ] \
+  && ok "join after a new commit on the same origin branch still applies and removes the fork" || { bad "join after progress rc=$RJ11D"; cat "$T/j11d.txt"; }
+mkr "$T/r12"; mkdir -p "$T/r12/.claude"; printf '{}\n' > "$T/r12/.claude/settings.local.json"; $WT new T12 --repo "$T/r12" --no-fetch > /dev/null 2>&1
+W12="$T/r12/.claude/worktrees/T12"; chmod 755 "$W12/.claude/settings.local.json"
+$WT done T12 --repo "$T/r12" > "$T/d12.txt" 2>&1; RD12=$?
+[ $RD12 -ne 0 ] && [ -f "$W12/.claude/settings.local.json" ] && grep -q "settings.local.json" "$T/d12.txt" \
+  && ok "done keeps a copied settings file whose only change is its permission bits, and names it" || { bad "mode-only edit of a copy rc=$RD12"; cat "$T/d12.txt"; }
+$WT done T12 --repo "$T/r12" --force > /dev/null 2>&1
+mkr "$T/r13"; printf 'out.bin\n' >> "$T/r13/.git/info/exclude"; $WT new T13 --repo "$T/r13" --no-fetch > /dev/null 2>&1; W13="$T/r13/.claude/worktrees/T13"
+printf 'o\n' > "$W13/out.bin"; $WT fork T13 1 --repo "$W13" > /dev/null 2>&1; F13="$T/r13/.claude/worktrees/T13-p1"
+printf 'o\n' > "$F13/out.bin"; chmod 755 "$F13/out.bin"
+$WT join T13 1 --repo "$W13" > "$T/j13.txt" 2>&1; RJ13=$?
+[ $RJ13 -ne 0 ] && [ -d "$F13" ] && grep -q "out.bin" "$T/j13.txt" \
+  && ok "join keeps an ignored file that differs from the origin only by its executable bit, and names it" || { bad "mode-only ignored file rc=$RJ13"; cat "$T/j13.txt"; }
+$WT join T13 1 --repo "$W13" --force > /dev/null 2>&1; $WT done T13 --repo "$T/r13" --force > /dev/null 2>&1
+mkr "$T/r14"; printf '# tracked\n' > "$T/r14/PLAN_q1.md"; mkdir -p "$T/r14/lk[1]" "$T/r14/lk1"; printf 'a\n' > "$T/r14/lk[1]/f"; printf 'b\n' > "$T/r14/lk1/f"
+git -C "$T/r14" add PLAN_q1.md && git -C "$T/r14" commit -qm plan
+$WT new T14 --repo "$T/r14" --no-fetch --link 'lk[1]' > /dev/null 2>&1; W14="$T/r14/.claude/worktrees/T14"
+git -C "$W14" check-ignore -q 'lk[1]' && ! git -C "$W14" check-ignore -q lk1 \
+  && ok "the ignore pattern made for a linked name with [ ] matches that name only, not lk1" || bad "ignore pattern for lk[1] crosses into lk1"
+printf '# plan\n' > "$W14/PLAN_q[1].md"
+$WT done T14 --repo "$T/r14" > "$T/d14.txt" 2>&1; RD14=$?
+[ "$(cat "$T/r14/.git/concord/plans/T14/PLAN_q[1].md" 2>/dev/null)" = "# plan" ]; CMP14=$?
+[ $RD14 -eq 0 ] && [ $CMP14 -eq 0 ] && [ ! -e "$W14" ] \
+  && ok "an untracked PLAN_q[1].md is archived by its exact name although a tracked PLAN_q1.md exists" || { bad "plan q[1] rc=$RD14"; cat "$T/d14.txt"; }
+[ -d "$W14" ] && $WT done T14 --repo "$T/r14" --force > /dev/null 2>&1
 echo "== a closed plan is closed for its ticket checkout and its forks, not for a sibling ticket"
 $WT new TCA --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCA="$M/.claude/worktrees/TCA"
 $WT new TCB --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCB="$M/.claude/worktrees/TCB"

@@ -337,6 +337,31 @@ P
 chmod +x "$T/pybin/python3"
 hk(){ rm -f "$T/py_calls" "$T/py_in"; printf '{"session_id": "s1", "cwd": "%s", "hook_event_name": "PostToolUse"}' "$1" | PATH="$T/pybin:$PATH" sh "$T/concord/drift_hook.sh" > "$T/out.txt" 2>&1; RC=$?; }
 NODRIFT="$T/nodrift"; mkdir -p "$NODRIFT" && ( cd "$NODRIFT" && git init -q -b main && git config user.email t@t && git config user.name t && printf 'x\n' > a.py && git add -A && git commit -qm init )
+echo "== --report: a run whose state.json cannot be read is an open run, not a dropped one"
+mkv v14; approve PLAN_V.md "$V" || exit 1
+TORN="$(date +%Y%m%d-%H%M%S)-implementer-p1"; mkdir -p "$V/.git/concord/$TORN"; printf '{"run_id": "%s", "plan": "PLAN_V.md", "sta' "$TORN" > "$V/.git/concord/$TORN/state.json"
+REPV="$V/.git/concord/reports/REPORT_V.md"; $DP --report --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && has "$TORN" && [ ! -e "$REPV" ] && ok "--report with a run folder whose state.json is unreadable is refused (exit 2), names the run and writes no report" \
+  || bad "report beside an unreadable state.json: rc=$RC, report written=$([ -e "$REPV" ] && echo yes || echo no): $(tail -2 "$T/out.txt")"
+rm -rf "$V/.git/concord/$TORN"
+
+echo "== --verdict measures the run's own checkout (a run of a fork resolves by id from the shared runs root)"
+mkv v15; approve PLAN_V.md "$V" || exit 1
+W="$T/v15wt"; ( cd "$V" && git worktree add -q -b v15 "$W" ) && cp "$V/PLAN_V.md" "$W/" || { echo "setup failed: worktree of v15"; exit 1; }
+approve PLAN_V.md "$W" || exit 1
+FAKE_ACTIONS="echo 'x = 2' >> a.py" $DP 1 --plan PLAN_V.md --via qwen --model fake/m --no-baseline --repo "$W" > "$T/out.txt" 2>&1; RC=$?; WR=$(rid)
+[ $RC -eq 0 ] && [ -n "$WR" ] || { echo "setup failed: run in the second checkout"; cat "$T/out.txt"; exit 1; }
+cp "$W/a.py" "$V/a.py"      # the first checkout now matches the state the run recorded, so only its path tells it apart
+$DP --verdict "$WR" FAIL --cause EXECUTOR --repo "$V" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("verdict"))' "$V/.git/concord/$WR/meta.json")" = FAIL ] \
+  && ok "--verdict FAIL from another checkout of the repository still records" || { bad "FAIL from the first checkout rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --verdict "$WR" PASS --repo "$V" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && has "$V" && has "$W" && has "--repo" && ok "--verdict PASS from a checkout other than the run's is refused (exit 2), naming both checkouts and --repo" \
+  || { bad "PASS from the first checkout rc=$RC"; tail -2 "$T/out.txt"; }
+$DP --verdict "$WR" PASS --repo "$W" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("verdict"))' "$V/.git/concord/$WR/meta.json")" = PASS ] \
+  && ok "--verdict PASS --repo <the run's checkout> measures that checkout and records" || { bad "PASS from the run's checkout rc=$RC"; tail -2 "$T/out.txt"; }
+
 if [ -f "$T/concord/drift_hook.sh" ]; then
   hk "$D"; RC1=$RC; P1=$(cat "$T/py_calls" 2>/dev/null); IN1=$(cat "$T/py_in" 2>/dev/null)
   hk "$NODRIFT"; RC2=$RC; P2=$(cat "$T/py_calls" 2>/dev/null)

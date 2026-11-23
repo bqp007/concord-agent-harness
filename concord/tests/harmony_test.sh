@@ -402,5 +402,18 @@ $DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
   || { bad "8 a regular file refused as a link: l.py is $([ -e "$R/l.py" ] && echo present || echo absent)"; cat "$T/out.txt"; }
 fi
 
+if sel 9; then
+echo "== 9 a permission-only change of a tracked file is a change of the run"
+bid(){ sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/out.txt" | tail -1; }
+mkrepo "$BASIC"
+( cd "$R" && printf 'k = 1\n' > b.py && git add b.py && git commit -qm more ) || { echo "setup failed: tracked b.py"; exit 1; }
+$DP --begin 1 --label me --plan PLAN_T.md --repo "$R" > "$T/out.txt" 2>&1; B9=$(bid)
+{ [ -n "$B9" ] && chmod 600 "$R/b.py" && chmod 600 "$R/a.py" && [ -z "$(git -C "$R" status --porcelain -uno)" ]; } || { echo "setup failed: --begin, then chmod 600 on clean a.py and b.py"; cat "$T/out.txt"; exit 1; }
+$DP --end "$B9" --repo "$R" > "$T/out.txt" 2>&1
+grep '^OUT OF SCOPE (source):' "$T/out.txt" | grep -q 'b\.py' && grep '^changed in scope:' "$T/out.txt" | grep -q 'a\.py' \
+  && ok "9 chmod 600 on clean tracked files: b.py (outside Files:) is reported out of scope, a.py (in Files:) as changed in scope" \
+  || { bad "9 permission-only change not reported"; grep -e '^changed in scope' -e '^OUT OF SCOPE' "$T/out.txt"; }
+fi
+
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

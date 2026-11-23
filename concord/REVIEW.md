@@ -8,12 +8,15 @@ the spec and the diff first; open repository files only to confirm a suspicion. 
    sentence. No spec given: leave "clauses" empty. A FAIL is an open finding until a review of a later head resolves it.
 2. DEFECTS. Is there a concrete input under which the change breaks a behaviour the spec or the existing code
    promises? When the diff changes what a function, an interface or a file format does, open the callers that rely
-   on it. Every BLOCKER, HIGH or MEDIUM finding MUST carry a reproduction: the input, the expected result and the
-   actual result. A finding you cannot reproduce that way is a NOTE (a question or an option), never higher. The
-   reproduction must start from a real input source: untrusted input, a real caller, or a failure the platform
-   documents (for example out-of-memory leaving a JNI exception pending). A state that only a test fake can produce
-   is a NOTE. A finding that contradicts an assumption in the ledger is a NOTE unless the reproduction shows the
-   assumption is false in practice.
+   on it. When the change acts on an approval or on measured state, ask about approval (what was approved, and what
+   identifies that approval?), evidence (what state supports the decision, and can it change before the code acts?)
+   and interpretation (what will the receiving program, such as a shell, git, a path resolver or a parser, read into
+   a value, and is that reading intended and validated?). Every BLOCKER, HIGH or MEDIUM finding MUST carry a
+   reproduction: the input, the expected result and the actual result. A finding you cannot reproduce that way is a
+   NOTE (a question or an option), never higher. The reproduction must start from a real input source: untrusted
+   input, a real caller, or a failure the platform documents (for example out-of-memory leaving a JNI exception
+   pending). A state that only a test fake can produce is a NOTE. A finding that contradicts an assumption in the
+   ledger is a NOTE unless the reproduction shows the assumption is false in practice.
 3. TESTS. For each test the diff adds or changes: does it fail when the behaviour it names breaks? "no" needs the
    wrong implementation it would still accept, given as the finding's reproduction. Does it also fail under a change
    the spec allows, such as a retuned config value or a refactor that keeps the behaviour? "yes" needs that change,

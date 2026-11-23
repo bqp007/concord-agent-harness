@@ -51,15 +51,18 @@ put() { if [ "${3:-}" = keep ] && [ -e "$2" ]; then
   if [ "$DRY" = 1 ]; then echo "would copy $2"; return 0; fi
   mkdir -p "$(dirname "$2")"; cp -p "$1" "$2"; echo "copy $2"; }
 
-# Nothing is written before the merged settings.json is computed and the CLAUDE.md markers pair: a refusal leaves the
-# installation as it was. The merge below is the one install_settings writes out: a settings file it cannot merge (not a
-# JSON object, or `hooks` or another merged key of another shape than the merge reads) stops the install here.
-MERGED="$(mktemp "${TMPDIR:-/tmp}/concord-settings.XXXXXX")" || err "cannot create a temporary file"
-trap 'rm -f "$MERGED"' EXIT
-python3 -B -I - "$DEST/settings.json" "$DEST/CLAUDE.md" "$A/settings.snippet.json" "$DEST" "$MERGED" <<'PY' || exit 2
-import json, os, re, sys
-settings, md, snippet, dest, merged = sys.argv[1:6]
+# Nothing is written before settings.json merges and the CLAUDE.md markers pair: a refusal leaves the installation as it
+# was. A settings file the merge cannot read (not a JSON object, or `hooks` or another merged key of another shape than the
+# merge reads) stops the install here. This run only validates; install_settings merges again from the file as it is at
+# write time, so an edit made in between is kept, and stops with the same message if the edit broke the file.
+settings_py() {   # $1 = check (validate and report kept hooks) or write (merge and replace settings.json)
+python3 -B -I - "$1" "$DEST/settings.json" "$DEST/CLAUDE.md" "$A/settings.snippet.json" "$DEST" <<'PY'
+import json, os, re, shutil, sys
+mode, settings, md, snippet, dest = sys.argv[1:6]
 def refuse(msg):
+    if mode == "write":
+        sys.exit(f"error: {settings} {msg}; settings.json was left as it was and the rest of the install is done; "
+                 "fix or move it, then run install.sh again")
     sys.exit(f"error: {settings} {msg}; fix or move it, then run install.sh again (nothing written)")
 base = {}
 if os.path.exists(settings):
@@ -128,9 +131,16 @@ if os.path.exists(snippet):
         base["hooks"][event] = [e for e in entries if e["hooks"]]
     kept = [h["command"] for entries in base.get("hooks", {}).values() for e in entries for h in e["hooks"]
             if isinstance(h.get("command"), str) and CONTAINS.search(h["command"]) and not shipped(h)]
-    for c in kept:
-        print(f"keep hook {c} (a shipped Concord command with additions; left as it is)")
-    with open(merged, "w") as f: json.dump(base, f, indent=2); f.write("\n")
+    if mode == "check":
+        for c in kept:
+            print(f"keep hook {c} (a shipped Concord command with additions; left as it is)")
+    else:
+        # The temporary file sits beside the real file (a symlinked settings.json is written through) and takes its mode.
+        real = os.path.realpath(settings)
+        tmp = f"{real}.concord-{os.getpid()}"
+        with open(tmp, "w") as f: json.dump(base, f, indent=2); f.write("\n")
+        if os.path.exists(real): shutil.copymode(real, tmp)
+        os.replace(tmp, real)
 if os.path.exists(md):
     B, E = "<!-- concord:begin -->", "<!-- concord:end -->"
     old = open(md).read().split("\n")
@@ -143,6 +153,8 @@ if os.path.exists(md):
         sys.exit(f"error: {md} has {nb} begin and {ne} end Concord markers; fix them by hand, then run install.sh again "
                  "(nothing written)")
 PY
+}
+settings_py check || exit 2
 
 # Back up every concord file this install would overwrite (never backup/ itself or runs.jsonl).
 if [ -d "$DEST/concord" ]; then
@@ -165,17 +177,33 @@ done
 
 # commands, agents and skills: symlink into the checkout in --link (edits are live; an existing non-link file is kept and
 # reported), remove the links in --plugin that point into this checkout (any other link of the name is kept and reported).
-# One ownership rule for both: a link is Concord's when it points to this checkout's source for that name, or to the same
-# path inside another checkout of this kit (a moved checkout); any other link is kept and reported.
-ours() { local t rel="${2#"$SRC"/}"; t="$(readlink "$1")"; [ "$t" = "$2" ] || case "$t" in */"$rel") true;; *) false;; esac; }
+# One ownership rule for both: a link is Concord's when it points to this checkout's source for that name, or when the
+# manifest ($MAN: link path and target, one per line, written by each install) lists it with its current target (a moved
+# or deleted checkout). A link the manifest does not list (made before 3.0.5) is Concord's only when it ends in the same
+# path inside a Concord checkout that exists (a moved checkout); the suffix alone proves a layout, not an owner. Any other
+# link is kept and reported.
+MAN="$DEST/concord/links.tsv"; TAB=$'\t'; NL=$'\n'
+TOUCHED="$NL"; ADDED=""   # manifest paths this run drops, and the lines it adds
+ours() { local t rel="${2#"$SRC"/}" e root; t="$(readlink "$1")"; [ "$t" = "$2" ] && return 0
+  if [ -f "$MAN" ]; then e="$(P="$1" awk -F'\t' '$1 == ENVIRON["P"] {print $2; exit}' "$MAN")"
+    [ -z "$e" ] || { [ "$t" = "$e" ]; return; }; fi
+  case "$t" in */"$rel") root="${t%/"$rel"}"; [ -f "$root/install.sh" ] && [ -f "$root/concord/concord.py" ];; *) false;; esac; }
 keep_note() { echo "keep $1 (a link to $(readlink "$1"), not made by Concord; left as is)"; }
 link_one() { if [ -e "$2" ] && [ ! -L "$2" ]; then echo "keep $2 (not a link; left as is)"; return 0; fi
   if [ -L "$2" ] && ! ours "$2" "$1"; then keep_note "$2"; return 0; fi
+  TOUCHED="$TOUCHED$2$NL"; ADDED="$ADDED$2$TAB$1$NL"
   if [ "$DRY" = 1 ]; then echo "would link $2"; return 0; fi
   mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; echo "link $2"; }
 unlink_one() { [ -L "$1" ] || return 0
   ours "$1" "$2" || { keep_note "$1"; return 0; }
+  TOUCHED="$TOUCHED$1$NL"
   if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; echo "remove link $1"; fi; }
+# The manifest keeps its other lines, drops the links this run made again or removed, and adds the links it made.
+write_manifest() { [ "$DRY" = 1 ] && return 0
+  local tmp="$MAN.$$" l; mkdir -p "$DEST/concord"; : > "$tmp"
+  if [ -f "$MAN" ]; then while IFS= read -r l; do
+    case "$TOUCHED" in *"$NL${l%%"$TAB"*}$NL"*) ;; *) echo "$l" >> "$tmp";; esac; done < "$MAN"; fi
+  printf '%s' "$ADDED" >> "$tmp"; mv "$tmp" "$MAN"; }
 if [ "$MODE" = link ]; then
   link_one "$A/commands" "$DEST/commands/concord"; for n in $AGENTS; do link_one "$A/agents/$n.md" "$DEST/agents/$n.md"; done
   for n in $SKILLS; do link_one "$A/skills/$n" "$DEST/skills/$n"; done
@@ -183,6 +211,7 @@ else
   unlink_one "$DEST/commands/concord" "$A/commands"; for n in $AGENTS; do unlink_one "$DEST/agents/$n.md" "$A/agents/$n.md"; done
   for n in $SKILLS; do unlink_one "$DEST/skills/$n" "$A/skills/$n"; done
 fi
+write_manifest
 
 # CLAUDE.md: keep the Concord rules between the markers and replace that block where it stands; a file with
 # unpaired markers, or a Concord block without markers, is refused untouched; a symlinked CLAUDE.md is written through; the file is backed up first.
@@ -221,13 +250,13 @@ PY
   echo "update $md"; }
 install_claude_md
 
-# settings.json: write the merge the preflight computed (the snippet's missing keys added, every existing value kept,
-# the hooks this installer shipped replaced); back the file up first.
+# settings.json: merge the snippet into the file as it is now (its missing keys added, every existing value kept, the
+# hooks this installer shipped replaced); back the file up first.
 install_settings() { local s="$DEST/settings.json" snip="$A/settings.snippet.json"
   [ -f "$snip" ] || return 0
   if [ "$DRY" = 1 ]; then echo "would update $s"; return 0; fi
   mkdir -p "$DEST"; [ -e "$s" ] && backup_into "$s" settings.json
-  cat "$MERGED" > "$s"     # writes through a symlinked settings.json and keeps its mode
+  settings_py write || exit 2
   echo "update $s"; }
 install_settings
 

@@ -1,6 +1,6 @@
 {
   "name": "concord",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "description": "Stay in control while AI agents write your code. A strong model turns each task into a short plan that a verifier challenges and you approve, has the failing tests written first, writes the small changes and checks every result; low-cost models implement the bulky phases within a fixed file scope that every run's report checks; an independent reviewer checks each change at its risk level and a cheap delta review checks each fix; you review the diff and commit. Adds /concord:plan-then-delegate, /concord:delegate and /concord:rules-review, plus implementer and reviewer agents. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
   "author": {
     "name": "Bao Q. Pham",
