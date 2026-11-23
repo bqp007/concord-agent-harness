@@ -1893,13 +1893,19 @@ def ruff_runner(conf):
     return None
 
 
-def static_findings(repo, files, conf, timeout_s):
-    """{tool: [[path, code, message], ...]} for the given repo-relative files; missing tools are skipped.
-    Keyed without line numbers so findings survive edits above them."""
+def static_runner(repo, files, conf):
+    """ruff's command prefix (ruff_runner) when `files` hold a Python file that exists in `repo`, else None: whether
+    the static checks have anything to run."""
+    py = any(Path(f).suffix in (".py", ".pyi") and (Path(repo) / f).is_file() for f in files)
+    return ruff_runner(conf) if py else None
+
+
+def static_findings(repo, files, runner, timeout_s):
+    """{tool: [[path, code, message], ...]} for the given repo-relative files, checked with `runner`
+    (static_runner). Keyed without line numbers so findings survive edits above them."""
     out = {}
     py = [f for f in files if Path(f).suffix in (".py", ".pyi") and (repo / f).is_file()]
-    runner = ruff_runner(conf) if py else None
-    if runner:
+    if runner and py:
         res = subprocess.run(runner + ["check", "--output-format=json", "--no-cache", "--exit-zero", "--", *py],
                              cwd=str(repo), capture_output=True, text=True, timeout=timeout_s,
                              env={**clean_env(), "PWD": str(repo)})
@@ -2236,9 +2242,10 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         die(f"cannot capture the checkout's tree before the run: {exc}")
     pins = pin_grading_inputs(repo, run_dir, grading, start_tree)
     static_on = conf_flag(conf, "static_checks", True)
+    runner = static_runner(repo, to_back_up, conf) if static_on else None
     red_run = bool(do_baseline and baseline_mode != "skip" and acceptance and conf_flag(conf, "baseline", True))
     baseline, static_pre = [], {}
-    if red_run or char_cmds or static_on:
+    if red_run or char_cmds or runner:                    # a copy only when something runs in it
         try:
             with grading_copy(repo, start_tree, run_dir, pins) as work:
                 for c in acceptance if red_run else []:
@@ -2246,9 +2253,9 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
                     baseline.append({"cmd": c, "rc": rc, "tail": "\n".join(out.strip().splitlines()[-12:])})
                 if char_cmds:
                     (run_dir / "characterize.before.txt").write_text(characterize(char_cmds, work, timeout_s))
-                if static_on:
+                if runner:
                     try:
-                        static_pre = static_findings(work, to_back_up, conf, timeout_s)
+                        static_pre = static_findings(work, to_back_up, runner, timeout_s)
                     except (subprocess.TimeoutExpired, OSError) as exc:
                         notes.append(f"static checks skipped before the run ({exc.__class__.__name__})")
         except TreeError as exc:
@@ -2463,52 +2470,55 @@ def post_run_checks(run_dir, st, rule, candidate, touched, generated, rc):
     """The checks after a run, on a grading copy of its candidate under the run's rule (watched, so a command that
     changes the copy's tree is recorded): static checks on the touched files (only findings absent before the run are
     new), the Characterize: commands and the acceptance commands (skipped for a run stopped by the wall limit or the
-    watchdog, rc 124 and 125). Returns (static line, new static findings, characterization line, acceptance exit
-    codes, acceptance line, the changes post-run commands made); a copy that cannot be made is such a change."""
-    timeout_s = st.get("check_timeout", CHECK_TIMEOUT_S)
-    static_line, static_new, char_line, after_rc, after_line = "", {}, "", [], ""
-    try:
-        with graded_copy(Path(st["repo"]), run_dir, rule, candidate) as (work, watch):
-            if st.get("static_on"):
-                checked = [p for p in touched if p not in generated and (work / p).is_file()]
-                try:
-                    post_found = static_findings(work, checked, load_conf(), timeout_s)
-                except (subprocess.TimeoutExpired, OSError) as exc:
-                    post_found, static_line = {}, f"static checks skipped after the run ({exc.__class__.__name__})"
-                from collections import Counter
-                pre_found = st.get("static_pre") or {}
-                for tool, found in post_found.items():
-                    new = Counter(tuple(x) for x in found) - Counter(tuple(x) for x in pre_found.get(tool, []))
-                    static_new[tool] = sorted(list(k) for k in new.elements())
-                total_new = sum(len(v) for v in static_new.values())
-                if post_found and total_new:
-                    shown = [f"{p} {c} {m}" for tool in static_new for p, c, m in static_new[tool]]
-                    static_line = (f"STATIC NEW ({', '.join(t for t in static_new if static_new[t])}): {total_new} "
-                                   "new: " + "; ".join(shown[:8]) + ("; ..." if len(shown) > 8 else "")
-                                   + " (defects = FAIL, style = feedback; see /concord:delegate step 3)")
-                elif post_found:
-                    kept = sum(len(v) for v in post_found.values())
-                    static_line = (f"static checks ({', '.join(post_found)}): no new findings"
-                                   + (f" ({kept} already present in the checked files)" if kept else ""))
-                missing = sorted({NO_CHECKER_HINT[Path(p).suffix.lower()] for p in checked
-                                  if Path(p).suffix.lower() in NO_CHECKER_HINT})
-                if missing and not static_line.startswith("static checks skipped"):
-                    static_line = (static_line + "; " if static_line else "") + \
-                        "no checker installed for some changed files (" + ", ".join(missing) + ")"
-                watch.after("static checks")
-            if st.get("characterize"):
-                char_line = characterization_line(run_dir, st, work, watch)
-            if conf_flag(load_conf(), "acceptance_after", True) and st.get("acceptance") \
-                    and rc not in (124, RESOURCE_RC):
-                results = run_acceptance(work, st["acceptance"], timeout_s, watch)
-                after_rc = [r for _, r, _ in results]
-                (run_dir / "acceptance.after.txt").write_text(acceptance_text(results))
-                passed = sum(1 for r in after_rc if r == 0)
-                after_line = (f"acceptance after run: {passed}/{len(after_rc)} pass" if passed
-                              else f"ACCEPTANCE AFTER RUN: 0/{len(after_rc)} pass")
-            changed = watch.changed
-    except TreeError as exc:
-        changed = [{"path": f"(the grading copy could not be made: {exc})", "command": "grading copy"}]
+    watchdog, rc 124 and 125). The copy is made only when one of them runs. Returns (static line, new static findings,
+    characterization line, acceptance exit codes, acceptance line, the changes post-run commands made); a copy that
+    cannot be made is such a change."""
+    repo, conf, timeout_s = Path(st["repo"]), load_conf(), st.get("check_timeout", CHECK_TIMEOUT_S)
+    checked = [p for p in touched if p not in generated and (repo / p).is_file()] if st.get("static_on") else []
+    runner = static_runner(repo, checked, conf) if checked else None
+    accept = bool(conf_flag(conf, "acceptance_after", True) and st.get("acceptance") and rc not in (124, RESOURCE_RC))
+    static_line, static_new, char_line, after_rc, after_line, changed = "", {}, "", [], "", []
+    if runner or st.get("characterize") or accept:
+        try:
+            with graded_copy(repo, run_dir, rule, candidate) as (work, watch):
+                if runner:
+                    try:
+                        post_found = static_findings(work, checked, runner, timeout_s)
+                    except (subprocess.TimeoutExpired, OSError) as exc:
+                        post_found, static_line = {}, f"static checks skipped after the run ({exc.__class__.__name__})"
+                    from collections import Counter
+                    pre_found = st.get("static_pre") or {}
+                    for tool, found in post_found.items():
+                        new = Counter(tuple(x) for x in found) - Counter(tuple(x) for x in pre_found.get(tool, []))
+                        static_new[tool] = sorted(list(k) for k in new.elements())
+                    total_new = sum(len(v) for v in static_new.values())
+                    if post_found and total_new:
+                        shown = [f"{p} {c} {m}" for tool in static_new for p, c, m in static_new[tool]]
+                        static_line = (f"STATIC NEW ({', '.join(t for t in static_new if static_new[t])}): {total_new} "
+                                       "new: " + "; ".join(shown[:8]) + ("; ..." if len(shown) > 8 else "")
+                                       + " (defects = FAIL, style = feedback; see /concord:delegate step 3)")
+                    elif post_found:
+                        kept = sum(len(v) for v in post_found.values())
+                        static_line = (f"static checks ({', '.join(post_found)}): no new findings"
+                                       + (f" ({kept} already present in the checked files)" if kept else ""))
+                    watch.after("static checks")
+                if st.get("characterize"):
+                    char_line = characterization_line(run_dir, st, work, watch)
+                if accept:
+                    results = run_acceptance(work, st["acceptance"], timeout_s, watch)
+                    after_rc = [r for _, r, _ in results]
+                    (run_dir / "acceptance.after.txt").write_text(acceptance_text(results))
+                    passed = sum(1 for r in after_rc if r == 0)
+                    after_line = (f"acceptance after run: {passed}/{len(after_rc)} pass" if passed
+                                  else f"ACCEPTANCE AFTER RUN: 0/{len(after_rc)} pass")
+                changed = watch.changed
+        except TreeError as exc:
+            changed = [{"path": f"(the grading copy could not be made: {exc})", "command": "grading copy"}]
+    missing = sorted({NO_CHECKER_HINT[Path(p).suffix.lower()] for p in checked
+                      if Path(p).suffix.lower() in NO_CHECKER_HINT})
+    if missing and not static_line.startswith("static checks skipped"):
+        static_line = (static_line + "; " if static_line else "") + \
+            "no checker installed for some changed files (" + ", ".join(missing) + ")"
     return static_line, static_new, char_line, after_rc, after_line, changed
 
 
