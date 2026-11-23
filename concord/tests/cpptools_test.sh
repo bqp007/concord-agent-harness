@@ -49,6 +49,8 @@ newrepo(){ rm -rf "$R"; gitrepo "$R"; ( cd "$R" && mkdir -p tests
 run(){ FAKE_ACTIONS="$1" $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1; }
 # mut FILE [ARGS]: --mutate run $MR with the mutants listed in FILE; the isolated copy goes under $T/tmp
 mut(){ TMPDIR="$T/tmp" $DP --mutate "$MR" --mutants "$1" "${@:2}" --repo "$R" > "$T/out.txt" 2>&1; }
+# leftover: what a mutation run left in $T/tmp; the xcrun_db* cache that macOS compilers write to TMPDIR is not ours
+leftover(){ ls -A "$T/tmp" | grep -v "^xcrun_db"; }
 # PLAN_L.md: phases for --lint with a Claude executor (dry runs: no model call)
 lintplan(){ cat > "$R/PLAN_L.md" <<'P'
 # Plan
@@ -189,7 +191,7 @@ cat > "$T/m_bytes.json" <<J
 J
 mut "$T/m_bytes.json"; RC=$?
 GOT=$(mj "$MRUN/meta.json" '[s["result"] for s in m["mutation"]["sampled"]]')
-[ $RC -eq 0 ] && has "killed 2, survived 0" && [ -z "$(ls -A "$T/tmp")" ] && [ "$GOT" = "['killed', 'killed']" ] \
+[ $RC -eq 0 ] && has "killed 2, survived 0" && [ -z "$(leftover)" ] && [ "$GOT" = "['killed', 'killed']" ] \
   && ok "3 a listed mutant changes only its old text (a non-UTF-8 byte elsewhere is kept) and occ counts non-overlapping occurrences; meta records each as killed" \
   || { bad "3 listed bytes/occ rc=$RC results=$GOT"; head -6 "$T/out.txt"; }
 
@@ -205,7 +207,7 @@ GOT=$(mj "$MRUN/meta.json" '[s["result"] for s in m["mutation"]["sampled"]]')
 mkdir -p "$T/outside" && printf 'int v = 1;\n' > "$T/outside/x.c" && ln -s "$T/outside" "$R/vendor"
 printf '[{"id": "L1", "file": "vendor/x.c", "old": "v = 1", "new": "v = 2"}]' > "$T/m_link.json"
 mut "$T/m_link.json"; RC=$?
-[ $RC -eq 2 ] && grep -qx 'int v = 1;' "$T/outside/x.c" && [ -z "$(ls -A "$T/tmp")" ] && ! has Traceback \
+[ $RC -eq 2 ] && grep -qx 'int v = 1;' "$T/outside/x.c" && [ -z "$(leftover)" ] && ! has Traceback \
   && ! has "unrecognized arguments" && ok "3 a listed file whose path resolves outside the checkout (a symlinked directory): exit 2 before any copy, the target untouched" \
   || { bad "3 symlinked path rc=$RC"; head -4 "$T/out.txt"; }
 rm -f "$R/vendor"
@@ -215,7 +217,7 @@ printf '[{"id": "C1", "file": ".claude/x.c", "old": "v = 1", "new": "v = 2"}]' >
 printf '[{"id": "C2", "file": "bld/gen.c", "old": "v = 1", "new": "v = 2"}]' > "$T/m_bld.json"
 mut "$T/m_claude.json"; R1=$?; T1=$(grep -c -e Traceback -e "unrecognized arguments" "$T/out.txt")
 mut "$T/m_bld.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized arguments" "$T/out.txt")
-[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ -z "$(ls -A "$T/tmp")" ] \
+[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ -z "$(leftover)" ] \
   && ok "3 a listed file the copy leaves out (.claude, a directory holding CMakeCache.txt): exit 2 before any copy" \
   || bad "3 left-out paths rc=$R1/$R2 tracebacks=$T1$T2"
 rm -rf "$R/bld"
@@ -230,7 +232,7 @@ mut "$T/m_occ0.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized argument
 : > "$R/CMakeCache.txt"
 printf '[{"id": "I1", "file": "f.c", "old": "f(", "new": "g("}]' > "$T/m_in.json"
 mut "$T/m_in.json"; RC=$?
-[ $RC -eq 2 ] && has "in-source CMake build" && [ -z "$(ls -A "$T/tmp")" ] \
+[ $RC -eq 2 ] && has "in-source CMake build" && [ -z "$(leftover)" ] \
   && ok "3 an in-source CMake build (CMakeCache.txt at the repository root): exit 2 before any copy, named in the message" \
   || { bad "3 in-source build rc=$RC"; head -4 "$T/out.txt"; }
 rm -f "$R/CMakeCache.txt"
@@ -285,7 +287,7 @@ rm -f "$T/torn.ready"; mut "$T/m_torn.json"; RC=$?; sleep 2
 
 printf '[{"id": "C3", "file": ".Claude/x.c", "old": "v = 1", "new": "v = 2"}]' > "$T/m_case.json"
 mut "$T/m_case.json"; RC=$?
-[ $RC -eq 2 ] && ! has Traceback && ! has "unrecognized arguments" && [ -z "$(ls -A "$T/tmp")" ] \
+[ $RC -eq 2 ] && ! has Traceback && ! has "unrecognized arguments" && [ -z "$(leftover)" ] \
   && ok "3 a listed file under a case variant of .claude (.Claude/x.c on a case-insensitive filesystem): exit 2 before any copy" \
   || { bad "3 case-variant left-out path rc=$RC"; head -4 "$T/out.txt"; }
 
@@ -293,14 +295,14 @@ printf '[{"id": "N1", "file": "f\\u0000.c", "old": "f(", "new": "g("}]' > "$T/m_
 printf '[{"id": "N2", "file": "f.c", "old": "\\ud800", "new": "x"}]' > "$T/m_sur.json"
 mut "$T/m_nul.json"; R1=$?; T1=$(grep -c -e Traceback -e "unrecognized arguments" "$T/out.txt")
 mut "$T/m_sur.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized arguments" "$T/out.txt")
-[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ -z "$(ls -A "$T/tmp")" ] \
+[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ -z "$(leftover)" ] \
   && ok "3 a --mutants string that cannot name a file or be encoded (a NUL in file, a lone surrogate in old): exit 2 before any copy" \
   || bad "3 NUL/surrogate rc=$R1/$R2 tracebacks=$T1$T2"
 
 mkfifo "$R/pipe"
 printf '[{"id": "P1", "file": "f.c", "old": "f(", "new": "g("}]' > "$T/m_pipe.json"
 mut "$T/m_pipe.json"; RC=$?
-[ $RC -eq 2 ] && ! has Traceback && ! has "unrecognized arguments" && [ -z "$(ls -A "$T/tmp")" ] \
+[ $RC -eq 2 ] && ! has Traceback && ! has "unrecognized arguments" && [ -z "$(leftover)" ] \
   && ok "3 a checkout file the copy cannot copy (a named pipe): exit 2 with a message, no traceback, no copy left" \
   || { bad "3 uncopyable file rc=$RC"; tail -3 "$T/out.txt"; }
 rm -f "$R/pipe"
@@ -349,7 +351,7 @@ printf '[{"id": "Q1", "file": "f.c", "old": "f(", "new": "g(", "check": "true\\u
 printf '[{"id": "Q2", "file": "f.c", "old": "f(\\u0000", "new": "g("}]' > "$T/m_nulold.json"
 mut "$T/m_nulcheck.json"; R1=$?; T1=$(grep -c -e Traceback -e "unrecognized arguments" -e "isolated copy" "$T/out.txt")
 mut "$T/m_nulold.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized arguments" -e "isolated copy" "$T/out.txt")
-[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ -z "$(ls -A "$T/tmp")" ] \
+[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ -z "$(leftover)" ] \
   && ok "3b a NUL in any --mutants string (check, old), not only in file: exit 2 before any copy, no traceback" \
   || { bad "3b NUL in check/old rc=$R1/$R2 traceback-or-copy=$T1$T2"; tail -2 "$T/out.txt"; }
 
@@ -358,7 +360,7 @@ printf '[{"id": "Q3", "file": "%s/x.c", "old": "f(", "new": "g("}]' "$L" > "$T/m
 printf '[{"id": "Q4", "file": "%s.c", "old": "f(", "new": "g("}]' "$L" > "$T/m_longfile.json"
 mut "$T/m_longdir.json"; R1=$?; T1=$(grep -c -e Traceback -e "unrecognized arguments" "$T/out.txt"); H1=$(grep -c "file not found in the checkout" "$T/out.txt")
 mut "$T/m_longfile.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized arguments" "$T/out.txt"); H2=$(grep -c "file not found in the checkout" "$T/out.txt")
-[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ "$H1$H2" = 11 ] && [ -z "$(ls -A "$T/tmp")" ] \
+[ $R1 -eq 2 ] && [ $R2 -eq 2 ] && [ "$T1$T2" = 00 ] && [ "$H1$H2" = 11 ] && [ -z "$(leftover)" ] \
   && ok "3b a listed path with a part longer than the filesystem allows (a directory part, the file name): a missing file, exit 2, no traceback" \
   || { bad "3b over-long path part rc=$R1/$R2 tracebacks=$T1$T2 not-found=$H1$H2"; tail -2 "$T/out.txt"; }
 
@@ -370,7 +372,7 @@ run 'echo y >> a.py; printf "int t = f(1, 2);\n" >> f.c; mkdir -p bld && : > bld
 [ -n "$MR" ] || { echo "setup failed: no run for the generated-mode check"; tail -5 "$T/out.txt"; exit 1; }
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && ! has Traceback && has "MUTATION $MR: 2 mutants (sampled from 2, seed 0)" && ! has "bld/gen.c" \
-  && grep -qx 'int v = 1;' "$R/bld/gen.c" && [ -z "$(ls -A "$T/tmp")" ] \
+  && grep -qx 'int v = 1;' "$R/bld/gen.c" && [ -z "$(leftover)" ] \
   && ok "3b generated mode takes no candidate from a created C/C++ file inside a directory holding CMakeCache.txt (the copy leaves it out)" \
   || { bad "3b generated mode, left-out created file rc=$RC"; tail -3 "$T/out.txt"; }
 
@@ -381,7 +383,7 @@ run 'echo y >> a.py; printf "// g\n" >> f.c'; MR=$(rid)
 [ -n "$MR" ] || { echo "setup failed: no run for the no-candidate check"; tail -5 "$T/out.txt"; exit 1; }
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 GOT=$(mj "$R/.git/concord/$MR/meta.json" '(m["mutation"]["mode"], m["mutation"]["candidates"])')
-[ $RC -eq 0 ] && ! has Traceback && has "MUTATION $MR: no mutable" && [ "$GOT" = "('isolated', 0)" ] && [ -z "$(ls -A "$T/tmp")" ] \
+[ $RC -eq 0 ] && ! has Traceback && has "MUTATION $MR: no mutable" && [ "$GOT" = "('isolated', 0)" ] && [ -z "$(leftover)" ] \
   && ok "3b generated mode whose C/C++ change has nothing to mutate (a comment line): exit 0, meta records an isolated run with 0 candidates" \
   || { bad "3b isolated run without candidates rc=$RC meta=$GOT"; tail -3 "$T/out.txt"; }
 
@@ -391,7 +393,7 @@ run 'echo y >> a.py; mkdir -p bld && : > bld/CMakeCache.txt && printf "int v = 1
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 GOT=$(mj "$R/.git/concord/$MR/meta.json" '(m["mutation"]["mode"], m["mutation"]["candidates"])')
 [ $RC -eq 0 ] && ! has Traceback && has "MUTATION $MR: no mutable" && [ "$GOT" = "('isolated', 0)" ] \
-  && grep -qx 'int v = 1;' "$R/bld/gen.c" && [ -z "$(ls -A "$T/tmp")" ] \
+  && grep -qx 'int v = 1;' "$R/bld/gen.c" && [ -z "$(leftover)" ] \
   && ok "3b a run whose only C/C++ file lies inside a build tree: nothing to mutate, the file untouched, no copy left" \
   || { bad "3b build-tree C file rc=$RC meta=$GOT"; tail -3 "$T/out.txt"; }
 fi
@@ -460,9 +462,9 @@ Acceptance:
 - `true`
 P
 approve PLAN_C.md "$C" || exit 1
-# Like a real executor, the fake one builds after its edit; the touch stands for build files of a test target. make
-# compares mtimes to the second here, so the edit waits one second after the red run's build (a real executor does).
-FAKE_ACTIONS="sleep 1; cp '$T/calc_impl.cpp' src/calc.cpp && cmake --build build -j4 > /dev/null 2>&1; touch build/CMakeFiles/calc_test.dir/flags.make" \
+# Like a real executor, the fake one builds after its edit (the red run built in a grading copy, not here); the touch
+# stands for build files of a test target.
+FAKE_ACTIONS="cp '$T/calc_impl.cpp' src/calc.cpp && cmake -S . -B build -DBUILD_TESTING=ON > /dev/null 2>&1 && cmake --build build -j4 > /dev/null 2>&1; touch build/CMakeFiles/calc_test.dir/flags.make" \
   $DP 1 --plan PLAN_C.md --via qwen --model fake/m --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 CR=$(rid); RUN="$C/.git/concord/$CR"
 [ -n "$CR" ] && [ -f "$RUN/meta.json" ] && [ -x "$C/build/calc_print" ] || { echo "setup failed: C++ run rc=$RC"; tail -5 "$T/out.txt"; exit 1; }
@@ -477,8 +479,8 @@ TMPDIR="$T/tmp" $DP --mutate "$CR" --max 20 --build "cmake -S . -B build -DBUILD
   && ok "3 generated C++ mutants in an isolated copy: one killed, the untested boundary survives, a mutant that does not build is stillborn" \
   || { bad "3 C++ mutate rc=$RC"; head -12 "$T/out.txt"; }
 [ $RC -eq 0 ] && [ "$(sha "$C/src/calc.cpp")" = "$H0" ] && [ "$(mtime "$C/src/calc.cpp")" = "$M0" ] && [ "$(sha "$C/build/calc_print")" = "$B0" ] \
-  && [ -z "$(ls -A "$T/tmp")" ] && ok "3 the live checkout and its build are untouched while another run holds the lock; the copy is removed" \
-  || { bad "3 live checkout touched or copy left"; ls -A "$T/tmp" | head -3; }
+  && [ -z "$(leftover)" ] && ok "3 the live checkout and its build are untouched while another run holds the lock; the copy is removed" \
+  || { bad "3 live checkout touched or copy left"; leftover | head -3; }
 cat > "$T/mutants.json" <<'J'
 [{"id": "M1", "file": "src/calc.cpp", "old": "return 10;", "new": "return 11;", "what": "clamp value off by one"},
  {"id": "M2", "file": "src/calc.cpp", "old": "a + b", "new": "a - b", "what": "ambiguous: the text occurs twice"},
@@ -488,7 +490,7 @@ cat > "$T/mutants.json" <<'J'
 J
 TMPDIR="$T/tmp" $DP --mutate "$CR" --mutants "$T/mutants.json" --build "cmake -S . -B build -DBUILD_TESTING=ON > /dev/null && cmake --build build -j4" --repo "$C" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "killed 3, survived 0, stillborn 1" && grep "^SKIP M2: " "$T/out.txt" | grep -q "occurs 2 times" \
-  && [ "$(sha "$C/src/calc.cpp")" = "$H0" ] && [ -z "$(ls -A "$T/tmp")" ] \
+  && [ "$(sha "$C/src/calc.cpp")" = "$H0" ] && [ -z "$(leftover)" ] \
   && ok "3 listed mutants: killed by the acceptance or by their own structural check, one stillborn, the ambiguous one skipped" \
   || { bad "3 listed mutants rc=$RC"; head -12 "$T/out.txt"; }
 printf '[{"id": "X", "file": "../outside.cpp", "old": "a", "new": "b"}]' > "$T/bad1.json"

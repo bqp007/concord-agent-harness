@@ -11,7 +11,7 @@ mkdir -p "$T/bin" "$T/concord" "$T/home/.claude"
 cp -p "$SRC"/concord.py "$SRC"/wt.py "$SRC"/*.md "$SRC"/*.conf "$T/concord/" && cp -Rp "$SRC/repo-notes" "$T/concord/"
 cat > "$T/bin/qwen" <<'EOF'
 #!/bin/sh
-echo ran >> "$T/qwen_calls"
+echo ran >> "$T/qwen_calls"; pwd -P > "$T/qwen_cwd"
 if [ -n "${FAKE_ACTIONS:-}" ]; then sh -c "$FAKE_ACTIONS"; exit 0; fi
 if [ -n "${FAKE_GARBAGE:-}" ]; then echo "looks fine to me"; exit 0; fi
 printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "a.py", "line": 1, "problem": "fake finding", "fix": "fix it", "repro": {"input": "x", "expected": "2", "actual": "1"}}], "clauses": [], "tests": [{"test": "t", "discriminates": "yes", "why": "adequate"}], "verdict": "FIX"}\nEND-REVIEW-JSON\n'
@@ -341,6 +341,17 @@ $DP --review "$PRID" --via qwen --model fake/m --dry-run --repo "$PR2" > "$T/out
 PDRY=$(sed -n 's/.*prompt [0-9]* chars at \(.*prompt.txt\).*/\1/p' "$T/out.txt" | head -1)
 [ -f "$PDRY" ] && grep -qF "DESIGN-MARK-31" "$PDRY" \
   && ok "the cheap phase review's prompt carries the Design section too" || bad "the Design section is missing from the cheap phase prompt ($PDRY)"
+# the code a phase reviewer reads is a copy of the graded candidate's tree, not the checkout
+printf 'x = 99\n' > "$PR2/a.py"
+$DP --review "$PRID" --packet --repo "$PR2" > "$T/out.txt" 2>&1; PPK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+CT=$(sed -n 's/^REPOSITORY (read-only, candidate [0-9a-f]*): \(.*\)$/\1/p' "$PPK" 2>/dev/null | head -1)
+[ -n "$CT" ] && [ "$(cat "$CT/a.py" 2>/dev/null)" = "$(printf 'x = 1\ny')" ] && [ ! -e "$CT/gone.py" ] && ! grep -qF "Repository root: $PR2" "$PPK" \
+  && ok "the phase packet names a copy of the candidate's tree as the code to read; a checkout edit after the run is not in it" \
+  || { bad "the phase packet's code to read is not the candidate ('$CT')"; grep -n "REPOSITORY\|Repository root" "$PPK" | head -3; }
+rm -f "$T/qwen_cwd"; $DP --review "$PRID" --via qwen --model fake/m --repo "$PR2" > "$T/out.txt" 2>&1
+[ -n "$CT" ] && [ "$(cat "$T/qwen_cwd" 2>/dev/null)" = "$CT" ] \
+  && ok "a cheap phase review runs inside that copy of the candidate's tree" || bad "the cheap phase review ran in '$(cat "$T/qwen_cwd" 2>/dev/null)', not the copy '$CT'"
+printf 'x = 1\ny\n' > "$PR2/a.py"
 
 # a phase run that started on a dirty file (every phase retry does): its packet diff is git's text, bytes escaped, a NUL file named only
 PR3="$T/pdirty"; mkdir -p "$PR3" && ( cd "$PR3" && git init -q -b main && git config user.email t@t && git config user.name t

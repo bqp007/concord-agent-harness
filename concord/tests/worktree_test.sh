@@ -247,10 +247,10 @@ echo "== join: a fork graded by a PASS run"
 # a fork with no Concord run joins as before and says no run graded it
 grep -qF "no Concord run graded this fork" "$T/j1.txt" && ok "a fork with no runs joins as before and prints that no run graded it" || { bad "no-run join message"; cat "$T/j1.txt"; }
 $WT new TJ --repo "$M" --no-fetch --base main > /dev/null 2>&1; WJ="$M/.claude/worktrees/TJ"; plan "$WJ"; mv "$WJ/PLAN_T.md" "$WJ/PLAN_J.md"; A0="$(cat "$WJ/a.py")"
-# gradefork N ACTIONS: fork N of TJ, one run of PLAN_J.md phase 1 in it with PASS recorded (ACTIONS is the fake executor); sets FJ and RJ
-gradefork(){ $WT fork TJ "$1" --repo "$WJ" > /dev/null 2>&1; FJ="$M/.claude/worktrees/TJ-p$1"
-  approve PLAN_J.md "$FJ" || exit 1
-  FAKE_ACTIONS="$2" $DP 1 --plan PLAN_J.md --via qwen --model fake/m --no-baseline --repo "$FJ" > "$T/gf.txt" 2>&1
+# gradefork N ACTIONS [PLAN]: fork N of TJ, one run of PLAN (default PLAN_J.md) phase 1 in it with PASS recorded (ACTIONS is the fake executor); sets FJ and RJ
+gradefork(){ local gp=${3:-PLAN_J.md}; $WT fork TJ "$1" --repo "$WJ" > /dev/null 2>&1; FJ="$M/.claude/worktrees/TJ-p$1"
+  approve "$gp" "$FJ" || exit 1
+  FAKE_ACTIONS="$2" $DP 1 --plan "$gp" --via qwen --model fake/m --no-baseline --repo "$FJ" > "$T/gf.txt" 2>&1
   RJ=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/gf.txt" | head -1)
   $DP --verdict "$RJ" PASS --repo "$FJ" > "$T/gv.txt" 2>&1 || { echo "setup failed: PASS of $RJ"; cat "$T/gf.txt" "$T/gv.txt"; exit 1; }; }
 gradefork 1 'echo y >> a.py'
@@ -277,6 +277,35 @@ $WT join TJ 2 --repo "$WJ" --ungraded > "$T/ju.txt" 2>&1; RU=$?
 [ $RU -eq 0 ] && [ -f "$WJ/extra.py" ] && [ ! -e "$FJ" ] && grep -qF "ungraded" "$T/ju.txt" \
   && ok "join --ungraded joins the changed fork and prints that it did" || { bad "--ungraded join rc=$RU"; cat "$T/ju.txt"; }
 rm -f "$WJ/extra.py"; git -C "$WJ" checkout -q -- a.py
+# a fork with an open run is not joined, with or without --ungraded
+$WT fork TJ 3 --repo "$WJ" > /dev/null 2>&1; FJ="$M/.claude/worktrees/TJ-p3"; approve PLAN_J.md "$FJ" || exit 1
+$DP --begin 1 --label implementer --plan PLAN_J.md --repo "$FJ" > "$T/jb.txt" 2>&1
+OB=$(sed -n 's/^BEGIN \([^ ]*\)$/\1/p' "$T/jb.txt" | head -1); echo y >> "$FJ/a.py"
+$WT join TJ 3 --repo "$WJ" > "$T/jo.txt" 2>&1; RO=$?; $WT join TJ 3 --repo "$WJ" --ungraded > "$T/jo2.txt" 2>&1; RO2=$?
+[ -n "$OB" ] && [ $RO -ne 0 ] && [ $RO2 -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" = "$A0" ] && grep -qF "$OB" "$T/jo.txt" && grep -qF "$OB" "$T/jo2.txt" \
+  && ok "a fork with an open run: join refuses, with or without --ungraded, nothing applied, the fork kept, the run named" \
+  || { bad "open-run join rc=$RO/$RO2 run=$OB"; cat "$T/jb.txt" "$T/jo.txt" "$T/jo2.txt"; }
+$DP --abort "$OB" --repo "$FJ" > /dev/null 2>&1; git -C "$FJ" checkout -q -- a.py; $WT join TJ 3 --repo "$WJ" --ungraded > /dev/null 2>&1
+# the patch comes from the graded candidate: cache output beside it in the fork (left out of the graded tree) stays out
+gradefork 4 'echo y >> a.py'; mkdir -p "$FJ/__pycache__" && printf 'pyc' > "$FJ/__pycache__/m.cpython-312.pyc"
+$WT join TJ 4 --repo "$WJ" > "$T/jc.txt" 2>&1; RC4=$?
+[ $RC4 -eq 0 ] && [ ! -e "$FJ" ] && [ "$(cat "$WJ/a.py")" != "$A0" ] && [ ! -e "$WJ/__pycache__/m.cpython-312.pyc" ] \
+  && ok "a graded join applies the candidate's change only: cache output left in the fork is not carried" \
+  || { bad "graded join carried cache output rc=$RC4"; cat "$T/jc.txt"; }
+rm -rf "$WJ/__pycache__"; git -C "$WJ" checkout -q -- a.py
+# the destination changed after the fork: the joined result is graded before the fork goes
+printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py && [ ! -e broken.flag ]`\n' > "$WJ/PLAN_K.md"
+gradefork 5 'echo y >> a.py' PLAN_K.md; printf 'b\n' > "$WJ/broken.flag"
+$WT join TJ 5 --repo "$WJ" > "$T/jd.txt" 2>&1; RD=$?
+[ $RD -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" = "$A0" ] && grep -qF "nothing was applied" "$T/jd.txt" && grep -qF "expected green" "$T/jd.txt" \
+  && ok "the destination changed after the fork and the joined result fails the run's acceptance: join refuses, nothing applied, the fork kept" \
+  || { bad "join onto a breaking destination rc=$RD"; cat "$T/jd.txt"; }
+rm -f "$WJ/broken.flag"; printf 'o\n' > "$WJ/other.txt"
+$WT join TJ 5 --repo "$WJ" > "$T/jd2.txt" 2>&1; RD2=$?
+[ $RD2 -eq 0 ] && [ ! -e "$FJ" ] && [ "$(cat "$WJ/a.py")" != "$A0" ] && [ -f "$WJ/other.txt" ] && grep -qF "joined result" "$T/jd2.txt" \
+  && ok "the destination changed elsewhere: the joined result passes the run's acceptance, join applies it and says so" \
+  || { bad "join onto a changed destination rc=$RD2"; cat "$T/jd2.txt"; }
+rm -f "$WJ/other.txt" "$WJ/PLAN_K.md"; git -C "$WJ" checkout -q -- a.py
 
 echo "== join: committed work, the checkout it runs in, staged and ignored work of the fork"
 git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1
