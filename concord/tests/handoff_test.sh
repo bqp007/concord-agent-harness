@@ -82,7 +82,7 @@ echo "== 2 FOUND: lines flow to later tasks of the plan"
 FAKE_ACTIONS='echo "# qty" >> a.py; printf "STATUS: DONE\nFOUND: a.py:8 marker-found-fact\n"' \
   $DP 1 --plan PLAN_T.md --via qwen --model fake/m --repo "$R" > "$T/out.txt" 2>&1
 RID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
-NF="$RUNS/notes/PLAN_T.md"
+NF="$RUNS/notes/$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(("%s::PLAN_T.md" % open(sys.argv[1]).read().strip()).encode()).hexdigest()[:8])' "$R/.git/concord-id")-PLAN_T.md"
 [ -n "$RID" ] && [ "$(grep -c 'marker-found-fact' "$NF" 2>/dev/null)" = 1 ] \
   && ok "2 the executor's FOUND: line lands once in the plan's notes file" || { bad "2 notes file (run $RID)"; tail -3 "$T/out.txt"; }
 dry > "$T/p2.txt"
@@ -112,16 +112,18 @@ FAKE_ACTIONS='echo "x = 2" > a.py; printf "echo new1\necho new2\n" >> tests/a_te
   $DP 1 --plan PLAN_rep.md --via qwen --model fake/m --no-baseline --repo "$H" > "$T/r1.txt" 2>&1 || { bad "4 setup run"; tail -3 "$T/r1.txt"; }
 RID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/r1.txt" | head -1); [ -n "$RID" ] || { echo "setup failed: the run did not start"; cat "$T/r1.txt"; exit 1; }
 $DP --verdict "$RID" PASS --force --note "owner accepts the failing NEVER check" --repo "$H" > "$T/v.txt" 2>&1 || { echo "setup failed: forced PASS"; cat "$T/v.txt"; exit 1; }
+TID8=$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(("%s::PLAN_rep.md" % open(sys.argv[1]).read().strip()).encode()).hexdigest()[:8])' "$H/.git/concord-id")
 mkdir -p "$H/.git/concord/ledger"
 python3 -I -c 'import json, sys
 f = lambda i, sev, st, text: dict(id=f"F{i}", severity=sev, path="a.py", line=1, line_end=1, problem=text, fix="", repro={},
                                   reviewer="opus55", run="r1", at="2026-11-15T00:00:00", status=st)
 json.dump(dict(key="PLAN_rep", next_finding=3, next_decision=1, decisions=[], findings=[
-          f(1, "MEDIUM", "open", "medium-thing"), f(2, "NOTE", "note", "note-thing")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/PLAN_rep.json"
+          f(1, "MEDIUM", "open", "medium-thing"), f(2, "NOTE", "note", "note-thing")]), open(sys.argv[1], "w"))' "$H/.git/concord/ledger/PLAN_rep-$TID8.json"
+perl -pi -e 's/marker-behavior-row/marker-live-edit/' "$H/PLAN_rep.md"      # an unapproved edit of the live Test plan
 $DP --report --plan PLAN_rep.md --repo "$H" > "$T/rep.txt" 2>&1; RC=$?
 REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1)
-[ $RC -eq 0 ] && [ "$REP" = "$H/.git/concord/reports/REPORT_rep.md" ] && [ -f "$REP" ] \
-  && ok "4.1 --report writes REPORT_<ticket>.md in the runs root and prints its path" || { bad "4.1 rc=$RC path=$REP"; tail -3 "$T/rep.txt"; }
+[ $RC -eq 0 ] && [ "$REP" = "$H/.git/concord/reports/REPORT_rep-$TID8.md" ] && [ -f "$REP" ] \
+  && ok "4.1 --report writes REPORT_<ticket>-<ticket id>.md in the runs root and prints its path" || { bad "4.1 rc=$RC path=$REP"; tail -3 "$T/rep.txt"; }
 [ -f "$REP" ] || REP="$T/none"
 prev=0; order=ok
 for h in "# Test report: rep" "## Overrides" "## Phases" "## Test plan" "## Test lines" "## Review" "## Open items for the DAT" "## Time"; do
@@ -133,7 +135,8 @@ ov=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP")
 echo "$ov" | grep -qF "grep -q NEVER a.py" && echo "$ov" | grep -qF "owner accepts the failing NEVER check" \
   && ok "4.2b Overrides: the forced PASS, its failed command beside the owner's reason" || { bad "4.2b overrides"; echo "$ov"; }
 sec Phases | grep -Eq '^\| 1 \| [^|]+ \| 1 \|' && ok "4.3 phase row: one run of phase 1" || { bad "4.3 phases"; sec Phases; }
-sec "Test plan" | grep -qF "marker-behavior-row" && ok "4.4 the plan's Test plan is copied" || { bad "4.4 test plan"; sec "Test plan"; }
+sec "Test plan" | grep -qF "marker-behavior-row" && ! sec "Test plan" | grep -qF "marker-live-edit" \
+  && ok "4.4 the Test plan is the approved revision's, not an unapproved edit of the plan on disk" || { bad "4.4 test plan"; sec "Test plan"; }
 sec "Test lines" | grep -qF "| tests/a_test.sh | 2 | 0 |" && ! sec "Test lines" | grep -qF "| a.py |" \
   && sec "Test lines" | grep -qF "Total: +2 -0 lines; plan Tests: +1/−0 lines, net ≤ +1" \
   && ok "4.5 test lines: test files only, the actual total beside the plan's Tests: estimate, which fails nothing though the actual is above it" || { bad "4.5 test lines"; sec "Test lines"; }
@@ -144,9 +147,9 @@ echo "$O" | grep -qF "medium-thing" && echo "$O" | grep -qF "note-thing" \
   && ok "4.7 open items: open and note findings, open questions" || { bad "4.7 open items"; echo "$O"; }
 grep -Eq '^Elapsed [0-9]+ min against ETA 30 min \(plan\)' "$REP" && grep -q '^Concurrency: 1.00' "$REP" \
   && ok "4.8 time against the plan's ETA; concurrency of one run" || { bad "4.8 time"; sec Time; }
-python3 -I -c 'import json,sys; p,r=sys.argv[1:3]; d=json.load(open(p)); assert d[r].get("reported"), d[r]' "$H/.git/concord/drift.json" "$H" 2>/dev/null \
+python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert [t for t in d["tickets"].values() if t["checkout"] == sys.argv[2]][0].get("reported")' "$H/.git/concord/drift.json" "$H" 2>/dev/null \
   && $DP --drift --plan PLAN_rep.md --repo "$H" 2>&1 | grep -q "DRIFT OFF" && ok "4.9 the report stops the drift clock" || bad "4.9 drift still on"
-python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["estimates"]={"PLAN_rep.md": 12}; json.dump(d,open(p,"w"))' "$H/.git/concord/drift.json"
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [t for t in d["tickets"].values() if t["checkout"] == sys.argv[2]][0]["estimate"] = 12; json.dump(d,open(p,"w"))' "$H/.git/concord/drift.json" "$H"
 $DP --report --plan PLAN_rep.md --repo "$H" > /dev/null 2>&1
 grep -Eq '^Elapsed [0-9]+ min against ETA 12 min \(computed\)' "$REP" && ok "4.10 a stored estimate is the ETA the report uses" || { bad "4.10"; grep '^Elapsed' "$REP"; }
 git -C "$H" commit -qam pr && P7=$(git -C "$H" rev-parse HEAD) && git -C "$H" checkout -qb other HEAD~1 && echo s > "$H/s.txt" && git -C "$H" add s.txt \

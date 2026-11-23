@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -508,6 +509,26 @@ def marked_links(dirpath):
     return ours, moved
 
 
+def checkout_id(dirpath):
+    """The checkout's `concord-id` (the ticket identity concord.py keeps in the git folder), found or created the way
+    concord.py does it: a fork an older wt.py made has none and takes its origin's, so nothing is written into it;
+    os.link is an exclusive create, and a concurrent creator's file wins."""
+    path = Path(git(dirpath, "rev-parse", "--path-format=absolute", "--git-dir")) / "concord-id"
+    origin = fork_record(dirpath).get("origin")
+    if not path.is_file() and origin and Path(origin).is_dir():
+        return checkout_id(origin)
+    if not path.is_file():
+        tmp = path.with_name(f"concord-id.{os.getpid()}")
+        tmp.write_text(secrets.token_hex(8) + "\n")
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+        finally:
+            tmp.unlink()
+    return path.read_text().strip()
+
+
 def cmd_fork(args):
     repo = main_checkout(args.repo or os.getcwd())
     conf = load_conf()
@@ -547,6 +568,7 @@ def cmd_fork(args):
     head = git(dirpath, "rev-parse", "HEAD").strip()
     branch = git(dirpath, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip() or "(detached)"
     (gitdir / COPIES).write_text("".join(f"{copy_stamp(wt / name)} {name}\n" for name in plans))
+    (gitdir / "concord-id").write_text(checkout_id(dirpath) + "\n")
     (gitdir / FORK).write_text(f"snapshot {sha}\norigin {dirpath.resolve()}\nbranch {branch}\nhead {head}\n")
     exclude_add(repo, [".claude/worktrees/"] + link_patterns(repo, made))
     print(f"{wt}")

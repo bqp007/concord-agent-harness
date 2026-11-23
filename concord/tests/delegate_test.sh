@@ -103,7 +103,7 @@ cp -p "$SRC/CONTRACT.md" "$T/concord/CONTRACT.md"
 newrepo; mkdir -p "$R/data" "$R/.claude" && printf 'd\n' > "$R/data/old.csv" && echo "data/" >> "$R/.git/info/exclude"
 printf -- '---\nname: t\nenabled: true\nevent: bash\npattern: never-matches-xyz\n---\nx\n' > "$R/.claude/hookify.t.local.md"
 $WT new T1 --repo "$R" --no-fetch --base main --link data > "$T/n.txt" 2>&1 || { bad "wt.py new failed"; cat "$T/n.txt"; }
-W="$R/.claude/worktrees/T1"; cp "$R/PLAN_T.md" "$W/"
+W="$R/.claude/worktrees/T1"; cp "$R/PLAN_T.md" "$W/"; approve PLAN_T.md "$W" || exit 1       # a worktree is its own ticket
 run 'echo y >> a.py' "$W"
 ! has "OUTSIDE CHECKOUT CHANGED" && line "changed in scope:" "a.py" && ok "clean worktree run has no OUTSIDE CHECKOUT CHANGED line" \
   || { bad "worktree clean run: $(grep -e '^OUTSIDE' -e '^status' "$T/out.txt")"; }
@@ -250,7 +250,7 @@ ph(){ printf '\n## Phase %s - p%s\nExecutor: %s\n%b\n' "$1" "$1" "$2" "$3"; }
   ph 5 deepseek-flash 'Size: ~600 lines\nAfter: 3 (shares b.py)\nFiles: b.py'; ph 6 deepseek-flash 'Files: d.py'
   ph 7 glm-flash 'Size: ~180 lines\nFiles: e.py'; } > "$R/PLAN_E.md"
 $DP --estimate --plan PLAN_E.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && line "ESTIMATE" "PLAN_E.md" && python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))["estimates"]["PLAN_E.md"]; assert isinstance(v, int) and v > 0' \
+[ $RC -eq 0 ] && line "ESTIMATE" "PLAN_E.md" && python3 -I -c 'import json,sys; v=[t for t in json.load(open(sys.argv[1]))["tickets"].values() if t["plan"] == "PLAN_E.md"][0]["estimate"]; assert isinstance(v, int) and v > 0' \
   "$R/.git/concord/drift.json" 2>/dev/null && ok "E.1 --estimate exits 0, names the plan and stores an integer ETA for the drift gate" || { bad "E.1 rc=$RC"; tail -5 "$T/out.txt"; }
 grep -Eqx "Phase 1 planner [0-9]+ min ──> Phase 2 deepseek-flash [0-9]+ min ──> Phase 4 deepseek-flash [0-9]+ min" "$T/out.txt" \
   && grep -Eqx "Phase 3 deepseek-flash [0-9]+ min ──> Phase 5 deepseek-flash [0-9]+ min" "$T/out.txt" \

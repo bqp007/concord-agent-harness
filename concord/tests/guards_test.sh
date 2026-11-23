@@ -32,6 +32,12 @@ bid(){ sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
 # run PHASE PLAN [args]: one fake executor run that appends to a.py; output in out.txt
 run(){ local ph=$1 pl=$2; shift 2
   FAKE_ACTIONS="echo '# r' >> a.py" $DP "$ph" --plan "$pl" --via qwen --model fake/m --no-baseline --repo "$R" "$@" > "$T/out.txt" 2>&1; }
+# dedit CHECKOUT CODE: run CODE (python; d = drift.json, e = the entry of the one ticket of that checkout) and save drift.json
+dedit(){ python3 -I -c 'import json,sys,time; p,c,code=sys.argv[1:4]; d=json.load(open(p)); e=next(t for t in d["tickets"].values() if t["checkout"]==c); exec(code); json.dump(d,open(p,"w"))' "$1/.git/concord/drift.json" "$1" "$2"; }
+# dget CHECKOUT EXPR: print EXPR (python; d, e as in dedit) from drift.json
+dget(){ python3 -I -c 'import json,sys; p,c,code=sys.argv[1:4]; d=json.load(open(p)); e=next(t for t in d["tickets"].values() if t["checkout"]==c); print(eval(code))' "$1/.git/concord/drift.json" "$1" "$2"; }
+# tid8 CHECKOUT PLAN: the first 8 characters of the plan's ticket id in that checkout
+tid8(){ python3 -I -c 'import hashlib,sys; print(hashlib.sha256(("%s::%s" % (open(sys.argv[1]).read().strip(), sys.argv[2])).encode()).hexdigest()[:8])' "$(git -C "$1" rev-parse --path-format=absolute --git-dir)/concord-id" "$2"; }
 printf 'REVIEW-JSON\n{"findings": [], "clauses": [], "tests": [], "verdict": "CLEAN"}\nEND-REVIEW-JSON\n' > "$T/clean.txt"
 phase(){ printf '## Phase %s - p%s\nExecutor: deepseek-flash\n%bFiles: %s\nAcceptance:\n- `%s`\n' "$1" "$1" "$2" "${4:-a.py}" "$3"; }
 mkdir -p "$R" && ( cd "$R" && git init -q -b main && git config user.email t@t && git config user.name t
@@ -129,6 +135,70 @@ mkv v9; approve PLAN_V.md "$V" || exit 1; vrun; RC=$?; [ $RC -eq 0 ] && [ -n "$(
 perl -pi -e 's/grep -q 2 a.py/grep -q 5 a.py/' "$V/PLAN_V.md"; vrun; RC=$?
 [ $RC -eq 11 ] && ok "editing Phase 1's acceptance after the APPROVE is refused (exit 11)" || bad "acceptance edit after APPROVE: rc=$RC"
 
+echo "== a plan read approves one plan; approved revisions bind a run (3.1.0)"
+# A verdict quoting another plan's read is refused: the approval must be of this plan's own text.
+mkv va; ( cd "$V" && sed 's/ - p1/ - other/' PLAN_V.md > PLAN_W.md )
+$DP --lint 1 --plan PLAN_V.md --repo "$V" > /dev/null 2>&1; $DP --lint 1 --plan PLAN_W.md --repo "$V" > /dev/null 2>&1
+HV=$(vhash "$V/PLAN_V.md"); HW=$(vhash "$V/PLAN_W.md")
+vverdict "$HW"; RC=$?; has "$HW" && has "$HV" && BOTH=1 || BOTH=0; vrun; RC2=$?
+[ $RC -ne 0 ] && [ $BOTH -eq 1 ] && [ $RC2 -eq 11 ] && ok "a verdict quoting another plan's read is refused, naming both hashes, and opens nothing (a run exits 11)" \
+  || bad "other plan's read: verdict rc=$RC (both hashes named: $BOTH), then run rc=$RC2"
+# Edits outside the approval keep running, and the template's own Handoff heading is outside it.
+HO=$(grep -m1 '^## Handoff' "$T/concord/PLAN_TEMPLATE.md")
+mkv vd "\n$HO\nnotes marker-h\n\n## Passes\nPhase 1 p 1 min\n"
+approve PLAN_V.md "$V" || exit 1; vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort
+perl -pi -e 's/marker-h/changed words/; s/Phase 1 p 1 min/Phase 1 p 9 min/; s/Q1 none/Q1 settled/' "$V/PLAN_V.md"; vbegin 1; RC2=$?; [ $RC2 -eq 0 ] && vabort
+[ $RC -eq 0 ] && [ $RC2 -eq 0 ] && ok "after the APPROVE, edits of the template's Handoff prose, of Passes and of Open questions still open --begin" \
+  || bad "edits outside the approval: rc=$RC then $RC2 (template heading: $HO)"
+# A run records the revision it ran under; its snapshot is that revision's text, not the plan on disk.
+mkv vb "\n## Passes\nPhase 1 p 1 min\n"; approve PLAN_V.md "$V" || exit 1; HV=$(vhash "$V/PLAN_V.md")
+perl -pi -e 's/Phase 1 p 1 min/Phase 1 p 1 min marker-passes-after/' "$V/PLAN_V.md"; vrun; RC=$?; RID=$(rid); RD="$V/.git/concord/$RID"
+python3 -I -c '
+import json, sys
+rd, h, t = sys.argv[1:4]
+for name in ("state", "meta"):
+    d = json.load(open(f"{rd}/{name}.json"))
+    assert d.get("revision") == 1 and d.get("revision_hash") == h and str(d.get("ticket")).startswith(t), (name, d.get("ticket"), d.get("revision"), d.get("revision_hash"))' \
+  "$RD" "$HV" "$(tid8 "$V" PLAN_V.md)" && cmp -s "$RD/plan.snapshot.md" "$V/.git/concord/plan-reads/$HV.md" && ! grep -q marker-passes-after "$RD/plan.snapshot.md" \
+  && ok "a run's state and meta carry the ticket, revision number and revision hash; plan.snapshot.md is the revision text" \
+  || bad "run record of the revision: rc=$RC"
+# Drift reads Size from the approved revision: an edit of the live plan moves no limit.
+mkv vc; approve PLAN_V.md "$V" || exit 1; vrun
+perl -pi -e 's/Size: ~4 lines/Size: ~400 lines/' "$V/PLAN_V.md"; $DP --drift --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1
+has "size 0/4 lines" && ok "an unapproved live edit of Size does not change drift's limit" || { bad "drift limit from the live plan"; tail -2 "$T/out.txt"; }
+# A drift.json of 3.0.5 (verdicts only, plus the checkout's own entry) gives the ticket revision 1 and its clock, once.
+mkv ve; $DP --lint 1 --plan PLAN_V.md --repo "$V" > /dev/null 2>&1; HV=$(vhash "$V/PLAN_V.md")
+python3 -I -c '
+import json, sys, time
+p, h, v, base = sys.argv[1:5]
+json.dump({"verdicts": {h: time.time()}, "estimates": {"PLAN_V.md": 42}, v: {"plan": "PLAN_V.md", "base": base, "elapsed": 300.0, "last": time.time(), "pre": {}}}, open(p, "w"))' \
+  "$V/.git/concord/drift.json" "$HV" "$V" "$(git -C "$V" rev-parse HEAD)"
+vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort; vbegin 1; RC2=$?; [ $RC2 -eq 0 ] && vabort
+[ $RC -eq 0 ] && [ $RC2 -eq 0 ] && [ "$(dget "$V" '[(r["n"], r["hash"]) for r in e["revisions"]]')" = "[(1, '$HV')]" ] \
+  && [ "$(dget "$V" 'e["elapsed"] >= 300 and "base" in e and e.get("estimate") == 42 and str(d.get(sys.argv[2])) == "None"' "$V")" = True ] \
+  && ok "a 3.0.5 drift.json (verdicts and a path-keyed entry) migrates: the verdict is revision 1 once, the entry's clock and the plan's estimate move into the ticket" \
+  || bad "3.0.5 migration: --begin rc=$RC then $RC2: $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])))' "$V/.git/concord/drift.json")"
+# The 3.0.5 list approved text repo-wide: only the checkout that kept a 3.0.x entry for the plan takes its verdict.
+git -C "$V" worktree add -q --detach "$T/ve-sib" > /dev/null 2>&1; cp "$V/PLAN_V.md" "$T/ve-sib/"
+$DP --begin 1 --label implementer --plan PLAN_V.md --repo "$T/ve-sib" > "$T/out.txt" 2>&1; RC=$?; [ $RC -eq 0 ] && $DP --abort last --repo "$T/ve-sib" > /dev/null 2>&1
+[ $RC -eq 11 ] && ok "a 3.0.5 verdict does not approve a sibling worktree holding the same text: --begin there exits 11" || bad "3.0.5 verdict leaked to a sibling worktree: rc=$RC"
+git -C "$V" worktree remove --force "$T/ve-sib" > /dev/null 2>&1
+# A plan put back to an earlier approved text runs under that revision, and drift reads that revision, not the newest.
+mkv vf; approve PLAN_V.md "$V" || exit 1
+perl -pi -e 's/^Files: a.py$/Files: a.py, b.py/' "$V/PLAN_V.md"; approve PLAN_V.md "$V" || exit 1
+perl -pi -e 's/^Files: a.py, b.py$/Files: a.py/' "$V/PLAN_V.md"; vrun; RC=$?
+printf 'y = 2\n' > "$V/b.py"; $DP --drift --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1
+[ $RC -eq 0 ] && has "changed outside Files: b.py" && ok "a plan put back to an earlier approved revision runs under it, and drift reads that revision's Files" \
+  || { bad "reverted plan: run rc=$RC; drift read another revision"; tail -2 "$T/out.txt"; }
+# The drift hook ticks each ticket of a checkout on its own: a ticket whose plan file is gone stops no other.
+mkv vg; ( cd "$V" && sed 's/ - p1/ - other/; s/^Files: a.py$/Files: z.py/' PLAN_V.md > PLAN_Z.md && git add PLAN_V.md PLAN_Z.md && git commit -qm plans )
+approve PLAN_V.md "$V" || exit 1; approve PLAN_Z.md "$V" || exit 1
+vrun; FAKE_ACTIONS=true $DP 1 --plan PLAN_Z.md --via qwen --model fake/m --no-baseline --repo "$V" > /dev/null 2>&1
+git -C "$V" rm -q PLAN_Z.md; printf '# 1\n# 2\n# 3\n# 4\n# 5\n' >> "$V/a.py"
+printf '{"cwd": "%s"}' "$V" | $DP --drift-hook > "$T/out.txt" 2>&1
+has '"hookEventName": "PostToolUse"' && has "PLAN_V.md" && ok "the drift hook still reports a ticket's level change when another ticket's plan file is gone" \
+  || { bad "the drift hook stopped at a missing plan file"; cat "$T/out.txt"; }
+
 echo "== an open --begin run holds its files"
 $DP --begin 1 --label implementer --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?; B1=$(bid)
 [ $RC -eq 0 ] && [ -n "$B1" ] || { echo "setup failed: --begin"; cat "$T/out.txt"; exit 1; }
@@ -180,7 +250,7 @@ D="$T/d"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && git config user.e
 drun(){ FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$D" "$@" > "$T/out.txt" 2>&1; }
 drift(){ $DP --drift --plan PLAN_D.md --repo "$D" > "$T/out.txt" 2>&1; }
 hook(){ printf '{"cwd": "%s"}' "$D" | $DP --drift-hook > "$T/out.txt" 2>&1; }
-clock(){ python3 -I -c 'import json,sys,time; p,r=sys.argv[1:3]; d=json.load(open(p)); d[r].update(elapsed=float(sys.argv[3]), last=time.time()-float(sys.argv[4])); json.dump(d,open(p,"w"))' "${3:-$D}/.git/concord/drift.json" "${3:-$D}" "$1" "$2"; }
+clock(){ dedit "${3:-$D}" "e.update(elapsed=float($1), last=time.time()-float($2))"; }
 $DP --lint 1 --plan PLAN_D.md --repo "$D" > /dev/null 2>&1
 printf 'VERDICT: REVISE\nPLAN-HASH: %s\n' "$(vhash "$D/PLAN_D.md")" > "$T/v.txt"; $DP --plan-verdict "$T/v.txt" --plan PLAN_D.md --repo "$D" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 1 ] && has "nothing recorded" && ok "--plan-verdict REVISE records nothing" || bad "REVISE rc=$RC"
@@ -200,20 +270,20 @@ drun --user-approved "go on"; RC=$?; drift
 grep -rqs "user approved: go on" "$D/.git/concord" && ok "the run records the owner's words that passed a gate" || bad "approval note"
 printf 'y = 1\n' > "$D/b.py"; drun; RC=$?
 [ $RC -eq 10 ] && has "changed outside Files: b.py" && ok "a changed file outside Files blocks (exit 10)" || { bad "scope rc=$RC"; tail -2 "$T/out.txt"; }
-git -C "$D" worktree add -q "$T/df" > /dev/null 2>&1; cp "$D/PLAN_D.md" "$T/df/"
-FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$T/df" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "a run in a fork (another worktree) is gated by the ticket checkout's drift (exit 10)" \
+python3 "$T/concord/wt.py" fork TD 1 --repo "$D" > /dev/null 2>&1; DF="$D/.claude/worktrees/TD-p1"
+FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$DF" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "a run in a wt.py fork is gated by the ticket checkout's drift (exit 10)" \
   || { bad "fork rc=$RC"; tail -2 "$T/out.txt"; }
 python3 -I - "$D/.git/concord" "$D" "$T/held" <<'EOF' &
 import fcntl, json, sys, time
 root, key, flag = sys.argv[1:4]
 with open(root + "/drift.lock", "a") as lock:      # another writer (an approval) holds the lock for 1.5 s
     fcntl.flock(lock, fcntl.LOCK_EX); open(flag, "w").close(); time.sleep(1.5)
-    d = json.load(open(root + "/drift.json")); d[key]["ok"] = {"time": 99.0, "files": ["held.py"]}
+    d = json.load(open(root + "/drift.json")); next(t for t in d["tickets"].values() if t["checkout"] == key)["ok"] = {"time": 99.0, "files": ["held.py"]}
     json.dump(d, open(root + "/drift.json", "w"))
 EOF
 HP=$!; for i in $(seq 100); do [ -e "$T/held" ] && break; sleep 0.05; done; hook; wait $HP
-python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))[sys.argv[2]].get("ok", {}).get("files") != ["held.py"])' "$D/.git/concord/drift.json" "$D" \
+[ "$(dget "$D" 'e.get("ok", {}).get("files")')" = "['held.py']" ] \
   && ok "a hook tick during another writer's drift.lock keeps that writer's approval" || { bad "approval lost to a hook tick"; cat "$T/out.txt"; }
 $DP --lint 1 --via qwen --model fake/m --plan PLAN_G.md --repo "$R" > "$T/out.txt" 2>&1
 has 'PLAN LINT: no `Size:` line' && has 'PLAN LINT: no `ETA:` line' && ok "--lint flags a plan with no Size: or ETA:" || { bad "lint"; tail -3 "$T/out.txt"; }
@@ -233,7 +303,7 @@ $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "size 1/1200 lines" && has "every changed file is in Files" \
   && ok "a merge of upstream work moves the drift base: its files and lines do not count" || { bad "upstream merge"; tail -2 "$T/out.txt"; }
 mkdir -p "$E/.git/concord/run-x"; clock 0 1500 "$E"
-python3 -I -c 'import json,sys,time; d=sys.argv[1]; json.dump({"plan": "PLAN_E.md", "started": time.time() - 1500, "mode": "edit", "pid": int(sys.argv[2])}, open(d + "/state.json", "w")); json.dump({"seconds": 1500}, open(d + "/meta.json", "w"))' "$E/.git/concord/run-x" $$
+python3 -I -c 'import json,sys,time; d=sys.argv[1]; json.dump({"plan": "PLAN_E.md", "repo": sys.argv[3], "started": time.time() - 1500, "mode": "edit", "pid": int(sys.argv[2])}, open(d + "/state.json", "w")); json.dump({"seconds": 1500}, open(d + "/meta.json", "w"))' "$E/.git/concord/run-x" $$ "$E"      # a run of 3.0.x: no ticket in its state
 $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
 has "time 25/10 min" && ok "a long gap counts where a run of the plan covered it" || { bad "run time"; tail -2 "$T/out.txt"; }
 rm "$E/.git/concord/run-x/meta.json"; clock 0 1200 "$E"; $DP --drift --plan PLAN_E.md --repo "$E" > "$T/out.txt" 2>&1
@@ -249,21 +319,12 @@ F="$T/f"; mkdir -p "$F" && ( cd "$F" && git init -q -b main && git config user.e
   printf 'x = 1\n' > a.py; git add -A && git commit -qm init
   { printf '# Plan\nTier: M\nSize: ~40 lines\nETA: 10 min\n\n'; phase 1 '' 'true'; } > PLAN_F.md ) || { echo "setup failed"; exit 1; }
 approve PLAN_F.md "$F" || exit 1
-git -C "$F" worktree add -q "$T/ff" > /dev/null 2>&1; cp "$F/PLAN_F.md" "$T/ff/"
-FAKE_ACTIONS=true $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$T/ff" > "$T/out.txt" 2>&1; [ -n "$(rid)" ] || { echo "setup failed: run in the fork"; cat "$T/out.txt"; exit 1; }
-printf 'y = 2\n' >> "$F/a.py"; git -C "$F" worktree remove --force "$T/ff"      # wt.py join: patch applied, fork removed
+python3 "$T/concord/wt.py" fork TF 1 --repo "$F" > /dev/null 2>&1; FF="$F/.claude/worktrees/TF-p1"
+FAKE_ACTIONS=true $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$FF" > "$T/out.txt" 2>&1; [ -n "$(rid)" ] || { echo "setup failed: run in the fork"; cat "$T/out.txt"; exit 1; }
+printf 'y = 2\n' >> "$F/a.py"; git -C "$F" worktree remove --force "$FF"      # wt.py join: patch applied, fork removed
 $DP --drift --plan PLAN_F.md --repo "$F" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRIFT OK" && has "size 1/40 lines" \
-  && python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(sys.argv[2] not in d or sys.argv[3] in d)' "$F/.git/concord/drift.json" "$F" "$T/ff" \
-  && ok "after a fork is joined and removed, the ticket checkout takes over the fork's drift entry" || { bad "joined fork rc=$RC"; tail -2 "$T/out.txt"; }
-python3 -I -c 'import json,sys; p,f=sys.argv[1:3]; d=json.load(open(p)); d[f+"_gone"]=dict(d[f], elapsed=300.0); d[f]["plan"]="PLAN_A.md"; json.dump(d,open(p,"w"))' "$F/.git/concord/drift.json" "$F"
-$DP --drift --plan PLAN_F.md --repo "$F" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "DRIFT: silent" \
-  && python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))[sys.argv[2]]["plan"] != "PLAN_A.md")' "$F/.git/concord/drift.json" "$F" \
-  && ok "a removed fork's entry never replaces the checkout's own entry for another plan" || { bad "own entry kept rc=$RC"; tail -2 "$T/out.txt"; }
-FAKE_ACTIONS=true $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$F" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1]))[sys.argv[2]]; sys.exit(e["plan"] != "PLAN_F.md" or e["elapsed"] < 300)' "$F/.git/concord/drift.json" "$F" \
-  && ok "a gated run of the fork's plan takes over the removed fork's entry (its time carries over)" || { bad "gated takeover rc=$RC"; tail -2 "$T/out.txt"; }
+[ $RC -eq 0 ] && has "DRIFT OK" && has "size 1/40 lines" && [ "$(dget "$F" 'len(d["tickets"])')" = 1 ] \
+  && ok "a fork's run is drift-measured in its origin's ticket, which stays when the fork is joined and removed" || { bad "joined fork rc=$RC"; tail -2 "$T/out.txt"; }
 
 echo "== drift against the stored --estimate ETA; ## Passes edits keep the APPROVE; --report closes the plan"
 K="$T/k"; mkdir -p "$K" && ( cd "$K" && git init -q -b main && git config user.email t@t && git config user.name t
@@ -275,11 +336,11 @@ krun(){ FAKE_ACTIONS=true $DP 1 --plan PLAN_K.md --via qwen --model fake/m --no-
 printf 'Phase 1 deepseek-flash 9 min\nETA: 29 min\n' >> "$K/PLAN_K.md"; krun; RC=$?
 [ $RC -eq 0 ] && [ -n "$(rid)" ] && ok "an edit of ## Passes (filled by --estimate) keeps the APPROVE" || { bad "passes edit rc=$RC"; tail -2 "$T/out.txt"; }
 KR=$(rid); $DP --verdict "$KR" PASS --repo "$K" > "$T/v.txt" 2>&1 || { echo "setup failed: PASS of the run of PLAN_K (a plan with a run that has no verdict cannot be reported)"; cat "$T/v.txt"; exit 1; }
-python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["estimates"]={"PLAN_K.md": 10}; json.dump(d,open(p,"w"))' "$K/.git/concord/drift.json"
+dedit "$K" 'e["estimate"] = 10'
 clock 960 0 "$K"; $DP --drift --plan PLAN_K.md --repo "$K" > /dev/null 2>&1; $DP --drift --plan PLAN_K.md --repo "$K" > "$T/out.txt" 2>&1
 has "time 16/10 min" && has "DRIFT BLOCK" && ok "drift measures time against the stored estimate, not the plan's ETA: line; the estimate survives a save" \
   || { bad "estimate drift"; tail -2 "$T/out.txt"; }
-el(){ python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["elapsed"])' "$K/.git/concord/drift.json" "$K"; }
+el(){ dget "$K" 'e["elapsed"]'; }
 $DP --report --plan PLAN_K.md --repo "$K" > "$T/rep.txt" 2>&1 || { echo "setup failed: --report"; cat "$T/rep.txt"; exit 1; }
 E0=$(el); krun; RC=$?; vb(){ $DP --begin 1 --label implementer --plan PLAN_K.md --repo "$K" > "$T/out.txt" 2>&1; }; vb; RCB=$?
 $DP --drift --plan PLAN_K.md --repo "$K" > "$T/d.txt" 2>&1; E1=$(el)
@@ -291,7 +352,7 @@ mkv v12; approve PLAN_V.md "$V" || exit 1
 vbegin 1; RC=$?; B=$(bid)
 [ $RC -eq 0 ] && [ -n "$B" ] || { echo "setup failed: --begin of the plan to be reported"; cat "$T/out.txt"; exit 1; }
 printf 'x = 2\n' > "$V/a.py"
-REPV="$V/.git/concord/reports/REPORT_V.md"
+REPV="$V/.git/concord/reports/REPORT_V-$(tid8 "$V" PLAN_V.md).md"
 $DP --report --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && has "$B" && [ ! -e "$REPV" ] && ok "--report while a run of the plan is open is refused (exit 2), names the run and writes no report" \
   || bad "report beside an open run: rc=$RC, report written=$([ -e "$REPV" ] && echo yes || echo no): $(tail -2 "$T/out.txt")"
@@ -305,6 +366,8 @@ rm -f "$REPV"; $DP --report --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; RC
 [ $RC -eq 0 ] && [ -f "$REPV" ] && grep -Eq '^\| 1 \| [^|]+ \| 1 \| PASS \| 1/1 pass \|' "$REPV" \
   && ok "after --end and a verdict --report writes the report with that run's verdict and acceptance result" \
   || bad "report after the verdict: rc=$RC: $(tail -2 "$T/out.txt")"
+[ "$(dget "$V" 'bool(e.get("closed"))')" = True ] && [ "$(dget "$V" '"reports" in d or "verdicts" in d')" = False ] \
+  && ok "the closure is recorded on the plan's ticket; no repo-wide verdicts or reports key is written" || bad "closure record: $(python3 -I -c 'import json,sys; print(list(json.load(open(sys.argv[1]))))' "$V/.git/concord/drift.json")"
 perl -pi -e 's/grep -q 2 a.py/grep -q 3 a.py/' "$V/PLAN_V.md"; vbegin 1; RC=$?; [ $RC -eq 0 ] && vabort
 [ $RC -eq 10 ] && ok "editing the reported plan, then --begin: refused with exit 10 (the plan is closed), not 11" || bad "edited reported plan: --begin rc=$RC"
 
@@ -317,7 +380,7 @@ case "\$*" in *--numstat*) : > "$T/paused"; while [ ! -e "$T/go" ]; do sleep 0.0
 exec "$REALGIT" "\$@"
 G
 chmod +x "$T/gshim/git"; rm -f "$T/paused" "$T/go"
-REPV="$V/.git/concord/reports/REPORT_V.md"
+REPV="$V/.git/concord/reports/REPORT_V-$(tid8 "$V" PLAN_V.md).md"
 PATH="$T/gshim:$PATH" $DP --report --plan PLAN_V.md --repo "$V" > "$T/rep.txt" 2>&1 & PR=$!
 i=0; until [ -e "$T/paused" ] || [ $i -ge 400 ]; do sleep 0.05; i=$((i+1)); done
 [ -e "$T/paused" ] || { echo "setup failed: --report never reached its git diff"; touch "$T/go"; wait $PR; cat "$T/rep.txt"; exit 1; }
@@ -340,7 +403,7 @@ NODRIFT="$T/nodrift"; mkdir -p "$NODRIFT" && ( cd "$NODRIFT" && git init -q -b m
 echo "== --report: a run whose state.json cannot be read is an open run, not a dropped one"
 mkv v14; approve PLAN_V.md "$V" || exit 1
 TORN="$(date +%Y%m%d-%H%M%S)-implementer-p1"; mkdir -p "$V/.git/concord/$TORN"; printf '{"run_id": "%s", "plan": "PLAN_V.md", "sta' "$TORN" > "$V/.git/concord/$TORN/state.json"
-REPV="$V/.git/concord/reports/REPORT_V.md"; $DP --report --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; RC=$?
+REPV="$V/.git/concord/reports/REPORT_V-$(tid8 "$V" PLAN_V.md).md"; $DP --report --plan PLAN_V.md --repo "$V" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && has "$TORN" && [ ! -e "$REPV" ] && ok "--report with a run folder whose state.json is unreadable is refused (exit 2), names the run and writes no report" \
   || bad "report beside an unreadable state.json: rc=$RC, report written=$([ -e "$REPV" ] && echo yes || echo no): $(tail -2 "$T/out.txt")"
 rm -rf "$V/.git/concord/$TORN"

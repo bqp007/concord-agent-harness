@@ -55,6 +55,16 @@ W1="$M/.claude/worktrees/T1"
 $WT new T2 --repo "$M" --no-fetch --base main --link data --link bench > /dev/null 2>&1; W2="$M/.claude/worktrees/T2"
 [ "$(grep -c '^/bench$' "$M/.git/info/exclude")" = 1 ] && ok "exclude patterns added once" || bad "duplicate patterns: $(tr '\n' ' ' < "$M/.git/info/exclude")"
 plan "$W1"; plan "$W2"; plan "$M"; mkdir -p "$T/orig"; plan "$T/orig"; approve PLAN_T.md "$M" || exit 1
+echo "== sibling worktrees holding a plan of the same name are separate tickets"
+# One approval per ticket: the plan text is the same everywhere, so only the ticket tells the checkouts apart.
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$W1" > "$T/s1.txt" 2>&1; RS1=$?; [ $RS1 -eq 0 ] && $DP --abort last --repo "$W1" > /dev/null 2>&1
+approve PLAN_T.md "$W1" || exit 1
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$W2" > "$T/s2.txt" 2>&1; RS2=$?; [ $RS2 -eq 0 ] && $DP --abort last --repo "$W2" > /dev/null 2>&1
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$W1" > "$T/s3.txt" 2>&1; RS3=$?; [ $RS3 -eq 0 ] && $DP --abort last --repo "$W1" > /dev/null 2>&1
+[ $RS1 -eq 11 ] && [ $RS2 -eq 11 ] && [ $RS3 -eq 0 ] \
+  && ok "an approval in the main checkout, then in T1, opens neither the other worktree's same-named plan (exit 11) nor anything but its own" \
+  || { bad "sibling tickets: T1 before its approval rc=$RS1, T2 after T1's approval rc=$RS2, T1 after its own approval rc=$RS3"; tail -2 "$T/s2.txt"; }
+approve PLAN_T.md "$W2" || exit 1
 echo "== parallel runs: T1 and T2 at once, main too"
 # T1 holds its lock until $T/release exists (at most 30 s), so the same-checkout block does not depend on runner speed.
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
@@ -406,7 +416,7 @@ echo "== a closed plan is closed for its ticket checkout and its forks, not for 
 $WT new TCA --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCA="$M/.claude/worktrees/TCA"
 $WT new TCB --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCB="$M/.claude/worktrees/TCB"
 for w in "$WCA" "$WCB"; do plan "$w"; mv "$w/PLAN_T.md" "$w/PLAN_C.md"; done
-approve PLAN_C.md "$WCA" || exit 1
+approve PLAN_C.md "$WCA" || exit 1; approve PLAN_C.md "$WCB" || exit 1       # each ticket has its own approval
 $DP --report --plan PLAN_C.md --repo "$WCA" > "$T/c1.txt" 2>&1 || { echo "setup failed: --report in TCA"; cat "$T/c1.txt"; exit 1; }
 $DP --begin 1 --label implementer --plan PLAN_C.md --repo "$WCB" > "$T/c2.txt" 2>&1; RCB=$?; [ $RCB -eq 0 ] && $DP --abort last --repo "$WCB" > /dev/null 2>&1
 $DP --begin 1 --label implementer --plan PLAN_C.md --repo "$WCA" > "$T/c3.txt" 2>&1; RCA=$?
@@ -426,6 +436,28 @@ $DP --begin 1 --label implementer --plan PLAN_L.md --repo "$WCB" > "$T/c5.txt" 2
   && ok "a closure recorded by 3.0.3 (keyed by the plan alone) still closes the plan: --begin exits 10" \
   || { bad "legacy closure ignored rc=$RCL"; [ $RCL -eq 0 ] && $DP --abort last --repo "$WCB" > /dev/null 2>&1; tail -2 "$T/c5.txt"; }
 git -C "$M" worktree remove --force "$FCA" > /dev/null 2>&1
+echo "== a wt.py fork runs under its origin's approval and records its origin's ticket"
+$WT new TFK --repo "$M" --no-fetch --base main > /dev/null 2>&1; WFK="$M/.claude/worktrees/TFK"
+plan "$WFK"; approve PLAN_T.md "$WFK" || exit 1
+$WT fork TFK 1 --repo "$WFK" > /dev/null 2>&1; FFK="$M/.claude/worktrees/TFK-p1"
+gd(){ git -C "$1" rev-parse --path-format=absolute --git-dir; }
+tid(){ python3 -I -c 'import hashlib,sys; print(hashlib.sha256(("%s::%s" % (open(sys.argv[1]+"/concord-id").read().strip(), sys.argv[2])).encode()).hexdigest()[:16])' "$(gd "$1")" "$2"; }
+stt(){ python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1] + "/.git/concord/" + sys.argv[3] + "/state.json")).get("ticket"))' "$M" x "$(sed -n 's/^BEGIN \(.*\)$/\1/p' "$1" | head -1)"; }
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$FFK" > "$T/k1.txt" 2>&1; RK1=$?; TK1=$(stt "$T/k1.txt"); [ $RK1 -eq 0 ] && $DP --abort last --repo "$FFK" > /dev/null 2>&1
+[ $RK1 -eq 0 ] && [ -f "$(gd "$FFK")/concord-id" ] && cmp -s "$(gd "$FFK")/concord-id" "$(gd "$WFK")/concord-id" && [ "$TK1" = "$(tid "$WFK" PLAN_T.md)" ] \
+  && ok "a fork made by wt.py gets its origin's checkout id, runs under the origin's approval and records the origin's ticket" \
+  || { bad "fork ticket: rc=$RK1 ticket=$TK1 expected=$(tid "$WFK" PLAN_T.md)"; tail -2 "$T/k1.txt"; }
+rm -f "$(gd "$FFK")/concord-id"             # a fork made by an older wt.py has no id file: it follows its .wt-fork origin
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$FFK" > "$T/k2.txt" 2>&1; RK2=$?; TK2=$(stt "$T/k2.txt"); [ $RK2 -eq 0 ] && $DP --abort last --repo "$FFK" > /dev/null 2>&1
+[ $RK2 -eq 0 ] && [ "$TK2" = "$(tid "$WFK" PLAN_T.md)" ] && [ ! -e "$(gd "$FFK")/concord-id" ] \
+  && ok "a fork without an id file follows its .wt-fork origin to the origin's ticket and gets no id of its own" \
+  || { bad "old-style fork: rc=$RK2 ticket=$TK2 id file written=$([ -e "$(gd "$FFK")/concord-id" ] && echo yes || echo no)"; tail -2 "$T/k2.txt"; }
+$WT fork TFK 2 --repo "$FFK" > /dev/null 2>&1; FFK2="$M/.claude/worktrees/TFK-p2"
+cmp -s "$(gd "$FFK2")/concord-id" "$(gd "$WFK")/concord-id" && [ ! -e "$(gd "$FFK")/concord-id" ] \
+  && ok "a fork of an old-style fork gets the ticket's id from the first origin, and the old-style fork stays without one" \
+  || bad "fork of an old-style fork: id $(cat "$(gd "$FFK2")/concord-id" 2>/dev/null), ticket's $(cat "$(gd "$WFK")/concord-id"), old fork id file $([ -e "$(gd "$FFK")/concord-id" ] && echo written || echo absent)"
+git -C "$M" worktree remove --force "$FFK2" > /dev/null 2>&1
+git -C "$M" worktree remove --force "$FFK" > /dev/null 2>&1; $WT done TFK --repo "$M" --force > /dev/null 2>&1
 $WT done TCA --repo "$M" --force > /dev/null 2>&1; $WT done TCB --repo "$M" --force > /dev/null 2>&1
 $WT done T8 --repo "$M" --force > /dev/null 2>&1
 [ "$(git -C "$M" worktree list --porcelain | grep -c 'worktrees/T')" = 0 ] && ok "worktree list clean" || bad "worktrees left"

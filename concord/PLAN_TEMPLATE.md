@@ -59,7 +59,8 @@ CRITICAL PATH: 1 → 2 = 24 min; session lane 7 min; final revision 20 min
 ```
 ETA: <N> min, lands at <hh:mm> local
 
-## Handoff (if another session runs it)
+## Handoff
+(if another session runs it)
 - <settled decisions, what the investigation learned>
 
 <!--

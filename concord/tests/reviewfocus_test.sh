@@ -176,10 +176,12 @@ python3 -I -c "
 import sys; p = sys.argv[1]; s = open(p).read(); h = s.index('## Phase 9 '); e = s.index('## Phase 10 ')
 open(p, 'w').write(s[:h] + s[h:e].replace('- \`true\`', '- \`echo REVISED-ACCEPTANCE-4c1\`') + s[e:])" "$R/PLAN_F.md"
 packet "$V"; P=$(pk)
-[ -n "$P" ] && grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && before "$P" "The phase that was implemented" "REVISED-ACCEPTANCE-4c1" \
-  && sed -n '/The phase that was implemented/,/REVISED-ACCEPTANCE-4c1/p' "$P" | grep -qF '`true`' \
-  && ok "after the plan's acceptance changes, the packet shows the phase the run followed and the new text only apart from it" \
-  || { bad "packet shows the revised phase as implemented ('$P')"; sed -n '/The phase that was implemented/,/Acceptance/p' "$P" 2>/dev/null; }
+grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && NOTAPPROVED=0 || NOTAPPROVED=1
+approve PLAN_F.md "$R" 9 || exit 1; packet "$V"; P=$(pk)
+[ $NOTAPPROVED -eq 1 ] && [ -n "$P" ] && grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && before "$P" "The phase that was implemented" "REVISED-ACCEPTANCE-4c1" \
+  && sed -n '/The phase that was implemented/,/REVISED-ACCEPTANCE-4c1/p' "$P" | grep -qF '`true`' && grep -q 'later approved revision 2' "$P" \
+  && ok "a later approved revision's acceptance shows in the packet apart from the phase the run followed; an unapproved edit of the plan does not" \
+  || { bad "packet shows the revised phase as implemented ('$P', unapproved edit in packet: $((1 - NOTAPPROVED)))"; sed -n '/The phase that was implemented/,/Acceptance/p' "$P" 2>/dev/null; }
 python3 -I -c "
 import sys; p = sys.argv[1]; s = open(p).read(); open(p, 'w').write(s.replace('- \`echo REVISED-ACCEPTANCE-4c1\`', '- \`true\`'))" "$R/PLAN_F.md"
 printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "other/o.py", "line": 8, "problem": "late line", "fix": "Guard it", "repro": {"input": "i", "expected": "e", "actual": "a"}}], "clauses": [], "tests": [], "verdict": "BLOCK"}\nEND-REVIEW-JSON\n' > "$T/late.json"
@@ -196,7 +198,7 @@ printf 'o = 1\n' > "$R/other/o.py"
 echo "== approve-only low tier"
 lastrev(){ python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or [{}]; print(r[-1].get(sys.argv[2]))" "$RUNS/$1" "$2"; }
 nrevs(){ python3 -I -c "import json,sys; print(len(json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or []))" "$RUNS/$1"; }
-ledsev(){ python3 -I -c "import json,sys; L=json.load(open(sys.argv[1])); print(','.join(sorted(f['severity'] for f in L.get('findings', []) if f.get('run') == sys.argv[2])))" "$RUNS/ledger/PLAN_F.json" "$1"; }
+ledsev(){ python3 -I -c "import json,sys; L=json.load(open(sys.argv[1])); print(','.join(sorted(f['severity'] for f in L.get('findings', []) if f.get('run') == sys.argv[2])))" "$(ls "$RUNS"/ledger/PLAN_F-*.json | head -1)" "$1"; }
 clean(){ git -C "$R" checkout -q -- lib other; }
 f(){ printf '{"severity": "%s", "path": "lib/m.py", "line": 2, "line_end": 2, "problem": "%s", "fix": "f", "repro": {"input": "i", "expected": "e", "actual": "a"}, "clause": "", "test": "", "reraise_of": ""}' "$1" "$2"; }
 printf 'REVIEW-JSON\n{"findings": [%s], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$(f MEDIUM "m only")" > "$T/med.txt"
