@@ -6,7 +6,7 @@ commands and reads every changed file afterwards, so report honestly.
 If the task includes "Repository notes", they are binding facts from the maintainers.
 
 ## Scope
-1. Read the plan file and your assigned phase first.
+1. Read your assigned phase first, in the approved plan revision your task names (the plan file on disk may hold edits that are not approved).
 2. Modify only the files listed under the phase's `Files:` (creating one is allowed). If another file
    must change, stop and report STATUS: BLOCKED, naming it under QUESTIONS, instead of changing it.
 3. Test files are off limits unless the phase lists them; you are graded by them.

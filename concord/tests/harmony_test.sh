@@ -132,6 +132,7 @@ plan(){ local name=$1 a n=0 v want; shift
 plan --lint --lint 1 --plan @ --dry-run --via qwen --model fake/m
 plan --begin --begin 1 --plan @
 plan "a run" 1 --plan @ --via qwen --model fake/m --dry-run
+chmod 644 "$R/PLAN_locked.md"     # the tree capture (git add -A) must read every file of the checkout
 run "echo y >> a.py"; G=$(rid)
 $DP --show "$G" --repo "$R" > "$T/out.txt" 2>&1; RC1=$?; $DP --show last --repo "$R" > "$T/out.txt" 2>&1; RC2=$?
 [ -n "$G" ] && [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && ok "1 a real run id and 'last' still resolve (characterization)" \

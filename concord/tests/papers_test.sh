@@ -1,9 +1,11 @@
 #!/bin/bash
 # concord.py regression for the 2026-10-18 nine-paper changes, lean revision 2026-10-23 (no network, fake qwen
-# executor, ~30 s): webfetch denied by default + tool-call parsing; acceptance files hashed (report line, PASS refused
-# with exit 7, --force, session runs exempt, an executor that rewrites its run state); post-run acceptance pass and
+# executor, ~30 s): webfetch denied by default + tool-call parsing; grading files (an executor edit rejected, session
+# runs exempt, an executor that rewrites its run state, a post-run command that changes the tree); candidate grading
+# (start tree and candidate, rejection, --grade, pruned trees, runs recorded before 3.1.0); post-run acceptance and
 # what PASS needs of it (a result per command, the expected one, a note for an expected-red command); NO CHANGES flag;
-# review file lists without generated files and the diff base of a committed run; --review-record keeps every finding.
+# review file lists without generated files and the graded change of a committed run; --review-record keeps every
+# finding.
 # Run: bash ~/.claude/concord/tests/papers_test.sh   (exit 0 = all passed). Copies Concord into a temp dir with
 # HOME pointing at a temp home, so runs.jsonl and the real config stay untouched.
 set -u
@@ -80,17 +82,20 @@ EOF
 echo "== acceptance files"
 newrepo 'python3 tests/test_a.py'
 run 'echo y >> a.py; echo "# t" >> tests/test_a.py'; RID=$(rid)
-line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" && ok "edit of an acceptance file reported" \
-  || { bad "acceptance file edit not reported"; grep -i accept "$T/out.txt" | head -5; }
+head -3 "$T/out.txt" | grep -F "REJECTED (not graded):" | grep -qF "tests/test_a.py (out of scope)" \
+  && [ "$(meta "$RID" candidate)" = "None" ] && [ "$(meta "$RID" acceptance_after_rc)" = "[]" ] && ! has "acceptance after run" \
+  && ok "an executor's edit of a grading file is rejected: REJECTED line names it, no candidate, no acceptance run" \
+  || { bad "grader edit not rejected"; head -12 "$T/out.txt"; }
+has "concord.py --grade $RID" && has "concord.py --restore $RID" && ok "the rejection says how to recover (--restore, then --grade)" || bad "no recovery line"
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ $RC -eq 7 ] && grep -qi "acceptance files changed" "$T/v.txt" && [ "$(meta "$RID" verdict)" = "None" ] \
-  && ok "PASS refused (exit 7), verdict not recorded" || { bad "PASS not refused rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
+[ $RC -eq 7 ] && grep -qi "rejected" "$T/v.txt" && grep -qF "concord.py --grade $RID" "$T/v.txt" && [ "$(meta "$RID" verdict)" = "None" ] \
+  && ok "PASS refused (exit 7) for a rejected run, naming --grade; verdict not recorded" || { bad "PASS not refused rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
 $DP --verdict "$RID" PASS --force --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] && grep -qF "PASS (forced)" "$T/v.txt" \
-  && ok "--force over a changed acceptance file records PASS, and the verdict line reads PASS (forced)" || { bad "--force rc=$RC"; cat "$T/v.txt"; }
+  && ok "--force over a rejected run records PASS, and the verdict line reads PASS (forced)" || { bad "--force rc=$RC"; cat "$T/v.txt"; }
 newrepo 'python3 tests/test_a.py'; run 'echo y >> a.py'; RID=$(rid)
-! has "ACCEPTANCE FILES CHANGED" && $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1 \
-  && ok "untouched acceptance files: no line, PASS accepted" || { bad "clean run flagged or refused"; cat "$T/v.txt"; grep ACCEPT "$T/out.txt"; }
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1 \
+  && ok "untouched acceptance files: PASS accepted" || { bad "clean run flagged or refused"; cat "$T/v.txt"; grep ACCEPT "$T/out.txt"; }
 newrepo 'python3 tests/test_a.py'
 $DP --begin 1 --label planner --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
 BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
@@ -104,7 +109,7 @@ BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
 echo y >> "$R/a.py"; echo "# impl edit" >> "$R/tests/test_a.py"
 $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1
-[ $? -eq 7 ] && ok "implementer session run editing acceptance files -> PASS refused (only planner exempt)" \
+[ $? -eq 7 ] && has "REJECTED (not graded)" && ok "implementer session run editing acceptance files -> rejected, PASS refused (only planner exempt)" \
   || { bad "implementer session not refused ($BID)"; cat "$T/v.txt"; }
 newrepo 'grep -q y a.py'
 # the characterization command rewrites a grading file (a Test plan home) only while a.py has no y, so only the red run before the change does
@@ -114,30 +119,29 @@ FAKE_ACTIONS='echo y >> a.py' $DP 1 --plan PLAN_T.md --via qwen --model fake/m -
 [ -n "$RID" ] && [ -n "$(git -C "$R" status --porcelain -- tests/test_b.py)" ] && [ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] \
   || { echo "setup failed: a run whose red run rewrote tests/test_b.py and whose acceptance then passed twice"; cat "$T/out.txt"; exit 1; }
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-line "changed in scope:" "a.py" && ! has "ACCEPTANCE FILES CHANGED" && ! has "ACCEPTANCE COMMAND CHANGED GRADING FILE" && [ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] \
-  && ok "a grading file rewritten only by the red run before the change is blamed on nobody: no ACCEPTANCE line, PASS accepted" \
+line "changed in scope:" "a.py" && ! has "POST-RUN COMMAND CHANGED THE TREE" && [ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] \
+  && ok "a grading file rewritten only by the red run before the change is blamed on nobody: PASS accepted" \
   || { bad "red-run artifact blamed rc=$RC"; grep -e ACCEPT -e '^status' "$T/out.txt"; cat "$T/v.txt"; }
-$DP --help 2>&1 | tr -s ' \n' ' ' | grep -q -- "--force.*acceptance files" && ok "--force help mentions the acceptance-file refusal" || bad "--force help text"
 cat > "$T/rig.py" <<'PY'
-import glob, hashlib, json, os, sys
-for f in glob.glob(os.environ["R"] + "/.git/concord/*/state.json"):    # the executor rewrites the hashes that grade it
-    st = json.load(open(f)); st["acceptance_hashes"] = {p: hashlib.sha256(open(os.environ["R"] + "/" + p, "rb").read()).hexdigest()
-                                                         for p in st["acceptance_hashes"]}
+import glob, json, os
+for f in glob.glob(os.environ["R"] + "/.git/concord/*/state.json"):    # the executor widens the scope its run state records
+    st = json.load(open(f)); st["files"] = ["a.py", "tests/"]; st["grading_files"] = []
     json.dump(st, open(f, "w"))
 PY
 newrepo 'python3 tests/test_a.py'
 run 'echo y >> a.py; echo "# rigged" >> tests/test_a.py; python3 '"$T"'/rig.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-line "ACCEPTANCE FILES CHANGED:" "tests/test_a.py (modified)" && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] \
-  && ok "an executor that rewrites its run state and a grading test: ACCEPTANCE FILES CHANGED, PASS refused (exit 7)" \
-  || { bad "rigged run: PASS rc=$RC"; grep -i accept "$T/out.txt" | head -3; }
+head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "tests/test_a.py" && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] \
+  && ok "an executor that rewrites the scope in its run state and edits a grading test: still REJECTED, PASS refused (exit 7)" \
+  || { bad "rigged run: PASS rc=$RC"; head -5 "$T/out.txt"; }
 # S42: the grading file is rewritten by a post-run acceptance command (a snapshot test that refreshes its golden file)
 newrepo 'python3 tests/test_a.py && echo "# refreshed golden" >> tests/test_a.py'
 run 'echo y >> a.py'; RID=$(rid)
 if [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ "$(tail -1 "$R/tests/test_a.py")" = "# refreshed golden" ]; then
   $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-  [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" \
-    && ok "a post-run acceptance command that rewrites a grading file and exits 0: PASS refused (exit 7), the file named" \
+  [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" && grep -qF "refreshed golden" "$T/v.txt" \
+    && has "POST-RUN COMMAND CHANGED THE TREE" \
+    && ok "a post-run acceptance command that rewrites a grading file and exits 0: PASS refused (exit 7), the file and the command named" \
     || { bad "grading file rewritten by an acceptance command: PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
   $DP --verdict "$RID" PASS --force --note "owner accepts the refreshed golden file" --repo "$R" > "$T/v.txt" 2>&1
   $DP --report --plan PLAN_T.md --repo "$R" > "$T/rep.txt" 2>&1; REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1); [ -f "$REP" ] || REP="$T/none"
@@ -145,6 +149,118 @@ if [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ "$(tail -1 "$R/tests/te
     && ok "the report's Overrides names the grading file that an acceptance command rewrote" \
     || { bad "report does not name the rewritten grading file"; sed -n '/^## Overrides/,/^## [^O]/p' "$REP"; }
 else bad "S42 setup: the acceptance command did not rewrite tests/test_a.py (after rc $(meta "$RID" acceptance_after_rc))"; fi
+
+echo "== candidate grading"
+# a dirty start (an untracked planner test and an uncommitted earlier change) is in the start tree S: the review diff shows the
+# executor's change only. b.py is rewritten at the size and mtime of its index entry, in the index's second (git's racily
+# clean case, which only the file's content tells apart)
+newrepo 'grep -q y a.py'; printf 'assert True\n' > "$R/tests/test_new.py"
+git -C "$R" config core.trustctime false; touch -t 202601011200 "$R/b.py"; git -C "$R" add b.py
+printf 'y = 3\n' > "$R/b.py"; touch -t 202601011200 "$R/b.py" "$R/.git/index"
+run 'echo y >> a.py'; RID=$(rid)
+ST=$(meta "$RID" start_tree); CT=$(meta "$RID" candidate)
+git -C "$R" ls-tree -r --name-only "$ST" 2>/dev/null | grep -qx "tests/test_new.py" && git -C "$R" show "$ST:b.py" 2>/dev/null | grep -qx "y = 3" \
+  && [ "$(git -C "$R" diff --name-only "$ST" "$CT" 2>/dev/null)" = "a.py" ] && grep -qF "graded candidate: $CT (the run's change: git diff $ST $CT)" "$T/out.txt" \
+  && ok "the start tree holds the planner's untracked test and the earlier uncommitted change; start..candidate is the executor's change, and the report gives its git diff" \
+  || { bad "dirty start tree: start=$ST candidate=$CT"; }
+$DP --review "$RID" --packet --repo "$R" > "$T/pk.txt" 2>&1; PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/pk.txt" | head -1)
+[ -f "$PK" ] && grep -q '^+y$' "$PK" && ! grep -q 'test_new\|^+y = 3' "$PK" \
+  && ok "the review packet's diff shows only the executor's change on a dirty start" || bad "dirty-start packet diff '$PK'"
+# a run recorded before 3.1.0 (no start tree) and a run whose trees git gc pruned: no PASS and no review
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+python3 -I -c 'import json, sys; p = sys.argv[1]; m = json.load(open(p)); [m.pop(k, None) for k in ("start_tree", "candidate")]; json.dump(m, open(p, "w"))' "$R/.git/concord/$RID/meta.json"
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?; $DP --review "$RID" --packet --repo "$R" > "$T/pk.txt" 2>&1; RP=$?
+[ $RC -eq 7 ] && grep -qF "recorded before 3.1.0" "$T/v.txt" && [ $RP -eq 2 ] && grep -qF "run the phase again" "$T/pk.txt" \
+  && ok "a run recorded before 3.1.0: PASS refused (exit 7) and review refused (exit 2), both saying to run the phase again" \
+  || { bad "legacy run: verdict rc=$RC review rc=$RP"; cat "$T/v.txt" "$T/pk.txt"; }
+# git gc prunes a candidate no ref holds; a clean start tree is HEAD's tree and stays, a dirty one goes too
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+git -C "$R" -c gc.reflogExpire=now gc -q --prune=now
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?; $DP --review "$RID" --packet --repo "$R" > "$T/pk.txt" 2>&1; RP=$?
+newrepo 'grep -q y a.py'; printf 'n = 1\n' > "$R/new.py"; run 'echo y >> a.py'; RID2=$(rid)
+git -C "$R" -c gc.reflogExpire=now gc -q --prune=now
+$DP --verdict "$RID2" PASS --repo "$R" > "$T/v2.txt" 2>&1; RC2=$?; $DP --review "$RID2" --packet --repo "$R" > "$T/pk2.txt" 2>&1; RP2=$?
+[ $RC -eq 7 ] && [ $RP -eq 2 ] && grep -qF "no longer stored" "$T/v.txt" && grep -qF "concord.py --grade $RID" "$T/v.txt" && grep -qF "concord.py --grade $RID" "$T/pk.txt" \
+  && [ $RC2 -eq 7 ] && [ $RP2 -eq 2 ] && grep -qF "run the phase again" "$T/v2.txt" && ! grep -qF -- "--grade" "$T/v2.txt" && grep -qF "run the phase again" "$T/pk2.txt" \
+  && ok "trees that git gc pruned: PASS refused (exit 7) and review refused (exit 2); --grade while the start tree is stored, else run the phase again" \
+  || { bad "pruned trees: verdict rc=$RC/$RC2 review rc=$RP/$RP2"; cat "$T/v.txt" "$T/pk.txt" "$T/v2.txt" "$T/pk2.txt"; }
+# an out-of-scope edit is rejected without acceptance; after the planner restores it, --grade lets PASS through
+newrepo 'grep -q y a.py'
+run 'echo y >> a.py; echo z >> b.py'; RID=$(rid)
+head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "b.py" && [ "$(meta "$RID" candidate)" = "None" ] \
+  && [ "$(meta "$RID" acceptance_after_rc)" = "[]" ] && [ "$(meta "$RID" rejected)" != "[]" ] \
+  && ok "an out-of-scope edit is rejected: REJECTED line names it, no candidate, no acceptance run" || { bad "out-of-scope edit not rejected"; head -8 "$T/out.txt"; }
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && ok "PASS refused (exit 7) for the rejected run" || { bad "rejected run PASS rc=$RC"; cat "$T/v.txt"; }
+$DP --review "$RID" --packet --repo "$R" > "$T/pk.txt" 2>&1; RC=$?
+[ $RC -eq 2 ] && grep -qF "concord.py --grade $RID" "$T/pk.txt" && ok "a rejected run has no candidate to review: --review refuses (exit 2), naming --grade" \
+  || { bad "rejected run review rc=$RC"; cat "$T/pk.txt"; }
+git -C "$R" checkout -q -- b.py
+$DP --grade "$RID" --repo "$R" > "$T/g.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && grep -qF "concord.py --verdict $RID PASS|FAIL" "$T/g.txt" && [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] \
+  && [ "$(meta "$RID" rejected)" = "[]" ] && [ "$(meta "$RID" candidate)" != "None" ] \
+  && ok "--grade after the restore records the candidate and the acceptance results, clears the rejection and names the verdict step" \
+  || { bad "--grade rc=$RC"; cat "$T/g.txt"; }
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] && [ "$(meta "$RID" verdict_candidate)" = "$(meta "$RID" candidate)" ] \
+  && ok "PASS after --grade is recorded with the graded candidate" || { bad "PASS after --grade rc=$RC"; cat "$T/v.txt"; }
+printf 'z = 9\n' > "$R/a.py"
+$DP --grade "$RID" --repo "$R" > "$T/g.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(meta "$RID" verdict)" = "PASS" ] && [ "$(meta "$RID" acceptance_after_rc)" = "[1]" ] \
+  && ls "$R/.git/concord/$RID"/acceptance.after-*.txt > /dev/null 2>&1 \
+  && ok "--grade on edited files keeps the earlier acceptance.after.txt, updates the results and leaves the recorded verdict" \
+  || { bad "re-grade rc=$RC"; cat "$T/g.txt"; }
+# --grade refuses a change outside the run's write scope and lists it
+newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
+echo z >> "$R/b.py"
+$DP --grade "$RID" --repo "$R" > "$T/g.txt" 2>&1; RC=$?
+[ $RC -ne 0 ] && grep -qF "b.py" "$T/g.txt" && ok "--grade refuses a tree that differs from the start outside the write scope, naming the path" \
+  || { bad "--grade outside scope rc=$RC"; cat "$T/g.txt"; }
+git -C "$R" checkout -q -- b.py; git -C "$R" add a.py
+$DP --grade "$RID" --repo "$R" > "$T/g.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && grep -qF "a.py (staged)" "$T/g.txt" && ok "--grade refuses while the checkout differs from the run's start state (a path staged since), naming it" \
+  || { bad "--grade over a staged path rc=$RC"; cat "$T/g.txt"; }
+git -C "$R" reset -q
+# --grade checks the ignored files that rejected the run, which no tree holds
+newrepo 'grep -q y a.py'; printf 'local.cfg\n' >> "$R/.gitignore"; git -C "$R" commit -qam ignore
+run 'echo y >> a.py; echo k=1 > local.cfg'; RID=$(rid)
+$DP --grade "$RID" --repo "$R" > "$T/g.txt" 2>&1; RC=$?
+rm "$R/local.cfg"; $DP --grade "$RID" --repo "$R" > "$T/g2.txt" 2>&1; RC2=$?
+[ $RC -eq 7 ] && grep -qF "local.cfg" "$T/g.txt" && [ $RC2 -eq 0 ] \
+  && ok "--grade refuses while an ignored file that rejected the run is still there, and grades once it is gone" \
+  || { bad "--grade over an ignored out-of-scope file rc=$RC/$RC2"; cat "$T/g.txt" "$T/g2.txt"; }
+# a new file below a folder named like build output is source while .gitignore does not ignore the folder
+newrepo 'grep -q y a.py'; run 'echo y >> a.py; mkdir -p bin && echo "print(1)" > bin/tool.py'
+head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "bin/tool.py (out of scope)" \
+  && ok "a new file below an unignored bin/ is source: out of scope, the run is rejected" || { bad "bin/ file not rejected"; head -8 "$T/out.txt"; }
+newrepo 'grep -q y a.py'; printf 'bin/\n' >> "$R/.gitignore"; git -C "$R" commit -qam ignore
+run 'echo y >> a.py; mkdir -p bin && echo "print(1)" > bin/tool.py'
+! has "REJECTED" && line "acceptance after run:" "1/1 pass" \
+  && ok "below an ignored bin/ the same file is build output: the run is graded" || { bad "ignored bin/ output rejected the run"; head -8 "$T/out.txt"; }
+# git status skips an assume-unchanged file; the trees see its change, in the candidate and in the scope check
+newrepo 'grep -q y a.py'; git -C "$R" update-index --assume-unchanged a.py b.py; run 'echo y >> a.py'; RID=$(rid)
+[ "$(git -C "$R" diff --name-only "$(meta "$RID" start_tree)" "$(meta "$RID" candidate)" 2>/dev/null)" = "a.py" ] \
+  && ok "a file marked assume-unchanged is in the candidate with the run's change" || bad "assume-unchanged a.py missing from the candidate"
+run 'echo z >> b.py'
+head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "b.py (out of scope)" \
+  && ok "an out-of-scope edit of an assume-unchanged file rejects the run" || { bad "assume-unchanged b.py edit not rejected"; head -8 "$T/out.txt"; }
+# a session run begun before 3.1.0 has no start tree: --end refuses and names --abort
+newrepo 'true'; $DP --begin 1 --label planner --plan PLAN_T.md --repo "$R" > "$T/out.txt" 2>&1
+B=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/out.txt" | tail -1)
+[ -n "$B" ] || { echo "setup failed: --begin"; cat "$T/out.txt"; exit 1; }
+python3 -I -c 'import json, sys; p = sys.argv[1]; s = json.load(open(p)); s.pop("start_tree"); json.dump(s, open(p, "w"))' "$R/.git/concord/$B/state.json"
+$DP --end "$B" --repo "$R" > "$T/e.txt" 2>&1; RC=$?; $DP --abort "$B" --repo "$R" > /dev/null 2>&1
+[ $RC -eq 2 ] && grep -qF "concord.py --abort $B" "$T/e.txt" && ok "--end of a session run begun before 3.1.0 refuses (exit 2) and names --abort" \
+  || { bad "legacy --end rc=$RC"; cat "$T/e.txt"; }
+# a tree that cannot be captured (a file the executor left unreadable) rejects the run, and the run is still reported
+newrepo 'true'; sed -i.bak 's/^Files: a.py$/Files: a.py, locked.txt/' "$R/PLAN_T.md"; rm -f "$R/PLAN_T.md.bak"; approve PLAN_T.md "$R" || exit 1
+run 'echo y >> a.py; echo s > locked.txt; chmod 000 locked.txt'; RID=$(rid)
+head -3 "$T/out.txt" | grep -F "REJECTED (not graded)" | grep -qF "the tree could not be captured" && [ "$(meta "$RID" candidate)" = "None" ] \
+  && ok "a file the executor left unreadable rejects the run, and the run is reported" || { bad "capture failure: rc lost or not rejected"; head -8 "$T/out.txt"; }
+chmod 644 "$R/locked.txt"
+# a background child the executor leaves behind is killed before grading
+newrepo 'true'; run 'echo y >> a.py; (sleep 2; echo x > late.txt) &'; sleep 3.5
+[ ! -e "$R/late.txt" ] && ok "a background child the executor leaves behind is killed before grading" || bad "late.txt appeared: the child outlived the run"
 
 echo "== acceptance after run"
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
@@ -187,15 +303,11 @@ $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
   && ok "a file edited after the run's acceptance: PASS refused (exit 7), the file named, nothing recorded" || { bad "stale PASS: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
 $DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
-[ -f "$PK" ] && grep -F "STALE" "$PK" | grep -qF "a.py" \
-  && ok "the review packet marks the acceptance results stale and names the file" || bad "packet '$PK' has no stale mark"
+[ -f "$PK" ] && grep -q '^+y$' "$PK" && ! grep -q 'z = 3' "$PK" \
+  && ok "after an edit following the run, the review packet still shows the graded candidate" || bad "packet '$PK' does not show the candidate"
 $DP --verdict "$RID" PASS --force --note "owner accepts" --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && grep -qF "PASS (forced)" "$T/v.txt" \
   && ok "--force still records the stale PASS, marked forced" || { bad "forced stale PASS rc=$RC"; cat "$T/v.txt"; }
-newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
-$DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
-PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
-[ -f "$PK" ] && ! grep -qF "STALE" "$PK" && ok "an unedited run's packet carries no stale mark" || bad "false stale mark in '$PK'"
 # a grading file (a Test plan home the acceptance command runs) edited after --end so it would fail: same stale evidence
 newrepo 'python3 tests/test_a.py'
 $DP --begin 1 --label implementer --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
@@ -207,8 +319,8 @@ $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
   && ok "a grading file edited after --end: PASS refused (exit 7), the file named, nothing recorded" || { bad "stale grading file: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
 $DP --review "$BID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
-[ -f "$PK" ] && grep -F "STALE" "$PK" | grep -qF "tests/test_a.py" \
-  && ok "the packet marks the results stale and names the grading file" || bad "packet '$PK' has no stale mark for the grading file"
+[ -f "$PK" ] && grep -q '^+y$' "$PK" \
+  && ok "the packet of a graded run shows its candidate when a grading file is edited afterwards" || bad "packet '$PK' for the grading-file edit"
 # a grading script is compared by identity (kind, executable bit, bytes), not bytes alone
 sessionrun(){ $DP --begin 1 --label implementer --plan PLAN_T.md --repo "$R" > "$T/b.txt" 2>&1
   BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
@@ -231,9 +343,26 @@ BID=$(sed -n 's/.*concord.py --end \([^ ]*\).*/\1/p' "$T/b.txt" | tail -1)
 echo y >> "$R/a.py"; cp "$R/tests/test_a.py" "$R/tests/real_a.py"; rm "$R/tests/test_a.py"; ln -s real_a.py "$R/tests/test_a.py"
 $DP --end "$BID" --repo "$R" > "$T/out.txt" 2>&1
 $DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
-  && ok "a grading script replaced during the run by a symlink with the same bytes: PASS refused (exit 7), the file named" \
+[ "$(meta "$BID" acceptance_after_rc)" = "[]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "a grading script replaced during the run by a symlink with the same bytes: run rejected, PASS refused (exit 7), the file named" \
   || { bad "grading script swapped for a symlink during the run: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+# a symlinked grading script is compared by its link text and by the script it points to (not itself a grading file)
+linkrepo(){ newrepo 'python3 tests/test_a.py'; mv "$R/tests/test_a.py" "$R/tests/real_a.py"; chmod +x "$R/tests/real_a.py"
+  ln -s real_a.py "$R/tests/test_a.py"; git -C "$R" add -A; git -C "$R" commit -qm link; }
+linkrepo; sessionrun
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(verdict_of "$BID")" = "PASS" ] \
+  && ok "an unchanged symlinked grading script: PASS recorded" || { bad "unchanged symlinked grader: rc=$RC"; cat "$T/v.txt"; }
+linkrepo; sessionrun; printf 'raise SystemExit(1)\n' > "$R/tests/real_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$BID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "the script a symlinked grading file points to is edited after --end: PASS refused (exit 7), the grading file named" \
+  || { bad "link target edited after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
+linkrepo; sessionrun; chmod -x "$R/tests/real_a.py"
+$DP --verdict "$BID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "the script a symlinked grading file points to loses its executable bit after --end: PASS refused (exit 7), the grading file named" \
+  || { bad "link target chmod -x after --end: rc=$RC verdict=$(verdict_of "$BID")"; cat "$T/v.txt"; }
 # post-run acceptance must leave the tree as it found it: the first command checks a.py, the second rewrites it
 accplan(){ newrepo true; printf 'build/\n' >> "$R/.gitignore"; printf 'b\n' > "$R/b.txt"; git -C "$R" add -A; git -C "$R" commit -qm ign
   printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n- `%s`\n' "$1" > "$R/PLAN_T.md"
@@ -243,8 +372,8 @@ run 'echo y >> a.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 $DP --review "$RID" --packet --repo "$R" > "$T/pk.txt" 2>&1; PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/pk.txt" | head -1)
 [ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] \
-  && grep -qF "acceptance command changed a.py" "$T/v.txt" && grep -qF "acceptance command changed b.txt" "$T/v.txt" \
-  && grep -qF "# touched" "$T/v.txt" && grep -qF "ACCEPTANCE COMMAND CHANGED THE TREE" "$R/.git/concord/$RID/report.md" \
+  && grep -qF "post-run command changed a.py" "$T/v.txt" && grep -qF "post-run command changed b.txt" "$T/v.txt" \
+  && grep -qF "# touched" "$T/v.txt" && grep -qF "POST-RUN COMMAND CHANGED THE TREE" "$R/.git/concord/$RID/report.md" \
   && [ -f "$PK" ] && grep -F "changed files while they ran" "$PK" | grep -qF "b.txt" \
   && ok "a later acceptance command rewrites a file an earlier one checked and a tracked file outside Files: PASS refused (exit 7) naming both and the command; the report and the review packet say so" \
   || { bad "acceptance command rewrote a.py and b.txt: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
@@ -254,12 +383,23 @@ $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
   && ok "acceptance rewriting a modified in-scope file with the same bytes: PASS still accepted" \
   || { bad "same-bytes rewrite refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
-accplan 'mkdir -p build && echo o > build/out.o && echo n > scratch.txt'
+accplan 'mkdir -p build && echo o > build/out.o'
 run 'echo y >> a.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
-[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ -f "$R/build/out.o" ] && [ -f "$R/scratch.txt" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
-  && ok "acceptance writing an untracked file outside Files: and an ignored build file: PASS still accepted" \
-  || { bad "harmless acceptance writes refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ -f "$R/build/out.o" ] && [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] \
+  && ok "acceptance writing an ignored build file: PASS still accepted" \
+  || { bad "ignored acceptance write refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+accplan 'mkdir -p __pycache__ && echo p > __pycache__/m.cpython-313.pyc'
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && ok "acceptance writing untracked build output (a .pyc, not ignored): PASS accepted" \
+  || { bad "build output refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+accplan 'echo n > scratch.txt'
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] && grep -qF "scratch.txt" "$T/v.txt" \
+  && ok "acceptance leaving a new untracked file outside the ignored output: PASS refused (exit 7), the file named" \
+  || { bad "untracked acceptance write accepted: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
 newrepo 'true'
 printf '# Plan\n## Phase 1 - tests first\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `python3 tests/red.py` (fails until phase 2)\n' > "$R/PLAN_T.md"
 printf 'import sys\nsys.exit(1)\n' > "$R/tests/red.py"; approve PLAN_T.md "$R" || exit 1
@@ -293,19 +433,21 @@ PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && ! grep -q "__pycache__\|pytest_cache" "$PK" && grep -q "a.py" "$PK" \
   && ok "Opus packet leaves out generated cache files" || bad "packet '$PK' lists cache files"
 
-echo "== review of a committed run (diff base = the run's start commit)"
-newrepo 'true'; run 'echo "x = 2" > a.py; echo "n = 1" > new.py'; RID=$(rid)
+echo "== review of a committed run (the graded change, whatever the history holds since)"
+newrepo 'true'; sed -i.bak 's/^Files: a.py$/Files: a.py, new.py/' "$R/PLAN_T.md"; rm -f "$R/PLAN_T.md.bak"; approve PLAN_T.md "$R" || exit 1
+run 'echo "x = 2" > a.py; echo "n = 1" > new.py'; RID=$(rid)
 ( cd "$R" && git add a.py new.py && git commit -qm "commit the run" ) || { echo "setup failed: commit"; exit 1; }
 $DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && grep -q '^+x = 2$' "$PK" && grep -q '^+n = 1$' "$PK" \
   && ok "committed run: the review packet still holds the run's changes (tracked + created file)" || bad "committed run reviewed against an empty diff"
-( cd "$R" && git commit -q --amend -m "init rewritten" --allow-empty && git checkout -q --orphan other && git commit -qm orphan ) \
-  || { echo "setup failed: orphan"; exit 1; }
+( cd "$R" && git commit -q --amend -m "init rewritten" --allow-empty && git checkout -q --orphan other && git commit -qm orphan \
+  && git rm -q new.py && git commit -qm "drop new.py" ) || { echo "setup failed: orphan"; exit 1; }
 $DP --review "$RID" --packet --repo "$R" > "$T/out.txt" 2>&1
 PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
-[ -f "$PK" ] && grep -q "note: the run's start commit [0-9a-f]\{8\} is not an ancestor of HEAD; each file shows its change since the run's start copy" "$PK" \
-  && ok "start commit not an ancestor of HEAD: the start-copy diff is stated in the review task" || bad "no fallback note in the packet"
+[ -f "$PK" ] && grep -q '^+x = 2$' "$PK" && grep -q '^+n = 1$' "$PK" \
+  && ok "start commit no longer an ancestor of HEAD and the created file deleted since: the packet still holds the run's graded change" \
+  || bad "rewritten history changed the packet '$PK'"
 pyblock <<'PYB'
 import importlib.util, subprocess, sys
 from pathlib import Path

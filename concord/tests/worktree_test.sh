@@ -55,6 +55,16 @@ W1="$M/.claude/worktrees/T1"
 $WT new T2 --repo "$M" --no-fetch --base main --link data --link bench > /dev/null 2>&1; W2="$M/.claude/worktrees/T2"
 [ "$(grep -c '^/bench$' "$M/.git/info/exclude")" = 1 ] && ok "exclude patterns added once" || bad "duplicate patterns: $(tr '\n' ' ' < "$M/.git/info/exclude")"
 plan "$W1"; plan "$W2"; plan "$M"; mkdir -p "$T/orig"; plan "$T/orig"; approve PLAN_T.md "$M" || exit 1
+echo "== sibling worktrees holding a plan of the same name are separate tickets"
+# One approval per ticket: the plan text is the same everywhere, so only the ticket tells the checkouts apart.
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$W1" > "$T/s1.txt" 2>&1; RS1=$?; [ $RS1 -eq 0 ] && $DP --abort last --repo "$W1" > /dev/null 2>&1
+approve PLAN_T.md "$W1" || exit 1
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$W2" > "$T/s2.txt" 2>&1; RS2=$?; [ $RS2 -eq 0 ] && $DP --abort last --repo "$W2" > /dev/null 2>&1
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$W1" > "$T/s3.txt" 2>&1; RS3=$?; [ $RS3 -eq 0 ] && $DP --abort last --repo "$W1" > /dev/null 2>&1
+[ $RS1 -eq 11 ] && [ $RS2 -eq 11 ] && [ $RS3 -eq 0 ] \
+  && ok "an approval in the main checkout, then in T1, opens neither the other worktree's same-named plan (exit 11) nor anything but its own" \
+  || { bad "sibling tickets: T1 before its approval rc=$RS1, T2 after T1's approval rc=$RS2, T1 after its own approval rc=$RS3"; tail -2 "$T/s2.txt"; }
+approve PLAN_T.md "$W2" || exit 1
 echo "== parallel runs: T1 and T2 at once, main too"
 # T1 holds its lock until $T/release exists (at most 30 s), so the same-checkout block does not depend on runner speed.
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
@@ -85,9 +95,14 @@ touch "$T/release2"; wait $PF; F1=$?
 [ $F3 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/f3.txt" \
   && ok "a run with no Files is refused while another runs (exit 2)" || { bad "no-Files run rc=$F3"; tail -3 "$T/f3.txt"; }
 [ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 2 lines (+2 -0)" "$T/f1.txt" \
-  && grep -qxF "ACCEPTANCE FILES CHANGED: c.py (modified; in a concurrent run's Files: re-run this phase once that run ends)" "$T/f1.txt" \
-  && ok "the long run leaves the concurrent run's b.py and deleted z.py out of OUT OF SCOPE, DELETED, ACCEPTANCE FILES CHANGED and its diff size; its change of c.py, there at the start, stays" \
+  && ! grep -q "^REJECTED" "$T/f1.txt" \
+  && ok "the long run leaves the concurrent run's b.py, c.py and deleted z.py out of OUT OF SCOPE, DELETED, its diff size and its rejection" \
   || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|acceptance|diff size" "$T/f1.txt"; }
+RF1=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/f1.txt" | head -1); printf 'z\n' > "$W1/z.py"
+$DP --verdict "$RF1" PASS --repo "$W1" > "$T/fv.txt" 2>&1; RV=$?
+[ $RV -eq 0 ] && ok "a later change to a file of the run that ran beside it (z.py) leaves the long run's PASS alone" \
+  || { bad "concurrent PASS rc=$RV"; cat "$T/fv.txt"; }
+rm -f "$W1/z.py"
 [ ! -e "$L1" ] && ok "the lock file is gone once both runs ended" || bad "lock file left: $(cat "$L1" 2>&1)"
 printf '{"pid": %s, "child": null, "run": "old-run", "manual": false, "repo": "%s"}\n' "$(sh -c 'echo $$')" "$W1" > "$L1"      # one holder (a dead pid), no files: written before 2026-11-15
 FAKE_ACTIONS='true' $DP 3 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f4.txt" 2>&1; F4=$?
@@ -228,6 +243,41 @@ mkdir -p "$W8/sub"; printf 's\n' > "$W8/sub/s.txt"; F10="$M/.claude/worktrees/T8
 ( cd "$W8/sub" && $WT join T8 4 > "$T/j3.txt" 2>&1 ); RJ3=$?
 [ "$FA" = "x = 5" ] && [ -f "$W8/top2.txt" ] && [ ! -e "$F10" ] \
   && ok "fork and join from a subdirectory work on the whole checkout" || { bad "subdir join rc=$RJ3"; cat "$T/j3.txt"; }
+echo "== join: a fork graded by a PASS run"
+# a fork with no Concord run joins as before and says no run graded it
+grep -qF "no Concord run graded this fork" "$T/j1.txt" && ok "a fork with no runs joins as before and prints that no run graded it" || { bad "no-run join message"; cat "$T/j1.txt"; }
+$WT new TJ --repo "$M" --no-fetch --base main > /dev/null 2>&1; WJ="$M/.claude/worktrees/TJ"; plan "$WJ"; mv "$WJ/PLAN_T.md" "$WJ/PLAN_J.md"; A0="$(cat "$WJ/a.py")"
+# gradefork N ACTIONS: fork N of TJ, one run of PLAN_J.md phase 1 in it with PASS recorded (ACTIONS is the fake executor); sets FJ and RJ
+gradefork(){ $WT fork TJ "$1" --repo "$WJ" > /dev/null 2>&1; FJ="$M/.claude/worktrees/TJ-p$1"
+  approve PLAN_J.md "$FJ" || exit 1
+  FAKE_ACTIONS="$2" $DP 1 --plan PLAN_J.md --via qwen --model fake/m --no-baseline --repo "$FJ" > "$T/gf.txt" 2>&1
+  RJ=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/gf.txt" | head -1)
+  $DP --verdict "$RJ" PASS --repo "$FJ" > "$T/gv.txt" 2>&1 || { echo "setup failed: PASS of $RJ"; cat "$T/gf.txt" "$T/gv.txt"; exit 1; }; }
+gradefork 1 'echo y >> a.py'
+$WT join TJ 1 --repo "$WJ" > "$T/jg.txt" 2>&1; RG=$?
+CAND=$(python3 -I -c "import json,sys; print(json.load(open(sys.argv[1]))['verdict_candidate'])" "$M/.git/concord/$RJ/meta.json")
+JT=$(cd "$WJ" && cp "$(git rev-parse --path-format=absolute --git-path index)" "$T/jidx" && GIT_INDEX_FILE="$T/jidx" git add -A && GIT_INDEX_FILE="$T/jidx" git rm --cached -q --ignore-unmatch -- 'PLAN_*.md' && GIT_INDEX_FILE="$T/jidx" git write-tree)
+[ $RG -eq 0 ] && [ ! -e "$FJ" ] && [ "$(cat "$WJ/a.py")" != "$A0" ] && [ "$JT" = "$CAND" ] && grep -qF "graded: the fork matches the candidate of run $RJ (PASS)" "$T/jg.txt" \
+  && ok "a fork that still matches its PASS run's candidate joins, its tree applied as graded, and join names the run" \
+  || { bad "graded join rc=$RG tree=$JT candidate=$CAND"; cat "$T/jg.txt"; }
+$WT fork TJ 1 --repo "$WJ" > /dev/null 2>&1; $WT join TJ 1 --repo "$WJ" > "$T/jn.txt" 2>&1; RN=$?
+[ $RN -eq 0 ] && grep -qF "no Concord run graded this fork" "$T/jn.txt" \
+  && ok "a fork made again at a joined fork's path counts only its own runs (none here), not the old fork's PASS" \
+  || { bad "re-made fork join rc=$RN"; cat "$T/jn.txt"; }
+git -C "$WJ" checkout -q -- a.py
+gradefork 2 'echo y >> a.py'; printf 'extra = 1\n' > "$FJ/extra.py"
+$WT join TJ 2 --repo "$WJ" > "$T/jr.txt" 2>&1; RR=$?
+[ $RR -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" = "$A0" ] && [ ! -e "$WJ/extra.py" ] && grep -qF "extra.py" "$T/jr.txt" \
+  && grep -qF "concord.py --grade $RJ" "$T/jr.txt" && grep -qF -- "--ungraded" "$T/jr.txt" \
+  && ok "a fork whose files changed after its PASS: join refuses with nothing applied, the fork kept, naming the file, --grade and --ungraded" \
+  || { bad "changed-fork join rc=$RR"; cat "$T/jr.txt"; }
+$WT join TJ 2 --repo "$WJ" --force > "$T/jf.txt" 2>&1; RF=$?
+[ $RF -ne 0 ] && [ -d "$FJ" ] && ok "--force drops join blockers only: it does not override the grading check" || { bad "--force overrode the grading check rc=$RF"; cat "$T/jf.txt"; }
+$WT join TJ 2 --repo "$WJ" --ungraded > "$T/ju.txt" 2>&1; RU=$?
+[ $RU -eq 0 ] && [ -f "$WJ/extra.py" ] && [ ! -e "$FJ" ] && grep -qF "ungraded" "$T/ju.txt" \
+  && ok "join --ungraded joins the changed fork and prints that it did" || { bad "--ungraded join rc=$RU"; cat "$T/ju.txt"; }
+rm -f "$WJ/extra.py"; git -C "$WJ" checkout -q -- a.py
+
 echo "== join: committed work, the checkout it runs in, staged and ignored work of the fork"
 git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1
 printf 'x = 5\n' > "$W8/a.py"; $WT fork T8 5 --repo "$W8" > /dev/null 2>&1; F5="$M/.claude/worktrees/T8-p5"; [ -d "$F5" ] || { echo "setup failed: fork 5"; exit 1; }
@@ -406,7 +456,7 @@ echo "== a closed plan is closed for its ticket checkout and its forks, not for 
 $WT new TCA --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCA="$M/.claude/worktrees/TCA"
 $WT new TCB --repo "$M" --no-fetch --base main > /dev/null 2>&1; WCB="$M/.claude/worktrees/TCB"
 for w in "$WCA" "$WCB"; do plan "$w"; mv "$w/PLAN_T.md" "$w/PLAN_C.md"; done
-approve PLAN_C.md "$WCA" || exit 1
+approve PLAN_C.md "$WCA" || exit 1; approve PLAN_C.md "$WCB" || exit 1       # each ticket has its own approval
 $DP --report --plan PLAN_C.md --repo "$WCA" > "$T/c1.txt" 2>&1 || { echo "setup failed: --report in TCA"; cat "$T/c1.txt"; exit 1; }
 $DP --begin 1 --label implementer --plan PLAN_C.md --repo "$WCB" > "$T/c2.txt" 2>&1; RCB=$?; [ $RCB -eq 0 ] && $DP --abort last --repo "$WCB" > /dev/null 2>&1
 $DP --begin 1 --label implementer --plan PLAN_C.md --repo "$WCA" > "$T/c3.txt" 2>&1; RCA=$?
@@ -426,7 +476,29 @@ $DP --begin 1 --label implementer --plan PLAN_L.md --repo "$WCB" > "$T/c5.txt" 2
   && ok "a closure recorded by 3.0.3 (keyed by the plan alone) still closes the plan: --begin exits 10" \
   || { bad "legacy closure ignored rc=$RCL"; [ $RCL -eq 0 ] && $DP --abort last --repo "$WCB" > /dev/null 2>&1; tail -2 "$T/c5.txt"; }
 git -C "$M" worktree remove --force "$FCA" > /dev/null 2>&1
+echo "== a wt.py fork runs under its origin's approval and records its origin's ticket"
+$WT new TFK --repo "$M" --no-fetch --base main > /dev/null 2>&1; WFK="$M/.claude/worktrees/TFK"
+plan "$WFK"; approve PLAN_T.md "$WFK" || exit 1
+$WT fork TFK 1 --repo "$WFK" > /dev/null 2>&1; FFK="$M/.claude/worktrees/TFK-p1"
+gd(){ git -C "$1" rev-parse --path-format=absolute --git-dir; }
+tid(){ python3 -I -c 'import hashlib,sys; print(hashlib.sha256(("%s::%s" % (open(sys.argv[1]+"/concord-id").read().strip(), sys.argv[2])).encode()).hexdigest()[:16])' "$(gd "$1")" "$2"; }
+stt(){ python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1] + "/.git/concord/" + sys.argv[3] + "/state.json")).get("ticket"))' "$M" x "$(sed -n 's/^BEGIN \(.*\)$/\1/p' "$1" | head -1)"; }
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$FFK" > "$T/k1.txt" 2>&1; RK1=$?; TK1=$(stt "$T/k1.txt"); [ $RK1 -eq 0 ] && $DP --abort last --repo "$FFK" > /dev/null 2>&1
+[ $RK1 -eq 0 ] && [ -f "$(gd "$FFK")/concord-id" ] && cmp -s "$(gd "$FFK")/concord-id" "$(gd "$WFK")/concord-id" && [ "$TK1" = "$(tid "$WFK" PLAN_T.md)" ] \
+  && ok "a fork made by wt.py gets its origin's checkout id, runs under the origin's approval and records the origin's ticket" \
+  || { bad "fork ticket: rc=$RK1 ticket=$TK1 expected=$(tid "$WFK" PLAN_T.md)"; tail -2 "$T/k1.txt"; }
+rm -f "$(gd "$FFK")/concord-id"             # a fork made by an older wt.py has no id file: it follows its .wt-fork origin
+$DP --begin 1 --label implementer --plan PLAN_T.md --repo "$FFK" > "$T/k2.txt" 2>&1; RK2=$?; TK2=$(stt "$T/k2.txt"); [ $RK2 -eq 0 ] && $DP --abort last --repo "$FFK" > /dev/null 2>&1
+[ $RK2 -eq 0 ] && [ "$TK2" = "$(tid "$WFK" PLAN_T.md)" ] && [ ! -e "$(gd "$FFK")/concord-id" ] \
+  && ok "a fork without an id file follows its .wt-fork origin to the origin's ticket and gets no id of its own" \
+  || { bad "old-style fork: rc=$RK2 ticket=$TK2 id file written=$([ -e "$(gd "$FFK")/concord-id" ] && echo yes || echo no)"; tail -2 "$T/k2.txt"; }
+$WT fork TFK 2 --repo "$FFK" > /dev/null 2>&1; FFK2="$M/.claude/worktrees/TFK-p2"
+cmp -s "$(gd "$FFK2")/concord-id" "$(gd "$WFK")/concord-id" && [ ! -e "$(gd "$FFK")/concord-id" ] \
+  && ok "a fork of an old-style fork gets the ticket's id from the first origin, and the old-style fork stays without one" \
+  || bad "fork of an old-style fork: id $(cat "$(gd "$FFK2")/concord-id" 2>/dev/null), ticket's $(cat "$(gd "$WFK")/concord-id"), old fork id file $([ -e "$(gd "$FFK")/concord-id" ] && echo written || echo absent)"
+git -C "$M" worktree remove --force "$FFK2" > /dev/null 2>&1
+git -C "$M" worktree remove --force "$FFK" > /dev/null 2>&1; $WT done TFK --repo "$M" --force > /dev/null 2>&1
 $WT done TCA --repo "$M" --force > /dev/null 2>&1; $WT done TCB --repo "$M" --force > /dev/null 2>&1
-$WT done T8 --repo "$M" --force > /dev/null 2>&1
+$WT done T8 --repo "$M" --force > /dev/null 2>&1; $WT done TJ --repo "$M" --force > /dev/null 2>&1
 [ "$(git -C "$M" worktree list --porcelain | grep -c 'worktrees/T')" = 0 ] && ok "worktree list clean" || bad "worktrees left"
 echo; echo "passed $pass, failed $fail"; rm -rf "$T"; [ $fail -eq 0 ]

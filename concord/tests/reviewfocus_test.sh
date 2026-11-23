@@ -56,9 +56,9 @@ git init -q --bare -b main "$O" && git clone -q "$O" "$R" 2> /dev/null || { echo
   mkdir sec docs big lib other; printf 'm = 1\n' > lib/m.py; printf 'o = 1\n' > other/o.py; printf 'x = 1\n' > a.py; printf 'k = 1\n' > sec/key.py; printf 'o = 1\n' > sec/old.py
   printf 't = 1\n' > sec/key_test.py; printf 'doc\n' > docs/x.md; printf 'b = 1\n' > big/f.py; printf '.claude/\n' > .gitignore
   { echo '# Plan'; phase 1 medium sec/key.py; phase 2 medium a.py; phase 3 low docs/x.md; phase 4 high docs/x.md
-    phase 5 low sec/key_test.py; phase 6 medium sec/old.py; phase 7 medium big/f.py; phase 8 low lib/m.py
+    phase 5 low sec/key_test.py; phase 6 medium 'sec/old.py, a.py'; phase 7 medium big/f.py; phase 8 low lib/m.py
     phase 9 medium 'lib/m.py, other/o.py'; phase 10 medium lib/m.py | sed 's/^Risk: medium$/&\nBaseline: skip/'
-    phase 11 high lib/m.py | sed 's/^Risk: high$/&\nBaseline: skip/'; } > PLAN_F.md
+    phase 11 high lib/m.py | sed 's/^Risk: high$/&\nBaseline: skip/'; phase 12 medium docs/x.md; phase 13 medium 'sec/key.py, a.py'; } > PLAN_F.md
   git add -A && git commit -qm init && git push -q origin main
   git checkout -qb pr7; printf 'x = 2\n' > a.py; git commit -qam pr7; git push -q origin HEAD:refs/pull/7/head
   git checkout -q main; git checkout -qb pr9; printf 'x = 3\n' > a.py; printf 'k = 9\n' > sec/key.py
@@ -109,7 +109,7 @@ run 3 "echo '# r' >> docs/x.md"; L=$(rid); flash "$L"; packet "$L"
 has "risk floor medium" && has "docs/x.md matches docs/*" && has "needs concord:reviewer-opus55" \
   && ok "low phase on a medium-floor path: --packet names the floor and reviewer-opus55" \
   || { bad "medium floor"; tail -2 "$T/out.txt"; }
-run 2 "echo '# m' >> docs/x.md"; Q=$(rid); packet "$Q"
+run 12 "echo '# m' >> docs/x.md"; Q=$(rid); packet "$Q"
 [ -n "$(pk)" ] && ! has "risk floor" && ok "medium phase on a medium-floor path: no floor note (the floor must rank above the tier)" \
   || { bad "floor note at an equal tier"; tail -3 "$T/out.txt"; }
 run 4 "echo '# s' >> docs/x.md"; H=$(rid); packet "$H"
@@ -137,7 +137,7 @@ mv "$NOTES" "$T/notes.off"
 run 1 "echo '# u' >> sec/key.py"; U=$(rid); packet "$U"
 [ -n "$(pk)" ] && ! has "risk floor" && ok "no notes file: medium phase on sec/key.py has no floor note" || { bad "no notes file"; tail -2 "$T/out.txt"; }
 mv "$T/notes.off" "$NOTES"
-run 1 "echo '# v' >> sec/key.py; echo '# v' >> a.py"; X=$(rid)
+run 13 "echo '# v' >> sec/key.py; echo '# v' >> a.py"; X=$(rid)
 $DP --review "$X" --packet --files a.py --repo "$R" > "$T/out.txt" 2>&1
 has "risk floor high" && has "sec/key.py matches sec/*" && ok "--review --packet --files a.py still names the run's floor (--files never narrows it)" \
   || { bad "phase --files narrowed the floor"; tail -3 "$T/out.txt"; }
@@ -176,10 +176,12 @@ python3 -I -c "
 import sys; p = sys.argv[1]; s = open(p).read(); h = s.index('## Phase 9 '); e = s.index('## Phase 10 ')
 open(p, 'w').write(s[:h] + s[h:e].replace('- \`true\`', '- \`echo REVISED-ACCEPTANCE-4c1\`') + s[e:])" "$R/PLAN_F.md"
 packet "$V"; P=$(pk)
-[ -n "$P" ] && grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && before "$P" "The phase that was implemented" "REVISED-ACCEPTANCE-4c1" \
-  && sed -n '/The phase that was implemented/,/REVISED-ACCEPTANCE-4c1/p' "$P" | grep -qF '`true`' \
-  && ok "after the plan's acceptance changes, the packet shows the phase the run followed and the new text only apart from it" \
-  || { bad "packet shows the revised phase as implemented ('$P')"; sed -n '/The phase that was implemented/,/Acceptance/p' "$P" 2>/dev/null; }
+grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && NOTAPPROVED=0 || NOTAPPROVED=1
+approve PLAN_F.md "$R" 9 || exit 1; packet "$V"; P=$(pk)
+[ $NOTAPPROVED -eq 1 ] && [ -n "$P" ] && grep -q 'REVISED-ACCEPTANCE-4c1' "$P" && before "$P" "The phase that was implemented" "REVISED-ACCEPTANCE-4c1" \
+  && sed -n '/The phase that was implemented/,/REVISED-ACCEPTANCE-4c1/p' "$P" | grep -qF '`true`' && grep -q 'later approved revision 2' "$P" \
+  && ok "a later approved revision's acceptance shows in the packet apart from the phase the run followed; an unapproved edit of the plan does not" \
+  || { bad "packet shows the revised phase as implemented ('$P', unapproved edit in packet: $((1 - NOTAPPROVED)))"; sed -n '/The phase that was implemented/,/Acceptance/p' "$P" 2>/dev/null; }
 python3 -I -c "
 import sys; p = sys.argv[1]; s = open(p).read(); open(p, 'w').write(s.replace('- \`echo REVISED-ACCEPTANCE-4c1\`', '- \`true\`'))" "$R/PLAN_F.md"
 printf 'REVIEW-JSON\n{"findings": [{"severity": "HIGH", "path": "other/o.py", "line": 8, "problem": "late line", "fix": "Guard it", "repro": {"input": "i", "expected": "e", "actual": "a"}}], "clauses": [], "tests": [], "verdict": "BLOCK"}\nEND-REVIEW-JSON\n' > "$T/late.json"
@@ -196,7 +198,7 @@ printf 'o = 1\n' > "$R/other/o.py"
 echo "== approve-only low tier"
 lastrev(){ python3 -I -c "import json,sys; r=json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or [{}]; print(r[-1].get(sys.argv[2]))" "$RUNS/$1" "$2"; }
 nrevs(){ python3 -I -c "import json,sys; print(len(json.load(open(sys.argv[1]+'/meta.json')).get('reviews') or []))" "$RUNS/$1"; }
-ledsev(){ python3 -I -c "import json,sys; L=json.load(open(sys.argv[1])); print(','.join(sorted(f['severity'] for f in L.get('findings', []) if f.get('run') == sys.argv[2])))" "$RUNS/ledger/PLAN_F.json" "$1"; }
+ledsev(){ python3 -I -c "import json,sys; L=json.load(open(sys.argv[1])); print(','.join(sorted(f['severity'] for f in L.get('findings', []) if f.get('run') == sys.argv[2])))" "$(ls "$RUNS"/ledger/PLAN_F-*.json | head -1)" "$1"; }
 clean(){ git -C "$R" checkout -q -- lib other; }
 f(){ printf '{"severity": "%s", "path": "lib/m.py", "line": 2, "line_end": 2, "problem": "%s", "fix": "f", "repro": {"input": "i", "expected": "e", "actual": "a"}, "clause": "", "test": "", "reraise_of": ""}' "$1" "$2"; }
 printf 'REVIEW-JSON\n{"findings": [%s], "clauses": [], "tests": [], "verdict": "FIX"}\nEND-REVIEW-JSON\n' "$(f MEDIUM "m only")" > "$T/med.txt"

@@ -45,7 +45,7 @@ newrepo; run 'echo y >> a.py; echo w >> b.py; rm c.py; git add a.py; echo "# edi
 line "OUT OF SCOPE (source):" "b.py" && ok "out-of-scope edit reported" || { bad "out of scope"; grep -i "scope" "$T/out.txt"; }
 line "DELETED:" "c.py" && ok "deletion reported" || bad "deleted: $(grep '^DELETED' "$T/out.txt")"
 line "STAGED BY EXECUTOR:" "a.py" && ok "staged edit reported" || bad "staged: $(grep -i staged "$T/out.txt")"
-has "PLAN FILE MODIFIED" && ok "plan edit reported" || bad "plan modified not reported"
+grep "^REJECTED" "$T/out.txt" | grep -qF "PLAN_T.md" && ok "plan edit rejects the run" || bad "plan edit not in the rejection"
 line "GIT INTERNALS CHANGED:" ".git/hooks/pre-commit (new)" && ok "new git hook reported" || bad "internals: $(grep -i internals "$T/out.txt")"
 
 echo "== guards"
@@ -103,13 +103,16 @@ cp -p "$SRC/CONTRACT.md" "$T/concord/CONTRACT.md"
 newrepo; mkdir -p "$R/data" "$R/.claude" && printf 'd\n' > "$R/data/old.csv" && echo "data/" >> "$R/.git/info/exclude"
 printf -- '---\nname: t\nenabled: true\nevent: bash\npattern: never-matches-xyz\n---\nx\n' > "$R/.claude/hookify.t.local.md"
 $WT new T1 --repo "$R" --no-fetch --base main --link data > "$T/n.txt" 2>&1 || { bad "wt.py new failed"; cat "$T/n.txt"; }
-W="$R/.claude/worktrees/T1"; cp "$R/PLAN_T.md" "$W/"
+W="$R/.claude/worktrees/T1"; cp "$R/PLAN_T.md" "$W/"; approve PLAN_T.md "$W" || exit 1       # a worktree is its own ticket
 run 'echo y >> a.py' "$W"
 ! has "OUTSIDE CHECKOUT CHANGED" && line "changed in scope:" "a.py" && ok "clean worktree run has no OUTSIDE CHECKOUT CHANGED line" \
   || { bad "worktree clean run: $(grep -e '^OUTSIDE' -e '^status' "$T/out.txt")"; }
 run 'echo y >> a.py; echo z > data/new.csv; mkdir -p data/__pycache__ && echo c > data/__pycache__/m.pyc; echo x >> "$R/.claude/hookify.t.local.md"' "$W"
 line "OUTSIDE CHECKOUT CHANGED:" "data/new.csv (linked folder)" && ok "write through a linked folder into the main checkout reported" \
   || { bad "linked-folder write not reported"; grep -i -e outside -e status "$T/out.txt"; }
+$DP --grade "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" --repo "$W" > "$T/g.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && grep -qF "linked folder" "$T/g.txt" && ok "--grade refuses a run that wrote through a linked folder: it runs again" \
+  || { bad "--grade after a linked-folder write rc=$RC"; cat "$T/g.txt"; }
 ! grep "^OUTSIDE CHECKOUT CHANGED:" "$T/out.txt" | grep -q "__pycache__" && ok "cache output inside linked folders not reported" \
   || bad "cache output reported: $(grep '^OUTSIDE' "$T/out.txt")"
 line "OUTSIDE CHECKOUT CHANGED:" "$R/.claude/hookify.t.local.md (modified)" && ok "edit of the main checkout's rule file from a worktree run reported" \
@@ -142,8 +145,8 @@ PI
 chmod +x "$T/bin/pi"
 newrepo; FAKE_ACTIONS="echo 'y = 9' >> a.py" $DP 1 --plan PLAN_T.md --via pi --model opencode-go/x#high --no-baseline --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 X="$R/.git/concord/$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)"; S="$X/pi"
-grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && grep -qxF -- "$S" "$S/argv.txt" && ! grep -qx -- "--no-session" "$S/argv.txt" \
-  && ok "pi gets --model provider/id:high and --session-dir <run>/pi" || { bad "pi argv rc=$RC"; cat "$S/argv.txt" 2>/dev/null | head -20; tail -3 "$T/out.txt"; }
+grep -qxF "opencode-go/x:high" "$S/argv.txt" 2>/dev/null && [ -L "$S" ] && grep -qxF -- "$(readlink "$S")" "$S/argv.txt" && ! grep -qx -- "--no-session" "$S/argv.txt" \
+  && ok "pi gets --model provider/id:high and a --session-dir outside the run folder that <run>/pi links to" || { bad "pi argv rc=$RC"; cat "$S/argv.txt" 2>/dev/null | head -20; tail -3 "$T/out.txt"; }
 [ "$(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)" = "key-ok offline=1 agent-ok " ] && ! grep -rqF test-key-123 "$X" \
   && ok "pi gets the key file's key, PI_OFFLINE=1 and its own agent folder with models.json; the run folder never holds the key" \
   || { bad "pi env: $(tr '\n' ' ' < "$S/env.txt" 2>/dev/null)"; grep -rlF test-key-123 "$X"; }
@@ -250,7 +253,7 @@ ph(){ printf '\n## Phase %s - p%s\nExecutor: %s\n%b\n' "$1" "$1" "$2" "$3"; }
   ph 5 deepseek-flash 'Size: ~600 lines\nAfter: 3 (shares b.py)\nFiles: b.py'; ph 6 deepseek-flash 'Files: d.py'
   ph 7 glm-flash 'Size: ~180 lines\nFiles: e.py'; } > "$R/PLAN_E.md"
 $DP --estimate --plan PLAN_E.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && line "ESTIMATE" "PLAN_E.md" && python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))["estimates"]["PLAN_E.md"]; assert isinstance(v, int) and v > 0' \
+[ $RC -eq 0 ] && line "ESTIMATE" "PLAN_E.md" && python3 -I -c 'import json,sys; v=[t for t in json.load(open(sys.argv[1]))["tickets"].values() if t["plan"] == "PLAN_E.md"][0]["estimate"]; assert isinstance(v, int) and v > 0' \
   "$R/.git/concord/drift.json" 2>/dev/null && ok "E.1 --estimate exits 0, names the plan and stores an integer ETA for the drift gate" || { bad "E.1 rc=$RC"; tail -5 "$T/out.txt"; }
 grep -Eqx "Phase 1 planner [0-9]+ min ──> Phase 2 deepseek-flash [0-9]+ min ──> Phase 4 deepseek-flash [0-9]+ min" "$T/out.txt" \
   && grep -Eqx "Phase 3 deepseek-flash [0-9]+ min ──> Phase 5 deepseek-flash [0-9]+ min" "$T/out.txt" \

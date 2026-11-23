@@ -76,7 +76,7 @@ newpr(){ local n=$1; shift; ( set -e; cd "$C"; git checkout -q main; git checkou
 pushpr(){ ( set -e; cd "$C"; git fetch -q origin "refs/pull/$1/head"; git checkout -q FETCH_HEAD; printf '%s\n' "$3" > "$2"
   git add -A; git commit -qm fix; git push -q origin "HEAD:refs/pull/$1/head"; git checkout -q main ) || { echo "setup failed: push $1"; exit 1; }
   prjson "$1"; }
-# runpr N RISK FILES ACTIONS [BRANCH]: a Concord run (fake executor, Risk RISK, plan marker PLAN-MARK-N) of FILES on a branch of the clone,
+# runpr N RISK FILES ACTIONS [BRANCH] (PASSIT=1 records the run's PASS before it is committed): a Concord run (fake executor, Risk RISK, plan marker PLAN-MARK-N) of FILES on a branch of the clone,
 # committed and pushed as PR N's head; BRANCH (default prN) is the branch the run is recorded on; PRE (a shell command, default none)
 # runs on the new branch and is committed before the run starts (an unrecorded change of the PR)
 runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
@@ -86,6 +86,7 @@ runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
   approve ".claude/PLAN_$n.md" "$C" || exit 1
   FAKE_ACTIONS="$actions" $DP 1 --plan ".claude/PLAN_$n.md" --via qwen --model fake/m --no-baseline --repo "$C" > "$T/out.txt" 2>&1
   RUNID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$RUNID" ] || { echo "setup failed: run for PR $n"; cat "$T/out.txt"; exit 1; }
+  if [ -n "${PASSIT:-}" ]; then $DP --verdict "$RUNID" PASS --repo "$C" > "$T/passit.txt" 2>&1 || { echo "setup failed: PASS of the run for PR $n"; cat "$T/passit.txt"; exit 1; }; fi
   ( set -e; cd "$C"; git add -A; git commit -qm "run $n"; git push -qf origin "HEAD:refs/pull/$n/head"; git checkout -q main; git branch -qD "$br" ) || { echo "setup failed: commit $n"; exit 1; }
   prjson "$n"; }
 # flash N MODEL [ARGS]: a fake-model PR review
@@ -105,6 +106,8 @@ C0=$(calls); FAKE_REFUSE=1 flash 51 fake/m --tier medium; RC1=$?; cp "$T/out.txt
 [ $RC1 -eq 9 ] && grep -qF "PROVIDER LIMIT" "$T/r51.txt" && [ "$(calls)" = "$((C0+1))" ] && has "0 review(s) recorded" && has "UNREVIEWED" && [ $RC -eq 1 ] \
   && ok "1 --review-pr refused (Free usage limit reached): exit 9, PROVIDER LIMIT, one call, nothing recorded; the head is UNREVIEWED (exit 1)" \
   || { bad "1 refused --review-pr rc=$RC1 status rc=$RC calls=$(( $(calls) - C0 ))"; tail -3 "$T/r51.txt"; tail -2 "$T/out.txt"; }
+grep -q "^NOT GRADED: no run graded a candidate" "$T/out.txt" \
+  && ok "19 a head in a repository where no run passed on a candidate prints NOT GRADED: no run graded a candidate" || { bad "19 no NOT GRADED line without runs"; cat "$T/out.txt"; }
 R="$T/repo"; mkdir -p "$R"
 ( set -e; cd "$R"; git init -q -b main; git config user.email t@t; git config user.name t
   printf 'x = 1\n' > a.py; printf '.claude/\n' > .gitignore; git add -A; git commit -qm init
@@ -392,6 +395,7 @@ approve PLAN_T94.md "$W94" || exit 1
 $WT fork T94 1 --repo "$W94" > "$T/fork94.txt" 2>&1 || { echo "setup failed: wt fork"; cat "$T/fork94.txt"; exit 1; }
 FAKE_ACTIONS="echo 'c = 94' > core.py" $DP 1 --plan PLAN_T94.md --via qwen --model fake/m --no-baseline --repo "$C/.claude/worktrees/T94-p1" > "$T/out.txt" 2>&1
 RUN94=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$RUN94" ] || { echo "setup failed: fork run"; cat "$T/out.txt"; exit 1; }
+$DP --verdict "$RUN94" PASS --repo "$C/.claude/worktrees/T94-p1" > "$T/v94.txt" 2>&1 || { echo "setup failed: --verdict $RUN94 (join needs a PASS of the fork's run, and a run with no verdict blocks --report)"; cat "$T/v94.txt"; exit 1; }
 $WT join T94 1 --repo "$W94" > "$T/join94.txt" 2>&1 || { echo "setup failed: wt join"; cat "$T/join94.txt"; exit 1; }
 ( set -e; cd "$W94"; git add core.py; git commit -qm "phase 1"; git push -q origin "HEAD:refs/pull/94/head" ) || { echo "setup failed: push 94"; exit 1; }
 prjson 94
@@ -404,7 +408,6 @@ $DP --review-pr 94 --packet --repo "$W94" > "$T/out.txt" 2>&1; PK=$(sed -n 's/^P
 newpr 95 p95.py "p = 95"
 $DP --review-pr 94 --packet --user-approved "owner words for PR 94" --repo "$W94" > "$T/out.txt" 2>&1
 $DP --review-pr 95 --packet --tier medium --user-approved "owner words for PR 95" --repo "$C" > "$T/out.txt" 2>&1
-$DP --verdict "$RUN94" PASS --repo "$W94" > "$T/v94.txt" 2>&1 || { echo "setup failed: --verdict $RUN94 (a run with no verdict blocks --report)"; cat "$T/v94.txt"; exit 1; }
 $DP --report --plan PLAN_T94.md --repo "$W94" > "$T/rep94.txt" 2>&1; REP94=$(sed -n 's/^report: //p' "$T/rep94.txt" | head -1); [ -f "$REP94" ] || REP94="$T/none"
 OV94=$(sed -n '/^## Overrides/,/^## Phases/p' "$REP94" 2>/dev/null)
 case "$OV94" in *"owner words for PR 94"*) IN=1;; *) IN=0;; esac; case "$OV94" in *"owner words for PR 95"*) OUT=1;; *) OUT=0;; esac
@@ -718,5 +721,17 @@ resolves F1 "fixed" "$T/resolve69.txt"
 opus 69 medium concord:reviewer-opus55 "$T/resolve69.txt" --files api.py; st 69
 has "FINDINGS OPEN (F1" && [ $RC -eq 1 ] && ok "18 an outside-diff finding stored with the diff's files of its head keeps the whole diff: after client.py enters, an api.py review leaves it open" \
   || bad "18 the stored file list stood in for the whole diff, rc=$RC: $(sed -n 1p "$T/out.txt")"
+
+# 19 the gate also says whether the head is the tree a PASS run graded; the exit code stays review-only
+PASSIT=1 runpr 70 medium a.py 'echo gr >> a.py'; RUN70=$RUNID
+st 70
+grep -q "^GRADED: head matches the candidate run $RUN70 (phase 1) passed" "$T/out.txt" && [ $RC -eq 1 ] \
+  && ok "19 a head whose tree is the candidate of a PASS run prints GRADED naming the run and phase; the exit code stays review-only (exit 1: unreviewed)" \
+  || { bad "19 no GRADED line, rc=$RC"; cat "$T/out.txt"; }
+pushpr 70 a.py 'a = 71'
+st 70
+grep -q "^NOT GRADED: .*$RUN70" "$T/out.txt" && grep -q "^NOT GRADED: .*1 file" "$T/out.txt" \
+  && ok "19 a head edited after the graded run prints NOT GRADED naming the newest graded candidate's run and how many files differ" \
+  || { bad "19 no NOT GRADED line after an edit"; cat "$T/out.txt"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

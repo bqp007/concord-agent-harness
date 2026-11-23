@@ -140,6 +140,10 @@ else
     sandbox-exec -f "$SB" /bin/sh -c "cat '$HOME/.cache/huggingface/token'" >/dev/null 2>&1 && bad "F.6 HF token read was ALLOWED" || ok "F.6 HF token read: blocked"
     printf '{}' > "$HOME/.claude.json"
     sandbox-exec -f "$SB" /bin/sh -c "cat '$HOME/.claude.json'" >/dev/null 2>&1 && bad "F.7 ~/.claude.json read was ALLOWED" || ok "F.7 ~/.claude.json read: blocked"
+    # 3.1.0: the grading evidence is out of the executor's reach: no write into the git folder (hooks, config, index, the
+    # runs' records) and none into the run folder, which lives in it
+    sandbox-exec -f "$SB" /bin/sh -c "echo x > '$R/.git/evil'" >/dev/null 2>&1 && bad "F.8 write into the git folder was ALLOWED" || ok "F.8 write into the git folder: blocked"
+    sandbox-exec -f "$SB" /bin/sh -c "echo x > '$(dirname "$SB")/evil'" >/dev/null 2>&1 && bad "F.9 write into the run folder was ALLOWED" || ok "F.9 write into the run folder: blocked"
   fi
 fi
 fi

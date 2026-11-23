@@ -45,7 +45,7 @@ calls(){ [ -f "$T/calls" ] && wc -l < "$T/calls" | tr -d ' ' || echo 0; }
 rid(){ sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
 rv(){ sed -n 's/^REVIEW \([^ ]*\) of.*/\1/p' "$T/out.txt" | head -1; }
 mj(){ python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {"m": m}))' "$1" "$2" 2>&1; }
-lj(){ mj "$R/.git/concord/ledger/$1.json" "$2"; }
+lj(){ mj "$(ls "$R"/.git/concord/ledger/"$1"-*.json | head -1)" "$2"; }       # the ticket ledger is <plan stem>-<ticket id>.json
 pyblock(){ python3 -I - "$T/concord/concord.py" "$T" "$@"; [ $? -eq 0 ] && pass=$((pass+1)) || fail=$((fail+1)); }
 
 # fixtures: reviewer answers
@@ -318,8 +318,9 @@ record "$RID" reviewer-opus55 "$T/free.txt" "$R" > "$T/out.txt" 2>&1; RC=$?
 
 echo "== reviewers see the current plan phase"
 sed -i.bak 's/Purpose: ORIGINAL-PURPOSE/Purpose: NEW-PURPOSE-77/' "$R/PLAN_T.md"
-review "$RID"; RV=$(rv); RVD="$R/.git/concord/$RV"
-grep -q "NEW-PURPOSE-77" "$RVD/prompt.txt" && ok "prompt shows the plan phase as it is now, not the dispatch snapshot" || bad "stale phase text"
+review "$RID"; RV=$(rv); RVD="$R/.git/concord/$RV"; grep -q "NEW-PURPOSE-77" "$RVD/prompt.txt" && SEEN=1 || SEEN=0
+approve PLAN_T.md "$R" || exit 1; review "$RID"; RV=$(rv); RVD="$R/.git/concord/$RV"
+[ $SEEN -eq 0 ] && grep -q "NEW-PURPOSE-77" "$RVD/prompt.txt" && ok "prompt shows the phase of a later approved revision, not the dispatch snapshot; an unapproved edit stays out" || bad "stale phase text (unapproved edit in the prompt: $SEEN)"
 printf '# Plan\n## Phase 2 - other\nPurpose: OTHER\nFiles: b.py\n' > "$R/PLAN_T.md"
 review "$RID"; RV=$(rv); RVD="$R/.git/concord/$RV"
 grep -q "ORIGINAL-PURPOSE" "$RVD/prompt.txt" && ! grep -q "not found in plan" "$T/out.txt" && ok "phase gone from the plan: prompt falls back to the dispatch snapshot, no stderr noise" || bad "no snapshot fallback / noise"

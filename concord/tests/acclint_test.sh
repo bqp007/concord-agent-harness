@@ -126,8 +126,8 @@ $DP --lint 1 --plan PLAN_C.md --repo "$R" > "$T/out.txt" 2>&1; $DP --lint 2 --pl
 has "PLAN LINT: phase 1 lists the Cases file cases.md" && ! has 'no `Tests:` line' && ! grep -q "lists the Cases file" "$T/out2.txt" \
   && ok "C.2 an executor phase listing the Cases file is linted; a planner phase may list it" || { bad "C.2"; cat "$T/out.txt" "$T/out2.txt"; }
 FAKE_ACTIONS='echo "x = 2" > a.py; echo "case 2" >> cases.md' $DP 1 --plan PLAN_C.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
-has "ACCEPTANCE FILES CHANGED: cases.md (modified)" \
-  && ok "C.3 an executor edit of the Cases file is an acceptance change" || { bad "C.3"; grep -i "acceptance" "$T/out.txt"; }
+has "REJECTED (not graded)" && grep "^REJECTED" "$T/out.txt" | grep -qF "cases.md" \
+  && ok "C.3 an executor edit of the Cases file is out of its write scope: the run is rejected" || { bad "C.3"; head -4 "$T/out.txt"; }
 rm -f "$T/concord/repo-notes/repo.md"
 fi
 
@@ -136,19 +136,19 @@ $DP --begin 1 --label me --plan PLAN_D.md --repo "$R" > "$T/out.txt" 2>&1; B1=$(
 [ -n "$B1" ] || { echo "setup failed: --begin"; cat "$T/out.txt"; exit 1; }
 echo "- Handoff: edited by the planner" >> "$R/PLAN_D.md"
 $DP --end "$B1" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-has "plan edited during the planner run (allowed; executor runs would FAIL)" && ! has "PLAN FILE MODIFIED" && has "plan.snapshot.md" \
-  && ok "D.1 planner run (--label me) report: allowed line with the snapshot path, no PLAN FILE MODIFIED" || { bad "D.1 report rc=$RC"; grep -i 'plan' "$T/out.txt" | head -3; }
+[ $RC -eq 0 ] && has "DELEGATE RESULT" && ! has "REJECTED" \
+  && ok "D.1 planner run (--label me) may edit its plan: the run is not rejected" || { bad "D.1 report rc=$RC"; grep -i 'plan' "$T/out.txt" | head -3; }
 [ "$(meta "$B1" plan_modified)" = True ] && ok "D.2 meta.plan_modified stays true (ledger truth)" || bad "D.2 plan_modified=$(meta "$B1" plan_modified)"
 approve PLAN_D.md "$R" || exit 1      # the planner has the edited plan verified
 $DP --begin 1 --label planner --plan PLAN_D.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?; B2=$(bid)
-[ $RC -eq 0 ] && has "plan changed since run" && ! has "still the version the executor wrote" && ok "D.3 next planner --begin accepted with the note" \
+[ $RC -eq 0 ] && ! has "still the version the executor wrote" && ok "D.3 next planner --begin accepted once the edited plan is approved" \
   || { bad "D.3 next begin rc=$RC"; head -3 "$T/out.txt"; }
 [ -n "$B2" ] && $DP --end "$B2" --repo "$R" > /dev/null 2>&1
 $DP --begin 1 --label implementer --plan PLAN_D2.md --repo "$R" > "$T/out.txt" 2>&1; B3=$(bid)
 [ -n "$B3" ] || { echo "setup failed: implementer --begin"; cat "$T/out.txt"; exit 1; }
 echo "- edited by the implementer" >> "$R/PLAN_D2.md"
 $DP --end "$B3" --repo "$R" > "$T/out.txt" 2>&1
-has "PLAN FILE MODIFIED" && ! has "plan edited during the planner run" && ok "D.4 implementer (claude) session run: PLAN FILE MODIFIED kept" || { bad "D.4 implementer report"; grep -i plan "$T/out.txt" | head -3; }
+grep "^REJECTED" "$T/out.txt" | grep -qF "PLAN_D2.md" && ok "D.4 implementer (claude) session run that edits the plan: rejected, the plan named" || { bad "D.4 implementer report"; grep -i plan "$T/out.txt" | head -3; }
 approve PLAN_D2.md "$R" || exit 1      # verified, so only the executor's edit can refuse the next --begin
 $DP --begin 1 --label planner --plan PLAN_D2.md --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -ne 0 ] && has "still the version the executor wrote" && ok "D.5 --begin after an executor's plan edit refused" || { bad "D.5 rc=$RC"; head -3 "$T/out.txt"; $DP --abort last --repo "$R" > /dev/null 2>&1; }

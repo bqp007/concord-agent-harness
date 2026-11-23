@@ -59,7 +59,8 @@ CRITICAL PATH: 1 → 2 = 24 min; session lane 7 min; final revision 20 min
 ```
 ETA: <N> min, lands at <hh:mm> local
 
-## Handoff (if another session runs it)
+## Handoff
+(if another session runs it)
 - <settled decisions, what the investigation learned>
 
 <!--
@@ -76,10 +77,10 @@ ETA: <N> min, lands at <hh:mm> local
 - Acceptance: fast, deterministic offline commands in backticks that check behaviour, not wiring, tell right from
   plausible wrong code, and fail on the untouched code (red run) unless marked `(characterization)`. A
   behaviour-preserving phase sets `Baseline: pass`, optionally `Characterize: <command>` (output diffed before and
-  after). Acceptance leaves tracked files and the phase's Files as it found them (exit 7 otherwise): output goes to
-  ignored or untracked paths.
+  after). Acceptance leaves the checkout as it found it (exit 7 otherwise): output goes to ignored paths or to
+  cache output (built-in names and the `generated` setting).
 - Test plan: one row per touched behavior; ADD only when no test covers it. `Tests:` is a planning estimate: the report
   prints it beside the actual test lines and it decides nothing. Home names the test file: an executor phase that changes a Home file its Files: does
-  not list cannot pass (ACCEPTANCE FILES CHANGED, exit 7).
+  not list is rejected and cannot pass (exit 7).
 - One phase: about 5 files and 7 steps at most; Notes, Interfaces, Decisions, Out of scope only when needed.
 -->
