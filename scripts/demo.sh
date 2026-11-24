@@ -1,7 +1,10 @@
 #!/bin/bash
 # Usage: bash scripts/demo.sh [--keep]
-# The governed loop with no model, no network and no account: a scripted executor first edits outside its
-# scope (the phase fails, cause EXECUTOR), then fixes the bug inside it (red run, evidence, review, PASS).
+# The governed loop with no model, no network and no account, in both modes. Delegate mode: a scripted executor
+# first edits outside its scope (the phase fails, cause EXECUTOR), then fixes the bug inside it (red run, evidence,
+# review, PASS). Execute mode: the script plays the planning session and writes the same phase inside a recorded
+# run (--begin / --end), with the same check, review and verdict. Each ticket's report then names who wrote the
+# phase, the plan revision, the graded candidate and its review.
 # --keep keeps the temporary folder (success or failure) and prints its path. Exit: 0 ok, 2 bad input or
 # python3/git unusable, otherwise the failing dispatcher step's exit code.
 set -u
@@ -139,10 +142,51 @@ echo "9. Verdict: record PASS with the review on file."
 out=$(D --verdict "$RUN2" PASS --note "demo" 2>&1); need "the PASS verdict"
 printf '%s\n' "$out"
 
+# 10. Execute mode: the same ticket in a second shop whose plan assigns phase 2 to the planner. The planning session
+#     writes the phase itself, inside a recorded run; the check, the review and the verdict are the same.
+echo "10. Execute mode: a second shop whose plan assigns phase 2 to the planner; this script plays the planning session."
+E="$W/shop-execute"
+git clone -q "$S" "$E" || die "cannot clone the shop into $E"
+sed 's/^Executor: free-deepseek-flash$/Executor: planner/' "$SRC/examples/PLAN_example.md" > "$E/PLAN_demo.md" ||
+  die "cannot write the execute-mode plan"
+printf '/PLAN_demo.md\n' >> "$E/.git/info/exclude" || die "cannot exclude $E/PLAN_demo.md"
+DE() { python3 "$W/concord/concord.py" "$@" --plan "$E/PLAN_demo.md" --repo "$E"; }
+out=$(DE --lint 2 2>&1); need "the execute-mode lint"
+read=$(printf '%s\n' "$out" | sed -n 's/^PLAN-READ: //p' | head -1)
+[ -f "$read" ] || fail "the execute-mode lint wrote no plan read"
+printf 'VERDICT: APPROVE\nPLAN-HASH: %s\n' "$(basename "$read" .md)" > "$W/verifier-answer-execute.txt"
+DE --plan-verdict "$W/verifier-answer-execute.txt" > /dev/null; need "recording the execute-mode plan-verifier answer"
+out=$(DE --begin 2 --label planner 2>&1); need "--begin"
+printf '%s\n' "$out"
+RUN3=$(printf '%s\n' "$out" | sed -n 's/^BEGIN \([^ ]*\).*/\1/p' | head -1)
+[ -n "$RUN3" ] || fail "--begin printed no run id"
+cp "$FIXED" "$E/cart.py" || fail "the planning session could not write cart.py"
+out=$(DE --end "$RUN3" 2>&1); need "--end"
+printf '%s\n' "$out"
+printf '%s\n' "$out" | grep -q 'acceptance after run: 1/1 pass' || fail "the execute-mode run did not make the test pass"
+out=$(DE --review "$RUN3" --via qwen --model fake/m 2>&1); need "the execute-mode review"
+printf '%s\n' "$out"
+out=$(DE --verdict "$RUN3" PASS --note "demo" 2>&1); need "the execute-mode PASS verdict"
+printf '%s\n' "$out"
+
+# 11. Reports: each ticket's test report, from recorded data. Its phase table names who wrote each phase, the plan
+#     revision the run followed, the graded candidate and the latest review of that candidate.
+echo "11. Reports: each ticket's phase table names who wrote the phase, the plan revision, the candidate and its review."
+for m in delegate execute; do
+  if [ "$m" = delegate ]; then repo=$S; else repo=$E; fi
+  out=$(python3 "$W/concord/concord.py" --report --plan "$repo/PLAN_demo.md" --repo "$repo" 2>&1); need "the $m-mode report"
+  rep=$(printf '%s\n' "$out" | sed -n 's/^report: //p' | head -1)
+  [ -f "$rep" ] || fail "the $m-mode report printed no path"
+  echo "   $m mode:"
+  sed -n '/^| Phase |/,/^$/p' "$rep" | sed 's/^/   /'
+done
+
 [ -n "$KEEP" ] && { echo "kept: $W"; KEPT=1; }
 echo "Summary:"
-echo "- Attempt 1 changed README.md outside Files: FAIL, cause EXECUTOR."
+echo "- Delegate mode, attempt 1 changed README.md outside Files: FAIL, cause EXECUTOR."
 echo "- Restore reverted cart.py and README.md."
-echo "- Attempt 2 changed cart.py only: the baseline failed and the acceptance after the run passed."
+echo "- Delegate mode, attempt 2 changed cart.py only: the baseline failed and the acceptance after the run passed."
 echo "- Review: CLEAN. Verdict: PASS."
+echo "- Execute mode: the planning session wrote cart.py inside --begin/--end; the same check, review (CLEAN) and PASS."
+echo "- Reports: each phase row names its writer, the plan revision, the graded candidate and its review."
 exit 0

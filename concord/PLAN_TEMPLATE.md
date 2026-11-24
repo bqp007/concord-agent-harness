@@ -64,7 +64,7 @@ ETA: <N> min, lands at <hh:mm> local
 - <settled decisions, what the investigation learned>
 
 <!--
-- The schedule (`## Passes`) and its diagram: `/concord:plan-then-delegate` steps 3 and 7. The planner writes `Size:` and `After:`, never
+- The schedule (`## Passes`) and its diagram: `/concord:run` §4. The planner writes `Size:` and `After:`, never
   minutes; `--estimate` turns them and the run ledger into minutes. `After:` names only a real wait, with its reason.
 - Tier: the planner's judgment of the plan's size, which sets the estimate's final revision and turns on the drift clock;
   no line count decides it.
@@ -79,7 +79,7 @@ ETA: <N> min, lands at <hh:mm> local
   behaviour-preserving phase sets `Baseline: pass`, optionally `Characterize: <command>` (output diffed before and
   after). Acceptance leaves the checkout as it found it (exit 7 otherwise): output goes to ignored paths or to
   cache output (built-in names and the `generated` setting).
-- Test plan: one row per touched behavior; ADD only when no test covers it. `Tests:` is a planning estimate: the report
+- Test plan: the rows and actions follow the `concord:lean-testing` skill. `Tests:` is a planning estimate: the report
   prints it beside the actual test lines and it decides nothing. Home names the test file: an executor phase that changes a Home file its Files: does
   not list is rejected and cannot pass (exit 7).
 - One phase: about 5 files and 7 steps at most; Notes, Interfaces, Decisions, Out of scope only when needed.

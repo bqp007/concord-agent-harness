@@ -16,12 +16,12 @@ The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
 bash install.sh --dry-run            # shows every link, copy, keep and backup; writes nothing
-bash install.sh                      # the default: links the commands, agents and skill, installs the dispatcher, then runs Concord's test suites from the installed copy
+bash install.sh                      # the default: links the commands, agents and skills, installs the dispatcher, then runs Concord's test suites from the installed copy
 bash install.sh --plugin             # the marketplace layout instead of the links; prints the /plugin commands
 bash install.sh --repo ~/src/myrepo  # also drops the hook rules into that repository's .claude/
 ```
 
-The default (`--link`) symlinks `/concord:plan-then-delegate`, `/concord:delegate` and `/concord:rules-review`, the agents and the `concord-design-review` skill into `~/.claude`, and edits your live setup: it writes the Concord rules into `~/.claude/CLAUDE.md` between `<!-- concord:begin -->` and `<!-- concord:end -->`, and adds to `~/.claude/settings.json` the keys it lacks: the drift hook, compaction windows for two models, and `sandbox.excludedCommands` entries for `gh *`, `git push *`, `git fetch *`, `git pull *` and `git clone *`, which then run outside Claude Code's sandbox in every project. It backs up each file it changes first and leaves everything outside the markers untouched.
+The default (`--link`) symlinks the commands, the agents and the five skills into `~/.claude` (names below), and edits your live setup: it writes the Concord rules into `~/.claude/CLAUDE.md` between `<!-- concord:begin -->` and `<!-- concord:end -->`, and adds to `~/.claude/settings.json` the keys it lacks: the drift hook, compaction windows for two models, and `sandbox.excludedCommands` entries for `gh *`, `git push *`, `git fetch *`, `git pull *` and `git clone *`, which then run outside Claude Code's sandbox in every project. It backs up each file it changes first and leaves everything outside the markers untouched.
 
 With `--plugin` the commands and agents come from the marketplace instead. Each install records the links it makes, with their targets, in `~/.claude/concord/links.tsv`. The installer removes the links that point into this checkout or that this record lists with their current target, such as a link into a moved or deleted clone, and keeps, with a note, any other link of the same name, such as a personal skill. A link from an install that left no record counts as Concord's only when it points to the same path inside another Concord checkout that still exists. The default install follows the same rule and never replaces such a link. Add the marketplace in Claude Code:
 
@@ -38,6 +38,20 @@ Prose style: `~/.claude/concord/style.conf` sets `prose = lean` (the default, le
 
 Restart Claude Code once after installing: new agent files load only at session start.
 
+### Names
+
+Both install modes give the same names.
+
+| What | Plugin install (`--plugin`) | Linked install (default) |
+|---|---|---|
+| The workflow | `/concord:run execute <task>`, `/concord:run delegate <task>`, either with `--plan PLAN_<ticket>.md` | the same, from `~/.claude/commands/concord/run.md` |
+| Former entry points | `/concord:plan-then-delegate <task>`, `/concord:delegate <phases>` (both call `/concord:run delegate`) | the same |
+| Weekly rules review | `/concord:rules-review` | the same |
+| Skills | `/concord:design-review`, `/concord:plan`, `/concord:verify-plan`, `/concord:lean-testing`, `/concord:review-change` | the same, from the links `~/.claude/skills/concord:<name>` |
+| Agents | `concord:implementer`, `concord:implementer-opus48`, `concord:plan-verifier`, `concord:reviewer-opus55`, `concord:reviewer-delta` | the same without the `concord:` prefix (links in `~/.claude/agents`) |
+
+A linked skill takes the name of its link, `concord:<name>`, and the plugin gives each skill the same name, so an agent preloads it by that name in either mode. The CLAUDE.md rules block names the agents as the install mode provides them.
+
 ## Executors
 
 - `concord/models.conf` maps plain names to a harness and a model id: `free-deepseek-flash` and `free-glm-flash` on the OpenCode Zen free tier (no credits, a daily limit); `deepseek-flash` (default), `glm`, `minimax` and the Kimi and Qwen models (`concord.py --models` lists their names) on the OpenCode Go allowance; `zen-*` on OpenCode credits, used only after you agree. `sonnet`, `haiku` and `opus` always mean the Claude Code `concord:implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
@@ -53,7 +67,7 @@ The dispatcher does not depend on Claude Code. What the Claude Code adapter prov
 | Claude Code piece | Role | Codex CLI | Any other CLI or a plain terminal |
 |---|---|---|---|
 | `CLAUDE.md` | the standing rules the planner follows | `AGENTS.md` at the repository root (same text) | paste into the planner's system prompt |
-| `/concord:plan-then-delegate`, `/concord:delegate`, `/concord:rules-review` | step lists for the planner | saved prompts with the same text | run the steps by hand; every one is a `concord.py` call |
+| `/concord:run`, the `concord:*` skills, `/concord:rules-review` | step lists for the planner | saved prompts with the same text | run the steps by hand; every one is a `concord.py` call |
 | `concord:implementer*` agents | Claude models as executors on the subscription | not available; use OpenCode executors for every phase | same |
 | `concord:reviewer-opus*` agents | medium and high review tiers | a second Codex session fed the packet from `concord.py --review <run> --packet`, its REVIEW-JSON recorded with `--review-record` | same, with any strong model; keep the reviewer's context fresh |
 | hookify rules | block destructive commands before they run | Codex's own sandbox and approval policy | your shell's discipline |

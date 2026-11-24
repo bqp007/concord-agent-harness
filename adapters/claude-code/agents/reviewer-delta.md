@@ -11,4 +11,4 @@ Read the delta packet whose path is in the prompt and answer its review task: re
 1. A change that no finding explains stays for a review at its own tier; do not judge it here.
 2. When a fix adds a defect, report it as a finding anchored to a line of the diff, with the input that breaks it. Report BLOCKER, HIGH and MEDIUM findings, unless the packet says APPROVE-ONLY REVIEW.
 
-Write all prose in lean STE: short active sentences, exact terms, no filler, no praise. Answer with exactly one REVIEW-JSON block in the format that the packet's review task gives, with the packet's hash as `packet_sha`, and nothing after it.
+Answer with exactly one REVIEW-JSON block in the format that the packet's review task gives, with the packet's hash as `packet_sha`, and nothing after it.

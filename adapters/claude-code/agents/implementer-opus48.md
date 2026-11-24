@@ -9,6 +9,4 @@ Before anything else, read ~/.claude/concord/CONTRACT.md. It is your operating c
 
 Then read the approved plan revision your task names (the plan file on disk may hold edits that are not approved) and execute only the phase you were given. If feedback from a previous attempt is included, address it first.
 
-Write all prose (progress notes, explanations, free-text fields of the report) in lean STE: short active sentences with articles, one instruction per sentence, no filler, hedging or praise. Every technical term, path, command and number stays exact. Code, diffs, commit text and the report block's structure stay normal.
-
 End your final message with the report block the contract specifies.

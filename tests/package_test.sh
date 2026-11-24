@@ -15,7 +15,7 @@ check() { local name=$1; shift; local out
   if out=$(cd "$ROOT" && eval "$*" 2>&1); then echo "check $name: ok"; pass=$((pass+1))
   else echo "check $name: FAIL $(echo "$out" | tail -1 | cut -c1-120)"; fail=$((fail+1)); fi; }
 AGENTS="implementer implementer-opus48 reviewer-opus55 reviewer-delta plan-verifier"
-COMMANDS="plan-then-delegate delegate rules-review"
+COMMANDS="run plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
 SUITES="acclint delegate delta guards papers pr_review protocol simplify testquality worktree"
 
@@ -125,7 +125,7 @@ inst_i() { inst --link --no-tests >/dev/null && links_made; }
 inst_j() { inst --no-tests > "$H/out" || return 1    # default mode is --link
   links_made && grep -qF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md" && grep -qF '<!-- concord:end -->' "$H/.claude/CLAUDE.md" &&
   grep -qF 'reviewer-opus55' "$H/.claude/CLAUDE.md" && ! grep -qF 'concord:reviewer-opus55' "$H/.claude/CLAUDE.md" &&
-  grep -qF '/concord:plan-then-delegate' "$H/.claude/CLAUDE.md" && grep -qF '/concord:delegate all' "$H/.claude/CLAUDE.md" &&
+  grep -qF '/concord:run execute' "$H/.claude/CLAUDE.md" && grep -qF '/concord:run delegate' "$H/.claude/CLAUDE.md" &&
   [ -f "$H/.claude/settings.json" ] && inst --no-tests >/dev/null && links_made &&
   [ "$(grep -cF '<!-- concord:begin -->' "$H/.claude/CLAUDE.md")" -eq 1 ]; }
 inst_k() { mkdir -p "$H/.claude" && printf 'TOP SENTINEL\n' > "$H/.claude/CLAUDE.md" && inst --no-tests >/dev/null &&
@@ -143,11 +143,12 @@ inst_l() { mkdir -p "$H/.claude" && printf '%s' '{"myKey":"keep","modelSettings"
   inst --no-tests >/dev/null && inst --no-tests >/dev/null &&
   python3 -B -I -c "import json; d=json.load(open('$H/.claude/settings.json'))['hooks']; c=[h['command'] for v in d.values() for e in v for h in e['hooks']]; assert 'other' in c and not any('--lessons-hook' in x for x in c) and sum('drift_hook.sh' in x for x in c)==1 and all(e['hooks'] for v in d.values() for e in v), c"; }
 # --plugin removes only the links this checkout made: a link of the same name to the user's own skill stays, and is named
-inst_ee() { inst --no-tests >/dev/null && local own="$H/mine/concord-design-review" l="$H/.claude/skills/concord-design-review" &&
+inst_ee() { inst --no-tests >/dev/null && local own="$H/mine/concord-design-review" l="$H/.claude/skills/concord:design-review" &&
   mkdir -p "$own" && echo mine > "$own/SKILL.md" && ln -sfn "$own" "$l" && inst --plugin --no-tests > "$H/out" &&
   [ -L "$l" ] && [ "$(readlink "$l")" = "$own" ] && [ -f "$own/SKILL.md" ] && grep -qF "keep $l" "$H/out"; }
-inst_ff() { inst --no-tests >/dev/null && [ -L "$H/.claude/skills/concord-design-review" ] && inst --plugin --no-tests > "$H/out" &&
-  [ ! -e "$H/.claude/skills/concord-design-review" ] && [ ! -L "$H/.claude/skills/concord-design-review" ] && [ ! -L "$H/.claude/agents/implementer.md" ]; }
+inst_ff() { local n c=0; inst --no-tests >/dev/null && [ -L "$H/.claude/skills/concord:design-review" ] && inst --plugin --no-tests > "$H/out" &&
+  [ ! -L "$H/.claude/agents/implementer.md" ] || return 1
+  for n in $(shipped_skills); do c=$((c+1)); [ ! -e "$H/.claude/skills/concord:$n" ] && [ ! -L "$H/.claude/skills/concord:$n" ] || return 1; done; [ "$c" -ge 1 ]; }
 inst_m() { inst --no-tests >/dev/null && links_made && inst --plugin --no-tests > "$H/out" &&
   grep -qF '/plugin marketplace add' "$H/out" && grep -qF '/plugin install concord@concord' "$H/out" &&
   [ ! -e "$H/.claude/commands/concord" ] && [ ! -L "$H/.claude/agents/implementer.md" ] &&
@@ -213,20 +214,15 @@ inst_z() { local u
 # the exact old shipped command is replaced by the current one, once
 inst_aa() { settings_with_hooks "$OLD_DRIFT" && inst --no-tests > "$H/out" 2>&1 && hook_commands > "$H/cmds" &&
   ! grep -qxF "$OLD_DRIFT" "$H/cmds" && [ "$(grep -c 'drift_hook.sh' "$H/cmds")" = 1 ] && [ "$(wc -l < "$H/cmds")" -eq 1 ]; }
-# Skills (D17): --link links each skill directory under $A/skills/ into $DEST/skills/<name>; --plugin removes those links and
-# names each skill concord:<name> in the CLAUDE.md block; an agent's `skills:` entry is a shipped skill's `name:` (Claude Code
-# resolves a preloaded skill by that name and skips an unknown one without a warning).
+# Skills: --link links each skill directory $A/skills/<n> as $DEST/skills/concord:<n>; --plugin removes those links. Claude
+# Code names a linked skill after its folder and a plugin skill <plugin>:<folder>, so each is concord:<n> in both modes; its
+# `name:` says the same, and every concord:<name> that the shipped instructions use names a shipped skill, agent or command
+# (Claude Code skips an unknown preloaded skill without a warning).
 shipped_skills() { local d; for d in "$ROOT/$A"/skills/*/; do [ -f "${d}SKILL.md" ] && basename "$d"; done; }
 inst_bb() { local n c=0; inst --link --no-tests >/dev/null || return 1
   for n in $(shipped_skills); do c=$((c+1))
-    { [ -L "$H/.claude/skills/$n" ] && [ "$(cd "$H/.claude/skills/$n" 2>/dev/null && pwd -P)" = "$(cd "$ROOT/$A/skills/$n" && pwd -P)" ] \
-      && [ -f "$H/.claude/skills/$n/SKILL.md" ]; } || return 1
-  done; [ "$c" -ge 1 ]; }
-inst_cc() { local n c=0; inst --link --no-tests >/dev/null && [ -L "$H/.claude/skills/concord-design-review" ] || return 1   # first step: the links exist
-  inst --plugin --no-tests >/dev/null || return 1
-  for n in $(shipped_skills); do c=$((c+1))
-    [ ! -e "$H/.claude/skills/$n" ] && [ ! -L "$H/.claude/skills/$n" ] && grep -qF "\`concord:$n\`" "$H/.claude/CLAUDE.md" \
-      && ! grep -qF "\`$n\`" "$H/.claude/CLAUDE.md" || return 1
+    { [ -L "$H/.claude/skills/concord:$n" ] && [ "$(cd "$H/.claude/skills/concord:$n" 2>/dev/null && pwd -P)" = "$(cd "$ROOT/$A/skills/$n" && pwd -P)" ] \
+      && [ -f "$H/.claude/skills/concord:$n/SKILL.md" ]; } || return 1
   done; [ "$c" -ge 1 ]; }
 inst_dd() { python3 -B -I - "$ROOT/$A" <<'PY'
 import glob, os, re, sys
@@ -235,7 +231,7 @@ names = set()
 for f in glob.glob(os.path.join(a, "skills", "*", "SKILL.md")):
     m = re.search(r"^name:\s*(\S+)\s*$", open(f).read(), re.M)
     assert m, f"{f}: no name: line"
-    assert m.group(1) == os.path.basename(os.path.dirname(f)), f"{f}: name {m.group(1)} is not its directory name"
+    assert m.group(1) == "concord:" + os.path.basename(os.path.dirname(f)), f"{f}: name {m.group(1)} is not concord:<its directory>"
     names.add(m.group(1))
 used = 0
 for f in glob.glob(os.path.join(a, "agents", "*.md")):
@@ -245,21 +241,36 @@ for f in glob.glob(os.path.join(a, "agents", "*.md")):
         used += 1
         assert n in names, f"{f}: skills: {n} names no shipped skill ({sorted(names)})"
 assert used >= 1, "no agent preloads a skill"
+known = names | {"concord:" + os.path.basename(f)[:-3] for d in ("agents", "commands") for f in glob.glob(os.path.join(a, d, "*.md"))}
+for f in [os.path.join(a, "CLAUDE.md"), os.path.join(a, ".claude-plugin", "plugin.json")] + glob.glob(os.path.join(a, "*", "**", "*.md"), recursive=True):
+    for n in set(re.findall(r"concord:[a-z][a-z0-9-]*", open(f).read())) - {"concord:begin", "concord:end"}:
+        assert n in known, f"{f}: {n} names no shipped skill, agent or command"
 PY
 }
-# --link keeps a link of the user's own (any name Concord installs) and says so; a link made by another checkout of this kit
-# (same path inside the kit, a different root: a moved checkout) is Concord's and is updated
-inst_gg() { local own="$H/mine/concord-design-review" l="$H/.claude/skills/concord-design-review"
+# --link keeps a link of the user's own (any name Concord installs) and says so
+inst_gg() { local own="$H/mine/concord-design-review" l="$H/.claude/skills/concord:design-review"
   mkdir -p "$own" "$H/.claude/skills" && ln -s "$own" "$l" && inst --no-tests > "$H/out" 2>&1 &&
   [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out" && [ -L "$H/.claude/agents/implementer.md" ]; }
-inst_hh() { local l="$H/.claude/skills/concord-design-review"
-  mkdir -p "$H/.claude/skills" "$H/oldkit/concord" && : > "$H/oldkit/install.sh" && : > "$H/oldkit/concord/concord.py" &&
-  ln -s "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --no-tests >/dev/null &&
-  [ "$(cd "$l" && pwd -P)" = "$(cd "$ROOT/$A/skills/concord-design-review" && pwd -P)" ] &&
-  rm -f "$H/.claude/concord/links.tsv" && ln -sfn "$H/oldkit/adapters/claude-code/skills/concord-design-review" "$l" && inst --plugin --no-tests >/dev/null && [ ! -L "$l" ]; }
+# a skills/concord-design-review link made before 3.0.5 (no manifest line) stays when its folder is in no Concord
+# checkout, and is retired in both modes when it points into one
+inst_hh() { local l="$H/.claude/skills/concord-design-review" k="$H/oldkit/adapters/claude-code/skills/concord-design-review"
+  local n="$H/notkit/adapters/claude-code/skills/concord-design-review"
+  mkdir -p "$H/.claude/skills" "$H/oldkit/concord" "$n" && : > "$H/oldkit/install.sh" && : > "$H/oldkit/concord/concord.py" &&
+  ln -s "$n" "$l" && inst --no-tests > "$H/out" 2>&1 && [ "$(readlink "$l")" = "$n" ] && ! grep -qF "$l" "$H/out" &&
+  ln -sfn "$k" "$l" && inst --no-tests > "$H/out" 2>&1 && [ ! -L "$l" ] && grep -qF "remove link $l" "$H/out" &&
+  [ "$(cd "$H/.claude/skills/concord:design-review" && pwd -P)" = "$(cd "$ROOT/$A/skills/design-review" && pwd -P)" ] &&
+  rm -f "$H/.claude/concord/links.tsv" && ln -s "$k" "$l" && inst --plugin --no-tests >/dev/null && [ ! -L "$l" ]; }
+# a 3.1 linked install upgrades in place: --dry-run only names the skills/concord-design-review link its manifest
+# records; the install removes it, links skills/concord:design-review and drops the old line from the manifest
+inst_nn() { local l="$H/.claude/skills/concord-design-review" old; old="$(cd "$ROOT" && pwd -P)/$A/skills/concord-design-review"
+  mkdir -p "$H/.claude/skills" "$H/.claude/concord" && ln -s "$old" "$l" && printf '%s\t%s\n' "$l" "$old" > "$H/.claude/concord/links.tsv" &&
+  inst --dry-run --no-tests > "$H/out" 2>&1 && grep -qF "would remove link $l" "$H/out" && [ -L "$l" ] &&
+  inst --no-tests > "$H/out" 2>&1 && [ ! -L "$l" ] && grep -qF "remove link $l" "$H/out" &&
+  [ "$(cd "$H/.claude/skills/concord:design-review" && pwd -P)" = "$(cd "$ROOT/$A/skills/design-review" && pwd -P)" ] &&
+  [ -z "$(cut -f1 "$H/.claude/concord/links.tsv" | grep -xF "$l")" ]; }
 # a personal link that ends in the same adapter-relative path, into a folder that is no Concord checkout, is not Concord's:
 # the default install keeps it and names it, and --plugin keeps it
-inst_kk() { local own="$H/mine/adapters/claude-code/skills/concord-design-review" l="$H/.claude/skills/concord-design-review"
+inst_kk() { local own="$H/mine/adapters/claude-code/skills/design-review" l="$H/.claude/skills/concord:design-review"
   mkdir -p "$own" "$H/.claude/skills" && ln -s "$own" "$l" && inst --no-tests > "$H/out" 2>&1 &&
   [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out" &&
   inst --plugin --no-tests > "$H/out" 2>&1 && [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out"; }
@@ -268,7 +279,16 @@ inst_ll() { local d="$H/x" r f
   for r in kit1 kit2; do mkdir "$H/$r" && for f in install.sh concord adapters; do cp -R "$f" "$H/$r/"; done; done
   env HOME=$H CLAUDE_HOME=$d bash "$H/kit1/install.sh" --no-tests >/dev/null &&
   rm -rf "$H/kit1" && env HOME=$H CLAUDE_HOME=$d bash "$H/kit2/install.sh" --no-tests >/dev/null &&
-  [ "$(readlink "$d/skills/concord-design-review")" = "$(cd "$H/kit2" && pwd -P)/$A/skills/concord-design-review" ]; }
+  [ "$(readlink "$d/skills/concord:design-review")" = "$(cd "$H/kit2" && pwd -P)/$A/skills/design-review" ]; }
+# an install acts only on the home it installs to: an install into a copy of the home (whose manifest names the
+# original), and a second install that spells the home differently, leave every link of the original in place
+links_in() { local n; [ -L "$1/commands/concord" ] && [ -e "$1/commands/concord" ] || return 1
+  for n in $AGENTS; do [ -L "$1/agents/$n.md" ] && [ -e "$1/agents/$n.md" ] || return 1; done
+  for n in $(shipped_skills); do [ -L "$1/skills/concord:$n" ] && [ -e "$1/skills/concord:$n" ] || return 1; done; }
+inst_oo() { local d="$H/x" c="$H/copy"
+  env HOME=$H CLAUDE_HOME="$d" bash install.sh --no-tests >/dev/null && cp -R "$d" "$c" &&
+  env HOME=$H CLAUDE_HOME="$c" bash install.sh --no-tests >/dev/null && links_in "$d" &&
+  env HOME=$H CLAUDE_HOME="$d/" bash install.sh --no-tests >/dev/null && links_in "$d"; }
 # settings.json edited between the preflight and the write keeps that edit: a python3 shim edits it right after the preflight ran
 inst_mm() { local d="$H/x" real; real=$(command -v python3); mkdir -p "$H/shim" "$d" && printf '{"a": 1}\n' > "$d/settings.json" &&
   cat > "$H/shim/python3" <<SHIM
@@ -295,7 +315,7 @@ assert os.path.isabs(w) and os.path.isfile(w), c
 inst_jj() { mkdir -p "$H/.claude" && printf '%s' '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":null}]}]}}' > "$H/.claude/settings.json" &&
   { inst --no-tests > "$H/out" 2>&1; [ $? = 2 ]; } && grep -qF 'PostToolUse' "$H/out" && ! grep -q Traceback "$H/out" &&
   [ ! -e "$H/.claude/concord" ] && [ ! -e "$H/.claude/CLAUDE.md" ]; }
-s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb dd ee ff gg hh ii jj kk ll mm nn oo; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.
@@ -358,7 +378,7 @@ s_docs() { local h f
   check docs/claude-md "grep -qF '<!-- concord:begin -->' $A/CLAUDE.md && grep -qF '<!-- concord:end -->' $A/CLAUDE.md"
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).
   local scope="README.md docs CONTRIBUTING.md $A $K/PLAN_TEMPLATE.md $K/repo-notes/README.md"
-  check docs/plugin-commands "! git grep -n -I --untracked -E '(^|[^:a-z])/(plan-then-delegate|delegate|rules-review)([^/a-z.-]|\$)' -- $scope"
+  check docs/plugin-commands "! git grep -n -I --untracked -E '(^|[^:a-z])/(run|plan-then-delegate|delegate|rules-review)([^/a-z.-]|\$)' -- $scope"
   check docs/plugin-agents "! git grep -n -I --untracked -E '(^|[^:a-z0-9/-])(implementer-opus48|reviewer-opus48|reviewer-opus55|reviewer-delta|plan-verifier)([^.a-z0-9-]|\$)|\`implementer\`' -- $scope | grep -v ':name: ' | grep -v '^$A/CLAUDE.md:'"; }
 
 s_blog() {

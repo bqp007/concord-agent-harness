@@ -134,7 +134,11 @@ sec(){ sed -n "/^## $1/,/^## /p" "$REP"; }
 ov=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP")
 echo "$ov" | grep -qF "grep -q NEVER a.py" && echo "$ov" | grep -qF "owner accepts the failing NEVER check" \
   && ok "4.2b Overrides: the forced PASS, its failed command beside the owner's reason" || { bad "4.2b overrides"; echo "$ov"; }
-sec Phases | grep -Eq '^\| 1 \| [^|]+ \| 1 \|' && ok "4.3 phase row: one run of phase 1" || { bad "4.3 phases"; sec Phases; }
+CAND=$(sed -n 's/^graded candidate: \([0-9a-f]\{12\}\).*/\1/p' "$T/r1.txt" | head -1)
+grep -qE '^plan revision: 1 \([0-9a-f]{12}\)$' "$T/r1.txt" && [ -n "$CAND" ] \
+  && sec Phases | grep -Eq "^\| 1 \| [^|]+ \| 1 \| PASS[^|]* \| [^|]+ \| 1 \| $CAND \| none \|\$" \
+  && ok "4.3 phase row: one run of phase 1, at plan revision 1, its graded candidate, no review of it; the run report names the revision" \
+  || { bad "4.3 phases"; sec Phases; grep -E '^(plan revision|graded candidate)' "$T/r1.txt"; }
 sec "Test plan" | grep -qF "marker-behavior-row" && ! sec "Test plan" | grep -qF "marker-live-edit" \
   && ok "4.4 the Test plan is the approved revision's, not an unapproved edit of the plan on disk" || { bad "4.4 test plan"; sec "Test plan"; }
 sec "Test lines" | grep -qF "| tests/a_test.sh | 2 | 0 |" && ! sec "Test lines" | grep -qF "| a.py |" \
@@ -206,5 +210,32 @@ echo "$LA" | grep -qF "grep -q NEVER a.py" && echo "$LA" | grep -qF "reason: not
   && ok "6 a forced PASS with no --note: the failed command is listed and the reason reads 'reason: not recorded'" || { bad "6 forced PASS without a note"; echo "$LA"; }
 echo "$LB" | grep -qF "grep -q NEVER a.py" && echo "$LB" | grep -qF "reason: owner accepts the failing NEVER check" && ! echo "$LB" | grep -qF "forced:" \
   && ok "6 a forced PASS with a --note: the reason is the note, not a failed command" || { bad "6 forced PASS with a note"; echo "$LB"; }
+
+echo "== 7 provenance: a phase row names the revision its run followed and the review of its graded candidate; a planner run no review read is an override"
+H7="$T/h7"; mkdir -p "$H7"
+( set -e; cd "$H7"; git init -q -b main; git config user.email t@t; git config user.name t; printf 'x = 1\n' > a.py; printf 'y = 1\n' > b.py; printf '.claude/\n' > .gitignore; git add -A; git commit -qm init
+  printf '# Plan\nTier: M\nSize: ~10 lines\nETA: 30 min\n\n## Phase 1 - change a\nExecutor: planner\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n\n## Phase 2 - change b\nExecutor: deepseek-flash\nRisk: low\nFiles: b.py\nAcceptance:\n- `grep -q 2 b.py`\n' > PLAN_p.md ) || { echo "setup failed: repo 7"; exit 1; }
+approve PLAN_p.md "$H7" || exit 1
+$DP --begin 1 --label planner --plan PLAN_p.md --repo "$H7" > "$T/b7.txt" 2>&1; RP=$(sed -n 's/^BEGIN \([^ ]*\).*/\1/p' "$T/b7.txt" | head -1)
+[ -n "$RP" ] || { echo "setup failed: --begin of PLAN_p"; cat "$T/b7.txt"; exit 1; }
+echo "x = 2" > "$H7/a.py"
+{ $DP --end "$RP" --repo "$H7" > "$T/e7.txt" 2>&1 && $DP --verdict "$RP" PASS --repo "$H7" > "$T/v.txt" 2>&1; } || { echo "setup failed: planner run of PLAN_p"; cat "$T/e7.txt" "$T/v.txt"; exit 1; }
+perl -pi -e 's/^Size: ~10 lines$/Size: ~12 lines/' "$H7/PLAN_p.md"; approve PLAN_p.md "$H7" || exit 1   # revision 2, approved after phase 1 ran
+FAKE_ACTIONS='echo "y = 2" > b.py' $DP 2 --plan PLAN_p.md --via qwen --model fake/m --repo "$H7" > "$T/r7.txt" 2>&1
+RQ=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/r7.txt" | head -1); [ -n "$RQ" ] || { echo "setup failed: phase 2 run of PLAN_p"; cat "$T/r7.txt"; exit 1; }
+FAKE_ACTIONS='printf "REVIEW-JSON\n{\"findings\": [], \"clauses\": [], \"tests\": [], \"verdict\": \"CLEAN\"}\nEND-REVIEW-JSON\n"' \
+  $DP --review "$RQ" --via qwen --model fake/m --repo "$H7" > "$T/rv7.txt" 2>&1 || { echo "setup failed: review of the first candidate"; cat "$T/rv7.txt"; exit 1; }
+echo "y = 22" > "$H7/b.py"
+{ $DP --grade "$RQ" --repo "$H7" > "$T/g7.txt" 2>&1 && $DP --verdict "$RQ" PASS --repo "$H7" > "$T/v.txt" 2>&1; } || { echo "setup failed: regrade and PASS"; cat "$T/g7.txt" "$T/v.txt"; exit 1; }
+$DP --report --plan PLAN_p.md --repo "$H7" > "$T/rep.txt" 2>&1; REP7=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1); [ -f "$REP7" ] || { echo "setup failed: --report of PLAN_p"; cat "$T/rep.txt"; exit 1; }
+row7(){ sed -n '/^## Phases/,/^## [^P]/p' "$REP7" | grep -E "^\| $1 \|"; }
+ov7=$(sed -n '/^## Overrides/,/^## [^O]/p' "$REP7")
+row7 1 | grep -Eq '^\| 1 \| planner \| 1 \| PASS \| 1/1 pass \| 1 \|' && row7 2 | grep -Eq '^\| 2 \| [^|]+ \| 1 \| PASS \| 1/1 pass \| 2 \|' \
+  && grep -qE '^plan revision: 1 ' "$T/e7.txt" && grep -qE '^plan revision: 2 ' "$T/r7.txt" \
+  && ok "7.1 each phase row and run report name the revision that run followed, not the newest approved one" || { bad "7.1 revisions"; row7 1; row7 2; grep '^plan revision' "$T/e7.txt" "$T/r7.txt"; }
+row7 2 | grep -Eq '\| none \|$' && echo "$ov7" | grep -F "phase 2 (run $RQ)" | grep -qF "its other reviews saw an earlier candidate" \
+  && ok "7.2 a review of an earlier candidate is not shown as the graded candidate's review" || { bad "7.2 review column"; row7 2; echo "$ov7"; }
+echo "$ov7" | grep -qF "phase 1 (run $RP) not reviewed (needs medium)" \
+  && ok "7.3 a planner run that no review read is listed under Overrides, like an executor run" || { bad "7.3 planner override"; echo "$ov7"; }
 
 echo; echo "passed $pass, failed $fail"; [ $fail -eq 0 ]

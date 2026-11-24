@@ -1,9 +1,10 @@
 #!/bin/bash
 # Install the Concord dispatcher into $CLAUDE_HOME (default ~/.claude). Re-runnable: code refreshed, dropped
 # suites removed, user configs and hand-edited files kept, replaced files backed up first (never pruned).
-# --link (default): dispatcher in concord/, commands, agents and skills symlinked in, the rules merged into CLAUDE.md
+# --link (default): dispatcher in concord/, commands, agents and skills symlinked in (skill <n> as skills/concord:<n>;
+#   Claude Code names a linked skill after its folder, so it is /concord:<n> in both modes), the rules merged into CLAUDE.md
 #   between <!-- concord:begin --> and <!-- concord:end -->, the settings keys merged into settings.json.
-# --plugin: remove those links, print the marketplace commands; the CLAUDE.md block names agents and skills concord:<name>.
+# --plugin: remove those links, print the marketplace commands; the CLAUDE.md block names the agents concord:<name>.
 # Usage: install.sh [--link|--plugin] [--dry-run] [--no-tests] [--repo DIR]
 set -euo pipefail
 shopt -s nullglob
@@ -145,7 +146,7 @@ if os.path.exists(md):
     B, E = "<!-- concord:begin -->", "<!-- concord:end -->"
     old = open(md).read().split("\n")
     nb, ne = old.count(B), old.count(E)
-    heading = any(l.startswith("# Default workflow: plan, then delegate") for l in old)
+    heading = any(l.startswith("# Default workflow: plan, then") for l in old)
     if (nb, ne) == (0, 0) and heading:
         sys.exit(f"error: {md} holds a Concord block with no markers; install.sh cannot tell where it ends. Wrap it between "
                  f"{B} and {E} by hand (or delete it), then run install.sh again (nothing written)")
@@ -194,10 +195,15 @@ link_one() { if [ -e "$2" ] && [ ! -L "$2" ]; then echo "keep $2 (not a link; le
   TOUCHED="$TOUCHED$2$NL"; ADDED="$ADDED$2$TAB$1$NL"
   if [ "$DRY" = 1 ]; then echo "would link $2"; return 0; fi
   mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; echo "link $2"; }
+rm_link() { if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; echo "remove link $1"; fi; }
 unlink_one() { [ -L "$1" ] || return 0
   ours "$1" "$2" || { keep_note "$1"; return 0; }
-  TOUCHED="$TOUCHED$1$NL"
-  if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; echo "remove link $1"; fi; }
+  TOUCHED="$TOUCHED$1$NL"; rm_link "$1"; }
+# 3.0 and 3.1 linked the design-review skill as skills/concord-design-review; 3.2.0 names every skill link concord:<n>.
+# In both modes that old link is removed when the ownership rule above makes it Concord's (its source then was
+# skills/concord-design-review), and the manifest drops it; any other link of that name is left as it is.
+retire() { local l="$DEST/skills/concord-design-review"
+  if [ -L "$l" ] && ours "$l" "$A/skills/concord-design-review"; then TOUCHED="$TOUCHED$l$NL"; rm_link "$l"; fi; }
 # The manifest keeps its other lines, drops the links this run made again or removed, and adds the links it made.
 write_manifest() { [ "$DRY" = 1 ] && return 0
   local tmp="$MAN.$$" l; mkdir -p "$DEST/concord"; : > "$tmp"
@@ -206,36 +212,34 @@ write_manifest() { [ "$DRY" = 1 ] && return 0
   printf '%s' "$ADDED" >> "$tmp"; mv "$tmp" "$MAN"; }
 if [ "$MODE" = link ]; then
   link_one "$A/commands" "$DEST/commands/concord"; for n in $AGENTS; do link_one "$A/agents/$n.md" "$DEST/agents/$n.md"; done
-  for n in $SKILLS; do link_one "$A/skills/$n" "$DEST/skills/$n"; done
+  for n in $SKILLS; do link_one "$A/skills/$n" "$DEST/skills/concord:$n"; done
 else
   unlink_one "$DEST/commands/concord" "$A/commands"; for n in $AGENTS; do unlink_one "$DEST/agents/$n.md" "$A/agents/$n.md"; done
-  for n in $SKILLS; do unlink_one "$DEST/skills/$n" "$A/skills/$n"; done
+  for n in $SKILLS; do unlink_one "$DEST/skills/concord:$n" "$A/skills/$n"; done
 fi
+retire
 write_manifest
 
 # CLAUDE.md: keep the Concord rules between the markers and replace that block where it stands; a file with
 # unpaired markers, or a Concord block without markers, is refused untouched; a symlinked CLAUDE.md is written through; the file is backed up first.
-# --link names the agents and skills <name>; --plugin names them concord:<name>.
+# --link names the agents <name>; --plugin names them concord:<name>.
 install_claude_md() { local md="$DEST/CLAUDE.md"
   if [ "$DRY" = 1 ]; then echo "would update $md"; return 0; fi
   mkdir -p "$DEST"; [ -e "$md" ] && backup_into "$md" CLAUDE.md
-  python3 -B -I - "$A/CLAUDE.md" "$md" "$MODE" $SKILLS <<'PY' || exit 2
+  python3 -B -I - "$A/CLAUDE.md" "$md" "$MODE" <<'PY' || exit 2
 import os, re, sys
 src, md, mode = sys.argv[1:4]
-skills = sys.argv[4:]
 B, E = "<!-- concord:begin -->", "<!-- concord:end -->"
 block = open(src).read().rstrip("\n").split("\n")
 if mode == "plugin":
     block = [re.sub(r"`(reviewer-opus55|reviewer-delta|plan-verifier|implementer-opus48|implementer)`", r"`concord:\1`", l) for l in block]
-    for name in skills:
-        block = [l.replace(f"`{name}`", f"`concord:{name}`") for l in block]
-    block = ["- Agent names: the concord plugin provides the agents above as `concord:reviewer-opus55`, "
+    block = ["- Agent names: the concord plugin provides Concord's agents as `concord:reviewer-opus55`, "
              "`concord:reviewer-delta`, `concord:plan-verifier`, `concord:implementer-opus48` and `concord:implementer`." if l.startswith("- Agent names:") else l for l in block]
 old = open(md).read().split("\n") if os.path.exists(md) else []
 if old and old[-1] == "":
     old.pop()
 nb, ne = old.count(B), old.count(E)
-heads = [i for i, l in enumerate(old) if l.startswith("# Default workflow: plan, then delegate")]
+heads = [i for i, l in enumerate(old) if l.startswith("# Default workflow: plan, then")]
 if (nb, ne) == (0, 0) and heads:   # the preflight refuses this before anything is written
     sys.exit(f"error: {md} holds a Concord block with no markers; wrap it in the markers by hand (left untouched)")
 elif (nb, ne) == (0, 0):

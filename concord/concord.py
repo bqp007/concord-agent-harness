@@ -2529,7 +2529,7 @@ def post_run_checks(run_dir, st, rule, candidate, touched, generated, rc):
                         shown = [f"{p} {c} {m}" for tool in static_new for p, c, m in static_new[tool]]
                         static_line = (f"STATIC NEW ({', '.join(t for t in static_new if static_new[t])}): {total_new} "
                                        "new: " + "; ".join(shown[:8]) + ("; ..." if len(shown) > 8 else "")
-                                       + " (defects = FAIL, style = feedback; see /concord:delegate step 3)")
+                                       + " (defects = FAIL, style = feedback; see /concord:run, Check)")
                     elif post_found:
                         kept = sum(len(v) for v in post_found.values())
                         static_line = (f"static checks ({', '.join(post_found)}): no new findings"
@@ -2667,6 +2667,8 @@ def finish_run(run_dir, rc, secs=None, st=None):
     lines = [f"DELEGATE RESULT {st['run_id']}", f"executor: {st['who']}",
              f"status: {status}   mode: {st['mode']}   duration: {int(secs // 60)}m{int(secs % 60):02d}s   "
              f"plan: {st['plan']}   phase: {st['phase']}"]
+    if st.get("revision") is not None:
+        lines.append(f"plan revision: {st['revision']} ({str(st.get('revision_hash') or '')[:12]})")
     if rejected:
         lines.insert(1, "REJECTED (not graded): " + "; ".join(rejected))
         lines.insert(2, f"  no post-run command ran and there is no candidate: restore with concord.py --restore "
@@ -2727,7 +2729,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
         lines.append("network: webfetch denied; shell network not mediated")
         if tool_calls and tool_calls["webfetch_attempts"]:
             lines.append("WEBFETCH ATTEMPTED (denied): " + ", ".join(tool_calls["webfetch_attempts"]))
-    lines.append(f"risk: {st.get('risk', 'medium')}  (verification depth; see /concord:delegate step 3)")
+    lines.append(f"risk: {st.get('risk', 'medium')}  (verification depth; see /concord:run, Check)")
     bl = st.get("baseline") or []
     if bl:
         passed = [b["cmd"] for b in bl if b["rc"] == 0]
@@ -5245,7 +5247,7 @@ def cmd_review(args, target, conf):
         work_dir=candidate_copy(repo, run_dir, meta["candidate"]))
 
 
-# ---------- --review-pr: review an open GitHub PR at its head (delegate.md §6) ----------
+# ---------- --review-pr: review an open GitHub PR at its head (the PR gate, skills/review-change/gate.md) ----------
 
 def parse_pr(value):
     """(number, slug|None) from N, owner/repo#N or a github pull URL."""
@@ -7013,7 +7015,7 @@ def report_overrides(repo, root, runs, plan_rel):
             out.append(f"- PASS over changes outside Files: {_flat(', '.join(meta['out_of_scope']))}: run {run} "
                        f"(phase {phase})")
     for run, phase, meta in last_by_phase.values():
-        if meta.get("executor") in ("planner", None, ""):
+        if meta.get("executor") in (None, ""):
             continue
         need, graded = required_tier_rank(repo, meta), meta.get("verdict_candidate") or meta.get("candidate")
         reviews = [r for r in meta.get("reviews") or [] if r.get("verdict") in ("CLEAN", "FIX", "BLOCK")]
@@ -7073,8 +7075,8 @@ def cmd_report(args):
     lines = [f"# Test report: {ticket}", ""]
     lines += ["## Overrides", ""] + report_overrides(repo, root, runs, plan_rel) + [""]
 
-    lines += ["## Phases", "", "| Phase | Executor | Runs | Last verdict | Acceptance re-run |",
-              "|---|---|---|---|---|"]
+    lines += ["## Phases", "", "| Phase | Executor | Runs | Last verdict | Acceptance re-run | Revision | Candidate | Phase review |",
+              "|---|---|---|---|---|---|---|---|"]
     numbers = list(dict.fromkeys(phase_key(h.group(2)) for h in PHASE_HEAD.finditer(approved)
                                  if phase_key(h.group(2)) is not None))
     by_phase = {}
@@ -7085,14 +7087,19 @@ def cmd_report(args):
         if metas:
             last = metas[-1]
             after = last.get("acceptance_after_rc") or []
+            graded = last.get("verdict_candidate") or last.get("candidate")
+            seen = [r for r in last.get("reviews") or []
+                    if r.get("verdict") in ("CLEAN", "FIX", "BLOCK") and graded and r.get("candidate", graded) == graded]
             row = [str(number), _flat(last.get("name") or last.get("executor") or "-"), str(len(metas)),
                    _flat(last.get("verdict") or "-"),
-                   f"{sum(1 for r in after if r == 0)}/{len(after)} pass" if after else "-"]
+                   f"{sum(1 for r in after if r == 0)}/{len(after)} pass" if after else "-",
+                   _flat(last.get("revision") or "-"), (graded or "-")[:12],
+                   _flat(f"{seen[-1]['verdict']} ({seen[-1].get('reviewer') or '?'})") if seen else "none"]
         else:
-            row = [str(number), parse_executor(extract_phase(approved, number)) or "-", "0", "-", "-"]
+            row = [str(number), parse_executor(extract_phase(approved, number)) or "-", "0", "-", "-", "-", "-", "-"]
         lines.append("| " + " | ".join(row) + " |")
     if not numbers and not by_phase:
-        lines.append("| - | - | 0 | - | - |")
+        lines.append("| - | - | 0 | - | - | - | - | - |")
 
     lines += ["", "## Test plan", ""] + (plan_section(approved, "Test plan") or ["none in the plan"])
 
