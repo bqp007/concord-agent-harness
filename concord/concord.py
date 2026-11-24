@@ -55,7 +55,7 @@ The calling agent re-runs the acceptance commands printed in the report (capture
 and records its verdict with --verdict.
 Before the executor starts, the acceptance commands run once on a grading copy of the untouched tree (red run): a
 phase whose acceptance already passes is not run (exit 6), because its tests do not test it.
-Exit codes: 2 usage/plan/lock, 3 session executor, 4 unknown model (--fork-graded: a run in the fork is not finished),
+Exit codes: 2 usage/plan/lock, 3 session executor, 4 unknown model (--fork-graded: a run in the fork or --dest is open),
 5 billing guard, 6 baseline, 7 PASS refused (an acceptance result missing or not the expected one, or acceptance files
 changed), 8 PR review-round cap, 9 provider refusal, 10 DRIFT BLOCK or a reported plan, 11 plan text with no
 plan-verifier APPROVE or a plan read changed after it, 75 PR head
@@ -1313,13 +1313,19 @@ def beside(rec):
 
 class TreeWatch:
     """The graded tree across the post-run commands: after(command) captures it again (`capture`) and records in
-    `changed` each path that command changed, except a path `skip` accepts (beside). A capture that fails is
+    `changed` each path that command changed, except a path `skip` accepts (beside), and each pinned grading input
+    (`pins`, files the tree does not hold) whose content or executable bit it changed. A capture that fails is
     recorded as a change: the results would describe an unknown tree."""
 
-    def __init__(self, repo, tree, capture, skip):
+    def __init__(self, repo, tree, capture, skip, pins=()):
         self.repo, self.tree, self.capture, self.skip, self.changed = repo, tree, capture, skip, []
+        self.pins = {f: pin_identity(Path(repo) / f) for f in pins}
 
     def after(self, command):
+        for f, was in self.pins.items():
+            if (now := pin_identity(Path(self.repo) / f)) != was:
+                self.changed.append({"path": f, "command": command})
+                self.pins[f] = now
         try:
             now = self.capture()
         except TreeError as exc:
@@ -1349,14 +1355,27 @@ def grading_links(repo):
             if (Path(repo) / rel).is_dir()]
 
 
+def pin_identity(path):
+    """(sha256, executable) of the file a pinned grading input names, a link followed; ("missing", False) when no
+    readable regular file is there."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "missing", False
+    if st.st_mode & 0o170000 != 0o100000:       # not a regular file
+        return "missing", False
+    return file_hash(path), bool(st.st_mode & 0o100)
+
+
 def pin_grading_inputs(repo, run_dir, files, tree):
-    """{path: sha256} of the grading files whose bytes the start tree `tree` does not hold (an ignored file, or a
-    link whose target is outside the tree), each copied as the run starts to <run_dir>/grading-inputs/ with its
-    resolved bytes and permission bits: every grading copy of the run holds these bytes, whatever the checkout's
-    links and ignored files hold later. The tree holds the bytes of the other grading files."""
+    """({path: sha256}, {path: executable}) of the grading files whose bytes the start tree `tree` does not hold (an
+    ignored file, or a link whose target is outside the tree), each copied as the run starts to
+    <run_dir>/grading-inputs/ with its resolved bytes and permission bits: every grading copy of the run holds these
+    bytes, whatever the checkout's links and ignored files hold later. The tree holds the bytes of the other grading
+    files."""
     top = Path(repo).resolve()
     held = {p for p in git(repo, "ls-tree", "-r", "--name-only", "-z", tree).split("\0") if p}
-    pins = {}
+    pins, execs = {}, {}
     for f in files:
         src = Path(repo) / f
         target = Path(os.path.realpath(src))
@@ -1364,8 +1383,20 @@ def pin_grading_inputs(repo, run_dir, files, tree):
             dst = run_dir / "grading-inputs" / f
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-            pins[f] = file_hash(dst)
-    return pins
+            pins[f], execs[f] = pin_identity(dst)
+    return pins, execs
+
+
+def pins_moved(top, rec):
+    """The pinned grading inputs of a run (`rec`, its state or meta) whose file under `top` (a checkout) no longer
+    holds the content or the executable bit the run pinned (a run recorded by 3.1.1 pinned the content only)."""
+    execs = rec.get("grading_inputs_exec") or {}
+    out = []
+    for f, sha in (rec.get("grading_inputs") or {}).items():
+        now, executable = pin_identity(Path(top) / f)
+        if now != sha or (f in execs and execs[f] != executable):
+            out.append(f)
+    return out
 
 
 @contextlib.contextmanager
@@ -1418,8 +1449,9 @@ def grading_copy(repo, tree, run_dir=None, pins=()):
 def graded_copy(repo, run_dir, rec, tree):
     """(work, watch): a grading copy of `tree` holding the run's pinned grading inputs, and a TreeWatch of that copy
     under the run's rule (`rec`, its state or meta)."""
-    with grading_copy(repo, tree, run_dir, rec.get("grading_inputs") or {}) as work:
-        yield work, TreeWatch(work, graded_tree(work, rec), lambda: graded_tree(work, rec), beside(rec))
+    pins = rec.get("grading_inputs") or {}
+    with grading_copy(repo, tree, run_dir, pins) as work:
+        yield work, TreeWatch(work, graded_tree(work, rec), lambda: graded_tree(work, rec), beside(rec), pins)
 
 
 def acceptance_problems(rec, after):
@@ -2240,7 +2272,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         start_tree = capture_tree(repo, tuple(generated_globs(conf)), frozenset(keep))
     except TreeError as exc:
         die(f"cannot capture the checkout's tree before the run: {exc}")
-    pins = pin_grading_inputs(repo, run_dir, grading, start_tree)
+    pins, pin_execs = pin_grading_inputs(repo, run_dir, grading, start_tree)
     static_on = conf_flag(conf, "static_checks", True)
     runner = static_runner(repo, to_back_up, conf) if static_on else None
     red_run = bool(do_baseline and baseline_mode != "skip" and acceptance and conf_flag(conf, "baseline", True))
@@ -2286,6 +2318,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "start_kinds": start_kinds, "start_exec": start_exec, "backup_links": backup_links,
         "phase": phase, "who": who, "executor": executor, "model": model, "name": name, "mode": mode,
         "files": files, "acceptance": acceptance, "grading_files": grading, "grading_inputs": pins,
+        "grading_inputs_exec": pin_execs,
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
@@ -2654,9 +2687,9 @@ def finish_run(run_dir, rc, secs=None, st=None):
     if grading_changed:
         lines.append("POST-RUN COMMAND CHANGED THE TREE: " + "; ".join(
             f"{t['path']} by `{t['command']}`" for t in grading_changed)
-            + " (a post-run command must leave the tree as it found it; a file it generates belongs in the phase's "
-            "own changes or in output that .gitignore or the `generated` setting declares; PASS is refused until "
-            "--grade)")
+            + " (a post-run command must leave the tree and the grading files as it found them; a file it generates "
+            "belongs in the phase's own changes or in output that .gitignore or the `generated` setting declares; "
+            "PASS is refused until --grade)")
     if staged_new:
         lines.append("STAGED BY EXECUTOR: " + ", ".join(staged_new)
                      + " (git add; plain `git diff` hides these, review with `git diff HEAD -- <path>`)")
@@ -2755,6 +2788,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "changed": changed, "created": created,
         "start_tree": st["start_tree"], "candidate": candidate, "rejected": rejected,
         "grading_files": st["grading_files"], "grading_inputs": st.get("grading_inputs") or {},
+        "grading_inputs_exec": st.get("grading_inputs_exec") or {},
         "grading_changed": grading_changed, "tree_keep": rule["tree_keep"],
         "generated_globs": list(st.get("generated_globs") or GENERATED_GLOBS), "concurrent_files": concurrent,
         "acceptance_after_rc": acceptance_after_rc,
@@ -6488,7 +6522,7 @@ def cmd_abort(args):
 def candidate_problems(repo, meta):
     """What keeps a run with a start tree from PASS: it was rejected or has no candidate, a post-run command changed the
     tree, the checkout's tree is no longer the candidate (a file of a run that held the lock beside this one aside),
-    or a grading file no longer holds the content the run pinned when it started."""
+    or a grading file no longer holds the content or the executable bit the run pinned when it started."""
     out = []
     if meta.get("rejected"):
         out.append("the run was rejected and not graded (" + "; ".join(meta["rejected"]) + ")")
@@ -6500,9 +6534,9 @@ def candidate_problems(repo, meta):
     for path in sorted({t["path"] for t in meta.get("grading_changed") or []}):
         hits = [t["command"] for t in meta["grading_changed"] if t["path"] == path]
         out.append(f"post-run command changed {path} ({'; '.join(f'`{c}`' for c in hits)}): the results do not "
-                   "describe the candidate; a command must leave the tree as it found it, and a file it generates "
-                   "belongs in the phase's own changes or in output that .gitignore or the `generated` setting "
-                   "declares")
+                   "describe the candidate; a command must leave the tree and the grading files as it found them, "
+                   "and a file it generates belongs in the phase's own changes or in output that .gitignore or the "
+                   "`generated` setting declares")
     ran, skip = {t["path"] for t in meta.get("grading_changed") or []}, beside(meta)
     try:
         now = graded_tree(repo, meta)
@@ -6512,12 +6546,10 @@ def candidate_problems(repo, meta):
     if differ:
         out.append("files differ from the candidate that was graded (" + ", ".join(differ[:15])
                    + (f" and {len(differ) - 15} more" if len(differ) > 15 else "") + "): the results are stale")
-    top = Path(repo)
-    moved = [f for f, h in (meta.get("grading_inputs") or {}).items()
-             if not (top / f).is_file() or file_hash(top / f) != h]
-    if moved:
-        out.append("grading files no longer hold the content the run was graded with (" + ", ".join(moved)
-                   + "): a run is graded by the tests it started with; after changing them, run the phase again")
+    if moved := pins_moved(repo, meta):
+        out.append("grading files no longer hold the content or the executable bit the run was graded with ("
+                   + ", ".join(moved) + "): a run is graded by the tests it started with; after changing them, run "
+                   "the phase again")
     return out
 
 
@@ -6641,11 +6673,14 @@ def fork_open_runs(repo, since):
 
 
 def joined_result(fork, dest, meta, matched):
-    """The joined result of a fork that matches the candidate of its PASS run (`meta`): the patch from the fork's
-    snapshot to the candidate (the plans left out, as the tree leaves them out) applied to the tree of `dest`, the
-    checkout it joins, as it is now. It is graded when it is not the candidate itself: the run's acceptance commands
-    run on a grading copy of it and must give the expected results. Prints the outcome and, when it may join, a
-    `patch: <file>` line naming the patch (in the fork's git folder) that wt.py applies. Exit 0 or 1."""
+    """Join a fork that matches the candidate of its PASS run (`meta`) into `dest`, the checkout it joins, when the
+    joined result is graded (wt.py join holds the Concord lock mutex of both). The joined result is the patch from the
+    fork's snapshot to the candidate (the plans left out, as the tree leaves them out) applied to the tree of `dest` as
+    it is now. It is graded when it is not the candidate itself: the run's acceptance commands run on a grading copy of
+    it and must give the expected results. Either way, `dest` must hold the grading files the tree does not hold as the
+    run pinned them, it must still be the tree the joined result was built on when the patch is applied to it, and its
+    tree must be the joined result after that. Prints the outcome and, once the patch is applied, an `applied: <files>`
+    line. Exit 0, or 1: nothing is applied unless that line is printed."""
     snapshot, cand, run_id = fork_record(fork).get("snapshot"), meta["verdict_candidate"], meta["run_id"]
     if not snapshot:
         die(f"the fork {fork.name} has no .wt-fork snapshot: it was made by wt.py before 3.0")
@@ -6655,6 +6690,10 @@ def joined_result(fork, dest, meta, matched):
         die(f"cannot diff the fork's snapshot against the candidate: {res.stderr.decode(errors='replace').strip()}")
     patch = git_dir(fork) / "wt-join.patch"
     patch.write_bytes(res.stdout)
+    if moved := pins_moved(dest, meta):
+        print(f"grading files in {dest} do not hold the content or the executable bit that run {run_id} was graded "
+              f"with ({', '.join(moved)}): its grade does not carry over; a run is graded by the tests it started with")
+        return 1
     try:
         base = graded_tree(dest, meta)
     except TreeError as exc:
@@ -6686,16 +6725,46 @@ def joined_result(fork, dest, meta, matched):
             print(f"{where} fails the acceptance of run {run_id}: " + "; ".join(problems))
             return 1
         matched = f"graded: {where} passes the acceptance of run {run_id} ({len(results)} command(s))"
-    print(f"{matched}\npatch: {patch}")
+    # The checked result holds only while `dest` is the tree it was built on: a file changed meanwhile, by hand or by a
+    # command outside Concord, would join an unchecked result.
+    try:
+        now = graded_tree(dest, meta)
+    except TreeError as exc:
+        die(f"cannot capture the tree of {dest}: {exc}")
+    drift = (tree_paths(dest, base, now) if now != base else []) + pins_moved(dest, meta)
+    if drift:
+        print(f"{dest} changed during the join ({', '.join(drift[:15])}"
+              + (f" and {len(drift) - 15} more" if len(drift) > 15 else "")
+              + "): the result that was checked is not the one that would be joined; run join again")
+        return 1
+    names = []
+    if res.stdout.strip():
+        names = [rec.split("\t", 2)[2] for rec in git(fork, "apply", "--numstat", "-z", str(patch)).split("\0") if rec]
+        step = subprocess.run(["git", "-C", str(dest), "apply", "--binary", "-"], input=res.stdout, capture_output=True)
+        if step.returncode != 0:
+            print(f"the fork's change does not apply to {dest}: {step.stderr.decode(errors='replace').strip()}")
+            return 1
+    applied = f"applied: {', '.join(names) or 'nothing'}"
+    try:
+        after = graded_tree(dest, meta)
+        differ = tree_paths(dest, joined, after) if after != joined else []
+    except TreeError as exc:
+        differ = [f"(the tree could not be captured: {exc})"]
+    if differ:
+        print(f"{dest} with the fork's change applied is not the joined result that was checked ("
+              + ", ".join(differ[:15]) + f"): the change is applied but not graded; review {dest}\n{applied}")
+        return 1
+    print(f"{matched}\n{applied}")
     return 0
 
 
 def cmd_fork_graded(args):
-    """--fork-graded (wt.py join, holding the fork's lock mutex): exit 4 while the fork has an open run
-    (fork_open_runs). Otherwise whether the fork is the candidate of its newest PASS run, under that run's rule: exit 0
-    for no run or a match, 1 for runs without a matching PASS candidate. With --dest, a match is joined only as
-    joined_result decides (exit 1 when the joined result fails). The fork's runs are those recorded in it since wt.py
-    made it (a fork path is used again after a join)."""
+    """--fork-graded (wt.py join, holding the lock mutex of the fork and of --dest): exit 4 while the fork has an open
+    run (fork_open_runs) or --dest has a live holder of its lock (an executor run, or a session run neither ended nor
+    aborted). Otherwise whether the fork is the candidate of its newest PASS run, under that run's rule: exit 0 for no
+    run or a match, 1 for runs without a matching PASS candidate. With --dest and without --ungraded, a match is joined
+    as joined_result decides. The fork's runs are those recorded in it since wt.py made it (a fork path is used again
+    after a join)."""
     repo = repo_root(args.repo or os.getcwd())
     try:
         since = (git_dir(repo) / ".wt-fork").stat().st_mtime
@@ -6704,6 +6773,13 @@ def cmd_fork_graded(args):
     if unfinished := fork_open_runs(repo, since):
         print(f"the fork {repo.name} has a run that is not finished ({', '.join(unfinished)}): end it with "
               "`concord.py --end RUN` or abort it with `concord.py --abort RUN` in the fork first")
+        return 4
+    dest = Path(args.dest).resolve() if args.dest else None
+    busy = [h["run"] for h in (lock_holders(git_dir(dest) / "concord.lock") if dest else [])
+            if lock_alive(h) and h.get("run")]
+    if busy:
+        print(f"{dest} has an open run ({', '.join(busy)}): a join would change its files under it; end it with "
+              "`concord.py --end RUN` or abort it with `concord.py --abort RUN` there first")
         return 4
     runs = []
     for path in sorted(runs_root(repo).glob("*/meta.json")):
@@ -6727,8 +6803,8 @@ def cmd_fork_graded(args):
     if tree == newest["verdict_candidate"]:
         matched = (f"graded: the fork matches the candidate of run {newest['run_id']} (PASS"
                    + (", forced)" if newest.get("verdict_forced") else ")"))
-        if args.dest:
-            return joined_result(repo, Path(args.dest).resolve(), newest, matched)
+        if dest and not args.ungraded:
+            return joined_result(repo, dest, newest, matched)
         print(matched)
         return 0
     res = run_git(["diff-tree", "-r", "--name-only", "-z", newest["verdict_candidate"], tree], repo)
@@ -6808,7 +6884,7 @@ def cmd_grade(args):
         print(char_line)
     if changed:
         print("POST-RUN COMMAND CHANGED THE TREE: " + "; ".join(f"{t['path']} by `{t['command']}`" for t in changed)
-              + " (PASS is refused until a grade leaves the tree as it found it)")
+              + " (PASS is refused until a grade leaves the tree and the grading files as it found them)")
     if meta.get("verdict"):
         print(f"note: the recorded verdict {meta['verdict']} stays, for candidate "
               f"{str(meta.get('verdict_candidate') or '?')[:12]}")
@@ -7923,7 +7999,9 @@ def main():
     parser.add_argument("--fork-graded", action="store_true", help="wt.py join: whether the fork (--repo) has no open "
                         "run and is the candidate of its newest PASS run")
     parser.add_argument("--dest", metavar="DIR", help="with --fork-graded: the checkout the fork joins; the fork's "
-                        "change applied to it must be the candidate or pass the run's acceptance")
+                        "graded change is applied to it when the result is the candidate or passes the acceptance")
+    parser.add_argument("--ungraded", action="store_true", help="with --fork-graded --dest: check both checkouts for "
+                        "open runs and report the fork's grade, joining nothing (wt.py join --ungraded)")
     parser.add_argument("--grade", metavar="RUN_ID", help="grade the current checkout for a reported run: record it as "
                         "the candidate and re-run the run's acceptance commands on it (after a rejection or an edit)")
     parser.add_argument("--note", help="with --verdict: short reason")

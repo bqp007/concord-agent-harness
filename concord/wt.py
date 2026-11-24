@@ -37,13 +37,16 @@ join  applies the fork's changes (binary diff of its working tree, untracked inc
       files applied. A fork with Concord runs must also match the candidate of its newest PASS run (`concord.py
       --fork-graded`: the tree concord.py graded, under that run's rule); otherwise it refuses, applying nothing, and
       names the files that differ. A graded join applies the change from the fork snapshot to that candidate, not
-      the working tree, so cache and build output in the fork stay behind. When DIR changed since the fork, the
-      joined result (DIR with that change) must first pass that run's acceptance in a grading copy; a failure, or a
-      change that does not apply to DIR, refuses with nothing applied and the fork kept. --ungraded skips these
-      checks, joins the working tree and says so (--force does not: it drops join blockers only). A fork with an
-      open run (begun and neither ended nor aborted, or a live holder of its run lock) is refused even with
-      --ungraded or --force, and no run can start in the fork from that check to its removal. A fork with no runs
-      joins as before and says no run graded it.
+      the working tree, so cache and build output in the fork stay behind. DIR must hold the grading files outside
+      the tree as the run pinned them. When DIR changed since the fork, the joined result (DIR with that change)
+      must first pass that run's acceptance in a grading copy. DIR must still be the tree that result was built on
+      when the change is applied, and must hold that result afterwards. A failed check keeps the fork; each one
+      before the apply leaves DIR untouched, and a failure after it says the change is applied. --ungraded skips
+      these checks, joins the working tree and says so (--force does not: it drops join blockers only). A join
+      holds the run lock of the fork and of DIR from its first check to the fork's removal, so no run starts in
+      either; a fork with an open run (begun and neither ended nor aborted, or a live holder of its run lock), or a
+      DIR with a live holder of its run lock, is refused even with --ungraded or --force. A fork with no runs joins
+      as before and says no run graded it.
 """
 import argparse
 import fcntl
@@ -646,17 +649,20 @@ def read_copies(gitdir):
     return out
 
 
-def graded_check(fork, dest=None):
-    """(exit code, text, patch) of `concord.py --fork-graded` for the fork, joined into `dest` when given: 0 for no run
-    or a match (the patch, when concord.py names one, is the graded change to apply); 4, a run in the fork is not
-    finished, always refuses the join; any other code, a fork or joined result without a matching PASS or a check that
-    could not run, refuses it unless --ungraded."""
-    res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork)]
-                         + (["--dest", str(dest)] if dest else []), capture_output=True, text=True)
+def graded_check(fork, dest, ungraded=False):
+    """(exit code, text, applied) of `concord.py --fork-graded` for the fork joining `dest`, the caller holding the
+    Concord lock mutex of both: 0 for no run or a match; 4, a run open in the fork or in `dest`, always refuses the
+    join; any other code, a fork or joined result without a matching PASS or a check that could not run, refuses it
+    unless --ungraded (`ungraded`: concord.py checks for open runs and joins nothing). `applied`, the files of its
+    `applied:` line, is set once concord.py applied the graded change itself, else None; with a code other than 0 the
+    result it left in `dest` is not the graded one."""
+    res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork), "--dest",
+                          str(dest)] + (["--ungraded"] if ungraded else []), capture_output=True, text=True)
     lines = (res.stdout or res.stderr).strip().splitlines()
-    patch = next((Path(ln[len("patch: "):]) for ln in lines if ln.startswith("patch: ")), None)
-    text = "\n".join(ln for ln in lines if not ln.startswith("patch: ")) or f"the grading check exited {res.returncode}"
-    return res.returncode, text, patch
+    applied = next((ln[len("applied: "):] for ln in lines if ln.startswith("applied: ")), None)
+    text = ("\n".join(ln for ln in lines if not ln.startswith("applied: "))
+            or f"the grading check exited {res.returncode}")
+    return res.returncode, text, applied
 
 
 def join_blockers(fork, origin, record):
@@ -738,29 +744,31 @@ def cmd_join(args):
     if blockers and not args.force:
         die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "
             + "\n  ".join(blockers[:15]))
-    # The fork's Concord lock mutex is held from the grading check to the fork's removal: no run starts or ends in the
-    # fork in between, so the check sees every run there is.
-    mutex = os.open(Path(git(fork, "rev-parse", "--path-format=absolute", "--git-dir")) / "concord.lock.mutex",
-                    os.O_CREAT | os.O_RDWR, 0o644)
+    # The Concord lock mutexes of the fork and of this checkout are held from the grading check to the fork's removal:
+    # no run starts or ends in either in between, so the check sees every run there is, and none changes the files the
+    # join checks and applies.
+    mutexes = []
     try:
-        fcntl.flock(mutex, fcntl.LOCK_EX)
-        code, graded, graded_patch = graded_check(fork, None if args.ungraded else dirpath)
+        for checkout in (fork, dirpath):
+            mutexes.append(os.open(Path(git(checkout, "rev-parse", "--path-format=absolute", "--git-dir"))
+                                   / "concord.lock.mutex", os.O_CREAT | os.O_RDWR, 0o644))
+            fcntl.flock(mutexes[-1], fcntl.LOCK_EX)
+        code, graded, applied = graded_check(fork, dirpath, args.ungraded)
         if code == 4:
             die(f"{graded}; nothing was applied, fork kept")
+        if code and applied is not None:
+            die(f"{graded}; fork kept\napplied: {applied}")
         if code and not args.ungraded:
             die(f"{graded}; nothing was applied, fork kept (join --ungraded joins it anyway)")
-        if graded_patch:             # the graded change: the fork's snapshot to the candidate its PASS run graded
-            patch = graded_patch.read_bytes()
-            names = [rec.split("\t", 2)[2] for rec in
-                     git(fork, "apply", "--numstat", "-z", str(graded_patch)).split("\0") if rec]
-        else:
+        if applied is None:          # no graded change (no run, or --ungraded): the fork's working tree
             patch, names = fork_patch(fork, record.get("snapshot") or "HEAD")
-        if patch.strip():
-            res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
-                                 capture_output=True)
-            if res.returncode != 0:
-                die(f"{dirpath}: the fork's patch does not apply; fork kept at {fork}; files: "
-                    f"{', '.join(names) or 'none'}\n  {res.stderr.decode(errors='replace').strip()}")
+            if patch.strip():
+                res = subprocess.run(["git", "-C", str(dirpath), "apply", "--binary", "-"], input=patch,
+                                     capture_output=True)
+                if res.returncode != 0:
+                    die(f"{dirpath}: the fork's patch does not apply; fork kept at {fork}; files: "
+                        f"{', '.join(names) or 'none'}\n  {res.stderr.decode(errors='replace').strip()}")
+            applied = ", ".join(names) or "nothing"
         for rel in marked_links(fork)[0]:
             (fork / rel).unlink()
         res = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(fork)],
@@ -768,9 +776,10 @@ def cmd_join(args):
         if res.returncode != 0:
             die(f"git worktree remove --force {fork} failed: {res.stderr.strip()}")
     finally:
-        os.close(mutex)
+        for mutex in mutexes:
+            os.close(mutex)
     git(repo, "worktree", "prune", check=False)
-    print(f"applied: {', '.join(names) or 'nothing'}")
+    print(f"applied: {applied}")
     if blockers:
         print("dropped (--force): " + "; ".join(blockers))
     print(f"joined ungraded (--ungraded): {graded}" if code else graded)
