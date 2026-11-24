@@ -306,6 +306,45 @@ $WT join TJ 5 --repo "$WJ" > "$T/jd2.txt" 2>&1; RD2=$?
   && ok "the destination changed elsewhere: the joined result passes the run's acceptance, join applies it and says so" \
   || { bad "join onto a changed destination rc=$RD2"; cat "$T/jd2.txt"; }
 rm -f "$WJ/other.txt" "$WJ/PLAN_K.md"; git -C "$WJ" checkout -q -- a.py
+# the destination changes while join grades the joined result: nothing is applied and the fork is kept
+printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py && [ ! -e broken.flag ] && { [ ! -e %s/race.on ] || touch %s/broken.flag; }`\n' "$T" "$WJ" > "$WJ/PLAN_L.md"
+gradefork 6 'echo y >> a.py' PLAN_L.md; printf 'o\n' > "$WJ/other.txt"; touch "$T/race.on"
+$WT join TJ 6 --repo "$WJ" > "$T/jl.txt" 2>&1; RL=$?
+[ $RL -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" = "$A0" ] && grep -qF "nothing was applied" "$T/jl.txt" && grep -qF "broken.flag" "$T/jl.txt" \
+  && ok "the destination changes while join grades the joined result: join refuses, nothing applied, the fork kept, the change named" \
+  || { bad "destination changed during the join's grading rc=$RL"; cat "$T/jl.txt"; }
+rm -f "$T/race.on" "$WJ/broken.flag"; $WT join TJ 6 --repo "$WJ" > /dev/null 2>&1
+rm -f "$WJ/other.txt" "$WJ/PLAN_L.md"; git -C "$WJ" checkout -q -- a.py
+# an open run in the destination: join refuses, with or without --ungraded
+gradefork 7 'echo y >> a.py'; approve PLAN_J.md "$WJ" || exit 1
+$DP --begin 1 --label implementer --plan PLAN_J.md --repo "$WJ" > "$T/jb2.txt" 2>&1
+OD=$(sed -n 's/^BEGIN \([^ ]*\)$/\1/p' "$T/jb2.txt" | head -1)
+$WT join TJ 7 --repo "$WJ" > "$T/jq.txt" 2>&1; RQ=$?; $WT join TJ 7 --repo "$WJ" --ungraded > "$T/jq2.txt" 2>&1; RQ2=$?
+[ -n "$OD" ] && [ $RQ -ne 0 ] && [ $RQ2 -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" = "$A0" ] && grep -qF "$OD" "$T/jq.txt" && grep -qF "$OD" "$T/jq2.txt" \
+  && ok "an open run in the destination: join refuses, with or without --ungraded, nothing applied, the fork kept, the run named" \
+  || { bad "join into a destination with an open run rc=$RQ/$RQ2 run=$OD"; cat "$T/jb2.txt" "$T/jq.txt" "$T/jq2.txt"; }
+$DP --abort "$OD" --repo "$WJ" > /dev/null 2>&1; $WT join TJ 7 --repo "$WJ" > /dev/null 2>&1; git -C "$WJ" checkout -q -- a.py
+# a grading file the tree does not hold (a link to a file outside it) changes after the PASS: the trees still match, and
+# join refuses to reuse the grade
+mkdir -p "$T/shared" "$WJ/tests"; printf 'grep -q y a.py\n' > "$T/shared/check.sh"; ln -s "$T/shared/check.sh" "$WJ/tests/check.sh"
+printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| a | check | KEEP | tests/check.sh |\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `sh tests/check.sh`\n' > "$WJ/PLAN_P.md"
+gradefork 8 'echo y >> a.py' PLAN_P.md; printf 'exit 1\n' > "$T/shared/check.sh"
+$WT join TJ 8 --repo "$WJ" > "$T/jp.txt" 2>&1; RP=$?
+[ $RP -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" = "$A0" ] && grep -qF "tests/check.sh" "$T/jp.txt" && grep -qF "nothing was applied" "$T/jp.txt" \
+  && ok "a pinned grading file changes after the PASS while the trees still match: join refuses to reuse the grade, nothing applied, the fork kept" \
+  || { bad "join reused a grade whose pinned grading file changed rc=$RP"; cat "$T/jp.txt"; }
+printf 'grep -q y a.py\n' > "$T/shared/check.sh"; $WT join TJ 8 --repo "$WJ" > /dev/null 2>&1
+rm -f "$WJ/tests/check.sh" "$WJ/PLAN_P.md"; rmdir "$WJ/tests" 2>/dev/null; git -C "$WJ" checkout -q -- a.py
+# the destination changes right after the apply (a git that writes into it once the change is applied): join keeps the
+# fork and says the change is applied but not graded
+mkdir -p "$T/gitwrap"; printf '#!/bin/sh\n"%s" "$@"; rc=$?\n[ "$3 $4" = "apply --binary" ] && touch "$2/late.txt"\nexit $rc\n' "$(command -v git)" > "$T/gitwrap/git"; chmod +x "$T/gitwrap/git"
+gradefork 9 'echo y >> a.py'
+PATH="$T/gitwrap:$PATH" $WT join TJ 9 --repo "$WJ" > "$T/jz.txt" 2>&1; RZ=$?
+[ $RZ -ne 0 ] && [ -d "$FJ" ] && [ "$(cat "$WJ/a.py")" != "$A0" ] && grep -qF "late.txt" "$T/jz.txt" && grep -qF "applied but not graded" "$T/jz.txt" \
+  && grep -qxF "applied: a.py" "$T/jz.txt" \
+  && ok "the destination changes right after the apply: join keeps the fork and says the change is applied but not graded" \
+  || { bad "a change right after the apply rc=$RZ"; cat "$T/jz.txt"; }
+rm -f "$WJ/late.txt"; git -C "$WJ" checkout -q -- a.py; $WT join TJ 9 --repo "$WJ" > /dev/null 2>&1; git -C "$WJ" checkout -q -- a.py
 
 echo "== join: committed work, the checkout it runs in, staged and ignored work of the fork"
 git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1

@@ -233,14 +233,21 @@ $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ "$(meta "$RID" acceptance_after_rc)" = "[0]" ] && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "dep.txt" "$T/v.txt" \
   && ok "a file outside the phase's diff that changed after the grade (a test dependency): PASS refused (exit 7), naming it" \
   || { bad "stale dependency: PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
-# a grading file that is a symlink into an ignored folder: its content is pinned when graded, and a later change refuses PASS
-newrepo 'python3 tests/test_a.py'; ( cd "$R" && mkdir golden && printf 'assert True\n' > golden/test_a.py && printf 'golden/\n' >> .gitignore \
-  && rm tests/test_a.py && ln -s ../golden/test_a.py tests/test_a.py && git add -A && git commit -qm link ) || { echo "setup failed: linked grader"; exit 1; }
+# a grading file that is a symlink into an ignored folder: its content and executable bit are pinned when graded, and a
+# later change of either refuses PASS
+newrepo 'python3 tests/test_a.py'; ( cd "$R" && mkdir golden && printf 'assert True\n' > golden/test_a.py && chmod +x golden/test_a.py \
+  && printf 'golden/\n' >> .gitignore && rm tests/test_a.py && ln -s ../golden/test_a.py tests/test_a.py && git add -A && git commit -qm link ) \
+  || { echo "setup failed: linked grader"; exit 1; }
 run 'echo y >> a.py'; RID=$(rid); A1=$(meta "$RID" acceptance_after_rc); printf 'assert True  # changed\n' > "$R/golden/test_a.py"
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ "$A1" = "[0]" ] && [ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" \
   && ok "a grading file linked into an ignored folder is graded on its content, and a change of that content refuses PASS (exit 7)" \
   || { bad "ignored grader target: after $A1, PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
+printf 'assert True\n' > "$R/golden/test_a.py"; chmod -x "$R/golden/test_a.py"
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ $RC -eq 7 ] && [ "$(meta "$RID" verdict)" = "None" ] && grep -qF "tests/test_a.py" "$T/v.txt" \
+  && ok "the same grading file's target keeps its content but loses its executable bit after the run: PASS refused (exit 7)" \
+  || { bad "ignored grader target chmod -x: PASS rc=$RC verdict=$(meta "$RID" verdict)"; cat "$T/v.txt"; }
 # --grade refuses a change outside the run's write scope and lists it
 newrepo 'grep -q y a.py'; run 'echo y >> a.py'; RID=$(rid)
 echo z >> "$R/b.py"
@@ -427,6 +434,17 @@ run 'echo y >> a.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(verdict_of "$RID")" = "PASS" ] && ok "acceptance writing untracked build output (a .pyc, not ignored): PASS accepted" \
   || { bad "build output refused: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
+# an ignored grading file (the tree does not hold it, so it is pinned) that one acceptance command rewrites in the grading
+# copy, and a later command passes on the rewrite
+newrepo true; printf 'fixture.txt\n' >> "$R/.gitignore"; printf 'bad\n' > "$R/fixture.txt"; git -C "$R" add -A; git -C "$R" commit -qm ign
+printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| a | fixture | KEEP | fixture.txt |\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `printf good > fixture.txt`\n- `grep -q y a.py && grep -q good fixture.txt`\n' > "$R/PLAN_T.md"
+approve PLAN_T.md "$R" || exit 1
+run 'echo y >> a.py'; RID=$(rid)
+$DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
+[ "$(meta "$RID" acceptance_after_rc)" = "[0, 0]" ] && [ $RC -eq 7 ] && [ "$(verdict_of "$RID")" = "None" ] \
+  && grep -qF "post-run command changed fixture.txt" "$T/v.txt" && grep -qF "printf good > fixture.txt" "$T/v.txt" \
+  && ok "an acceptance command rewrites a pinned grading file in the grading copy and a later one passes on it: PASS refused (exit 7), the file and the command named" \
+  || { bad "pinned grading file rewritten during grading: rc=$RC verdict=$(verdict_of "$RID")"; cat "$T/v.txt"; }
 accplan 'echo n > scratch.txt'
 run 'echo y >> a.py'; RID=$(rid)
 $DP --verdict "$RID" PASS --repo "$R" > "$T/v.txt" 2>&1; RC=$?
