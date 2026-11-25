@@ -1,5 +1,5 @@
 #!/bin/bash
-# concord.py --review-pr / --pr-status regression (PR gate, delegate.md §6). No network: a fake `gh` answers
+# concord.py --review-pr / --pr-status regression (PR gate, skills/review-change/gate.md). No network: a fake `gh` answers
 # `gh pr view` from JSON files, a local bare repo is `origin` with stacked pull refs, a fake qwen prints a review.
 # Run: bash ~/.claude/concord/tests/pr_review_test.sh   (exit 0 = all passed). Tests the dispatcher this file belongs to,
 # copied into a temp dir with HOME pointing at a temp home, so runs.jsonl and the real config stay untouched.

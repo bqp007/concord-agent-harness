@@ -1,7 +1,7 @@
 {
   "name": "concord",
-  "version": "3.1.2",
-  "description": "Stay in control while AI agents write your code. A strong model turns each task into a short plan that a verifier challenges and you approve, has the failing tests written first, writes the small changes and checks every result; low-cost models implement the bulky phases within a fixed file scope that every run's report checks; an independent reviewer checks each change at its risk level and a cheap delta review checks each fix; you review the diff and commit. Adds /concord:plan-then-delegate, /concord:delegate and /concord:rules-review, plus implementer and reviewer agents. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
+  "version": "3.2.0",
+  "description": "Stay in control while AI agents write your code. One workflow, two modes: /concord:run execute (the planning session writes every phase) or /concord:run delegate (low-cost models implement the bulky phases within a fixed file scope that every run's report checks). Either way a strong model turns the task into a short plan that a verifier challenges and you approve, the failing tests come first, an independent reviewer checks each change at its risk level and a cheap delta review checks each fix; you review the diff and commit. Five skills also work on their own: /concord:plan, /concord:verify-plan, /concord:design-review, /concord:lean-testing and /concord:review-change. Keeps /concord:plan-then-delegate and /concord:delegate as wrappers, plus /concord:rules-review and the implementer and reviewer agents. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
   "author": {
     "name": "Bao Q. Pham",
     "url": "https://github.com/bqp007"
@@ -9,5 +9,15 @@
   "homepage": "https://github.com/bqp007/concord-agent-harness",
   "repository": "https://github.com/bqp007/concord-agent-harness",
   "license": "MIT",
-  "keywords": ["ai-agents", "coding-agents", "governance", "human-in-the-loop", "planning", "delegation", "code-review", "test-first", "multi-model"]
+  "keywords": [
+    "ai-agents",
+    "coding-agents",
+    "governance",
+    "human-in-the-loop",
+    "planning",
+    "delegation",
+    "code-review",
+    "test-first",
+    "multi-model"
+  ]
 }

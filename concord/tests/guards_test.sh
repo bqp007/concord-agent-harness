@@ -235,10 +235,11 @@ $DP --end "$BS" --repo "$R" > "$T/out2.txt" 2>&1; RC2=$?
   || { bad "--end on a starting run: last rc=$RC1 id rc=$RC2"; tail -2 "$T/out.txt"; tail -2 "$T/out2.txt"; }
 rm -rf "${RUNS:?}/$BS"
 
-echo "== plugin names (agents are concord:<name> inside the Claude Code plugin)"
+echo "== agent names (the hint names the role; the installed rules give the name, concord:<name> inside the plugin)"
 run 3 PLAN_G.md; P=$(rid); [ -n "$P" ] || { echo "setup failed: run 3"; cat "$T/out.txt"; exit 1; }
 $DP --review "$P" --packet --repo "$R" > "$T/out.txt" 2>&1
-has "subagent_type concord:reviewer-opus55 with prompt" && ok "the packet hint names the plugin agent" || bad "packet hint"
+has "next: spawn the reviewer-opus55 agent, by the name the Concord rules in CLAUDE.md give it, with prompt" && ! has "concord:reviewer" \
+  && ok "the packet hint names the reviewer-opus55 agent and leaves its name to the installed rules" || bad "packet hint"
 record "$P" concord:reviewer-opus55 "$T/clean.txt" "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && [ "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["reviews"][-1]["reviewer"])' "$RUNS/$P/meta.json")" = reviewer-opus55 ] \
   && ok "--review-record --reviewer concord:reviewer-opus55 is stored as reviewer-opus55" || { bad "plugin reviewer rc=$RC"; tail -2 "$T/out.txt"; }

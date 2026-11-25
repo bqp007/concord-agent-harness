@@ -1,5 +1,5 @@
 #!/bin/bash
-# Checks scripts/demo.sh: one offline run of the governed loop with a scripted executor (no model, no account),
+# Checks scripts/demo.sh: one offline run of the governed loop in both modes with a scripted executor (no model, no account),
 # the caller's HOME and the repository left untouched, clean exits on bad input. Run: bash tests/demo_test.sh
 # Output: one "check demo/<name>: ok|FAIL <detail>" per check, then "passed N, failed M"; exit 0 iff M = 0.
 set -u
@@ -20,15 +20,18 @@ demo() { local dir=$1 path=$2; shift 2; (cd "$dir" && env -i PATH="$path" HOME="
 # (a) from the repository root, keeping the work folder for inspection
 start=$SECONDS; out=$(demo "$ROOT" "$P" scripts/demo.sh --keep 2>&1); rc=$?; secs=$((SECONDS - start))
 [ "$rc" = 0 ] && ok a-exit || no a-exit "rc=$rc: $(echo "$out" | tail -1)"
-[ "$secs" -le 60 ] && ok a-time || no a-time "${secs}s"
+[ "$secs" -le 120 ] && ok a-time || no a-time "${secs}s"
 for pat in '^OUT OF SCOPE \(source\): README\.md' 'baseline: .*fail(ed)? before the change' 'verdict FAIL \[EXECUTOR\]' \
-    'acceptance after run: 1/1 pass' 'verdict PASS'; do
+    'acceptance after run: 1/1 pass' 'verdict PASS' '^executor: planner -> planner ' '^plan revision: 1 \([0-9a-f]{12}\)$' \
+    '^   \| 2 \| free-deepseek-flash \| 2 \| PASS \| 1/1 pass \| 1 \| [0-9a-f]{12} \| CLEAN ' \
+    '^   \| 2 \| planner \| 1 \| PASS \| 1/1 pass \| 1 \| [0-9a-f]{12} \| CLEAN '; do
   echo "$out" | grep -qE "$pat" && ok "a-output $pat" || no a-output "missing: $pat"; done
 K=$(echo "$out" | sed -n 's/^kept: //p' | tail -1)
 if [ -n "$K" ] && [ -d "$K" ]; then ok a-kept
   n=$(grep -cE '"verdict": "(PASS|FAIL)"' "$K/concord/runs.jsonl" 2>/dev/null)
-  [ "${n:-0}" -ge 2 ] && ok a-ledger || no a-ledger "verdicts in the demo ledger: ${n:-0}"
-  (cd "$K/shop" && python3 tests/check_cart.py >/dev/null 2>&1) && ok a-fixed || no a-fixed "the shop's test still fails"
+  [ "${n:-0}" -ge 3 ] && ok a-ledger || no a-ledger "verdicts in the demo ledger: ${n:-0}"
+  (cd "$K/shop" && python3 tests/check_cart.py >/dev/null 2>&1) && (cd "$K/shop-execute" && python3 tests/check_cart.py >/dev/null 2>&1) \
+    && ok a-fixed || no a-fixed "a shop's test still fails"
   case "$K" in */concord-demo.*) rm -rf "$K";; esac
 else no a-kept "no 'kept: <path>' line"; fi
 
