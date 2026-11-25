@@ -296,8 +296,8 @@ Acceptance:
 - `grep -q y a.py`'
 run "echo y >> a.py"; G=$(rid)
 $DP --review "$G" --packet --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-[ $RC -eq 0 ] && has "next: Agent subagent_type concord:reviewer-opus55 with prompt" && ! has "reviewer-opus48" \
-  && ok "7 the packet hint names concord:reviewer-opus55 only" || { bad "7 hint rc=$RC"; grep next: "$T/out.txt"; }
+[ $RC -eq 0 ] && has "next: spawn the reviewer-opus55 agent," && ! has "reviewer-opus48" \
+  && ok "7 the packet hint names reviewer-opus55 only" || { bad "7 hint rc=$RC"; grep next: "$T/out.txt"; }
 fi
 
 if sel 8; then

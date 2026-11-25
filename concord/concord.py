@@ -25,6 +25,7 @@ Usage:
   concord.py --end RUN_ID|last [--repo DIR]                                # after it: same report as a CLI run
   concord.py --abort RUN_ID|last [--repo DIR]
   concord.py --estimate [--plan PLAN.md] [--repo DIR]                     # phase minutes, lanes, critical path, ETA from the run ledger
+  concord.py --phases [--plan PLAN.md] [--repo DIR]                       # each approved phase and the state its runs leave it in
   concord.py --report [--plan PLAN.md] [--repo DIR]                       # test report for the owner's acceptance test; stops the drift clock
   concord.py --verdict RUN_ID|last PASS|FAIL [--cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED] [--note TEXT]
               [--tokens N]
@@ -41,7 +42,7 @@ or an executor name (qwen, opencode, pi, dsh, kimi). Without MODEL, the phase's 
 decides, then `default` in models.conf.
 
 Billing rule: Claude models (sonnet, haiku, opus) never run here. They run as Claude Code's
-`concord:implementer` subagent on the Claude subscription; `planner` phases are done by the planning
+implementer subagent on the Claude subscription; `planner` phases are done by the planning
 session itself. Wrap both with --begin / --end so they get the same backup, scope report and
 plan-integrity check. This script refuses to send any Claude model to another harness, and
 refuses to start a harness without an explicit non-Claude model.
@@ -149,8 +150,8 @@ REPORT_FIELD = re.compile(r"^[\s*_\x60>#-]*[A-Z][A-Z ]+:")
 TIER_RANK = {"low": 1, "medium": 2, "high": 3}
 TIER_NAME = {1: "low", 2: "medium", 3: "high"}
 REVIEWER_RANK = {"reviewer-opus55": 3}
-TIER_REVIEWER = {"low": "a flash review (concord.py --review)", "medium": "concord:reviewer-opus55",
-                 "high": "concord:reviewer-opus55"}
+TIER_REVIEWER = {"low": "a flash review (concord.py --review)", "medium": "reviewer-opus55",
+                 "high": "reviewer-opus55"}
 APPROVE_ONLY = ("APPROVE-ONLY REVIEW: this change is low tier. Only a BLOCKER or HIGH finding (each with a "
                 "reproduction) or a clause FAIL holds it; a MEDIUM you report is kept as a note and not judged. None "
                 "found: findings [] and verdict CLEAN, which approves the change.")
@@ -430,7 +431,7 @@ def resolve_target(target, entries):
 def guard(executor, model):
     if executor not in SESSION_EXECUTORS and model and CLAUDE_MODEL.search(model):
         die(f"refusing to run Claude model '{model}' on {executor}: Claude models run only as the "
-            "concord:implementer subagent on the Claude subscription", code=5)
+            "implementer subagent on the Claude subscription", code=5)
     if executor not in SESSION_EXECUTORS and not model:
         die(f"no explicit model for {executor}: name one, add it to models.conf, or set "
             f"{executor}.model in executors.conf (a harness default could bill an unexpected model)", code=5)
@@ -2851,7 +2852,7 @@ def pick_executor(args, target, phase, conf, entries):
         die(f"phase {phase} is assigned to the planner: do it in the planning session, wrapped with "
             f"--begin {phase} --label planner / --end", code=3)
     if executor == "claude":
-        die(f"'{res['name']}' is a Claude model: it runs as the concord:implementer subagent on the Claude "
+        die(f"'{res['name']}' is a Claude model: it runs as the implementer subagent on the Claude "
             f"subscription, not through this script (wrap it with --begin {phase} / --end)", code=3)
     guard(executor, model)
     return res["name"], executor, model
@@ -4927,7 +4928,8 @@ def cmd_review_packet(args):
     print_floor_note(repo, meta)
     packet, _sha = write_packet(run_dir, task)
     print(f"PACKET {packet}\nrun {run_dir.name}, files {', '.join(files)}, "
-          f"{len(packet.read_text()):,} chars\nnext: Agent subagent_type concord:reviewer-opus55 with prompt "
+          f"{len(packet.read_text()):,} chars\nnext: spawn the reviewer-opus55 agent, by the name the Concord rules in "
+          f"CLAUDE.md give it, with prompt "
           f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record "
           f"{run_dir.name} --reviewer <name> --file <its output saved to a file>")
     return 0
@@ -5774,7 +5776,7 @@ def write_pr_packet(root, n, slug, base, head, tier, files, excluded, task, tag=
     packet, _sha = write_packet(run_dir, task)
     print(f"PACKET {packet}\nrun {run_dir.name}, head {head[:8]}, tier {tier}, "
           f"files {', '.join(files)}, {len(packet.read_text()):,} chars")
-    print(f"next: Agent subagent_type concord:reviewer-opus55 with prompt "
+    print(f"next: spawn the reviewer-opus55 agent, by the name the Concord rules in CLAUDE.md give it, with prompt "
           f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record {run_dir.name} "
           f"--reviewer <name> --file <its output saved to a file>")
     return 0
@@ -6989,18 +6991,108 @@ def report_prs(repo, root, base):
     return sorted(prs)
 
 
-def report_overrides(repo, root, runs, plan_rel):
+SCHEDULE_FIELDS = ("executor", "size", "after", "notes")
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+
+
+def phase_requirements(phase_text):
+    """What a PASS of the phase stands for: its text without its Executor:, Size:, After: and Notes: fields (who writes
+    it, how large it is, when it runs and where its code is, not what it must do or how it is checked), trailing spaces
+    and blank lines dropped. Each such field is the first line that names it outside a code fence and without
+    indentation; a field with no value on that line also covers the list below it, up to a line that is no list item,
+    indented line or blank line, or that names a field."""
+    lines = phase_text.splitlines()
+    fenced, drop = fenced_lines(lines), set()
+    for name in SCHEDULE_FIELDS:
+        at = next((i for i, line in enumerate(lines) if i not in fenced and not line[:1].isspace()
+                   and (m := FIELD.match(line)) and m.group(1).lower() == name), None)
+        if at is None:
+            continue
+        drop.add(at)
+        if lines[at][FIELD.match(lines[at]).end():].strip():
+            continue
+        for i in range(at + 1, len(lines)):
+            line = lines[i]
+            if i in fenced or FIELD.match(line) or (line.strip() and not line[:1].isspace() and not LIST_ITEM.match(line)):
+                break
+            drop.add(i)
+    return "\n".join(line.rstrip() for i, line in enumerate(lines) if i not in drop and line.strip())
+
+
+def counted_run(root, state, meta):
+    """Whether a run of the plan is one of its phase runs: not aborted, and no dry run, lint or review."""
+    rid = meta.get("run_id") or state.get("run_id") or "?"
+    return not ((root / rid / "aborted").exists() or rid.split("-", 2)[-1].startswith(("dry-", "lint-", "review-")))
+
+
+def phase_states(root, approved, rev_n, runs):
+    """{phase: (state, detail)} for each phase of the approved text `approved` (revision `rev_n`), from the last of its
+    counted runs among `runs` [(state, meta)], oldest first. PASS: that run passed the requirements this text holds
+    for the phase (phase_requirements of the phase.md it ran). CHANGED: it passed requirements that a later revision
+    changed. Else FAIL, OPEN, NO VERDICT or NOT RUN. A CHANGED, FAIL or NOT RUN phase needs a run; an OPEN run needs
+    --end and a verdict, a NO VERDICT run a verdict."""
+    last, out = {}, {}
+    for state, meta in runs:
+        if counted_run(root, state, meta):
+            last[state.get("phase")] = (state, meta)
+    for number in dict.fromkeys(key for key, _, _ in phase_spans(approved)):
+        if number not in last:
+            out[number] = ("NOT RUN", "")
+            continue
+        state, meta = last[number]
+        rid = meta.get("run_id") or state.get("run_id")
+        if not meta or not meta.get("verdict"):
+            out[number] = ("OPEN" if not meta else "NO VERDICT", f"run {rid}")
+        elif meta["verdict"] != "PASS":
+            out[number] = ("FAIL", f"run {rid}, cause {meta.get('cause') or '-'}")
+        elif phase_requirements((root / rid / "phase.md").read_text()) != phase_requirements(extract_phase(approved, number)):
+            out[number] = ("CHANGED", f"run {rid} passed revision {state.get('revision') or '?'}; revision {rev_n or '?'} "
+                                      "changed the phase")
+        else:
+            out[number] = ("PASS", f"run {rid}, revision {state.get('revision') or '?'}")
+    return out
+
+
+def ticket_approved(root, tid, text):
+    """(approved text, revision) of the ticket's current approved revision (current_revision): the one the plan text on
+    disk (`text`) holds, else the newest; the text on disk and None when the ticket has no revision."""
+    rev = current_revision(root, (load_drift(root).get("tickets") or {}).get(tid), text)
+    return revision_text(rev, text), rev
+
+
+def cmd_phases(args):
+    """--phases: each phase of the ticket's current approved revision and the state its runs leave it in
+    (phase_states); /concord:run `all` is every phase listed as CHANGED, FAIL or NOT RUN. Exit 11 when the plan on disk
+    is not that revision (edits nobody approved yet): the states can change once it is verified."""
+    repo = repo_root(args.repo or os.getcwd())
+    _plan, plan_rel, text = read_plan(repo, args.plan)
+    root = runs_root(repo)
+    tid = ticket_id(repo, plan_rel)[0]
+    approved, rev = ticket_approved(root, tid, text)
+    for number, (word, detail) in phase_states(root, approved, rev and rev["n"],
+                                               plan_run_records(root, tid, plan_rel)).items():
+        print(f"phase {number}: {word}" + (f" ({detail})" if detail else ""))
+    if rev is None or rev["hash"] != verified_hash(text):
+        print("NOTE: the plan on disk has no recorded APPROVE, so these states follow "
+              + (f"revision {rev['n']}, the newest approved one" if rev else "its unapproved text")
+              + "; verify the plan, then read them again")
+        return 11
+    return 0
+
+
+def report_overrides(repo, root, runs, plan_rel, changed):
     """The places where the gate was passed on someone's word: each forced PASS with its failed commands beside its
     reason, each --user-approved text and what it was used for, each exclusion waiver, each --no-baseline, each
-    unsandboxed executor run, each PASS over out-of-scope changes, and each phase reviewed below its
-    Risk: or not reviewed."""
+    unsandboxed executor run, each PASS over out-of-scope changes, each phase whose PASS a later revision changed
+    (`changed`: {phase: detail}), and each phase reviewed below its Risk: or not reviewed."""
     out = []
     last_by_phase = {}
     plan_runs = {meta.get("run_id") or state.get("run_id") for state, meta in runs}
     for state, meta in runs:
         run = _flat(meta.get("run_id") or state.get("run_id"))
         phase = meta.get("phase", state.get("phase"))
-        last_by_phase[phase] = (run, phase, meta)
+        if counted_run(root, state, meta):
+            last_by_phase[phase] = (run, phase, meta)
         forced = meta.get("verdict_forced")
         if forced:
             out.append(f"- forced PASS, run {run} (phase {phase}): failed or missing: {_flat('; '.join(forced))}; "
@@ -7014,6 +7106,7 @@ def report_overrides(repo, root, runs, plan_rel):
         if meta.get("verdict") == "PASS" and meta.get("out_of_scope"):
             out.append(f"- PASS over changes outside Files: {_flat(', '.join(meta['out_of_scope']))}: run {run} "
                        f"(phase {phase})")
+    out += [f"- phase {number}: {detail}, so that PASS does not cover it" for number, detail in changed.items()]
     for run, phase, meta in last_by_phase.values():
         if meta.get("executor") in (None, ""):
             continue
@@ -7058,7 +7151,7 @@ def cmd_report(args):
         out = []
         for state, meta in records:
             rid = _flat(meta.get("run_id") or state.get("run_id") or "?")
-            if (root / rid / "aborted").exists() or rid.split("-", 2)[-1].startswith(("dry-", "lint-", "review-")):
+            if not counted_run(root, state, meta):
                 continue
             if not meta:
                 out.append(f"{rid} is open (no --end yet)")
@@ -7071,9 +7164,11 @@ def cmd_report(args):
         die("REFUSED: --report needs every run of the plan closed: " + "; ".join(waiting)
             + ". Record --verdict PASS|FAIL for it, or --abort an open run; nothing was written.")
     entry = (load_drift(root).get("tickets") or {}).get(tid) or {}
-    approved = revision_text(current_revision(root, entry, text), text)
+    approved, rev = ticket_approved(root, tid, text)
+    changed = {n: detail for n, (word, detail) in phase_states(root, approved, rev and rev["n"], runs).items()
+               if word == "CHANGED"}
     lines = [f"# Test report: {ticket}", ""]
-    lines += ["## Overrides", ""] + report_overrides(repo, root, runs, plan_rel) + [""]
+    lines += ["## Overrides", ""] + report_overrides(repo, root, runs, plan_rel, changed) + [""]
 
     lines += ["## Phases", "", "| Phase | Executor | Runs | Last verdict | Acceptance re-run | Revision | Candidate | Phase review |",
               "|---|---|---|---|---|---|---|---|"]
@@ -7081,7 +7176,8 @@ def cmd_report(args):
                                  if phase_key(h.group(2)) is not None))
     by_phase = {}
     for state, meta in runs:
-        by_phase.setdefault(state.get("phase"), []).append(meta)
+        if counted_run(root, state, meta):
+            by_phase.setdefault(state.get("phase"), []).append(meta)
     for number in numbers + [p for p in by_phase if p not in numbers]:
         metas = by_phase.get(number) or []
         if metas:
@@ -7091,7 +7187,7 @@ def cmd_report(args):
             seen = [r for r in last.get("reviews") or []
                     if r.get("verdict") in ("CLEAN", "FIX", "BLOCK") and graded and r.get("candidate", graded) == graded]
             row = [str(number), _flat(last.get("name") or last.get("executor") or "-"), str(len(metas)),
-                   _flat(last.get("verdict") or "-"),
+                   "PASS (phase changed since)" if number in changed else _flat(last.get("verdict") or "-"),
                    f"{sum(1 for r in after if r == 0)}/{len(after)} pass" if after else "-",
                    _flat(last.get("revision") or "-"), (graded or "-")[:12],
                    _flat(f"{seen[-1]['verdict']} ({seen[-1].get('reviewer') or '?'})") if seen else "none"]
@@ -7880,7 +7976,7 @@ def cmd_list(conf):
         binary = resolve_bin(name, conf) or "NOT FOUND"
         modes = "readonly enforced" if name in MODE_ENFORCED else "readonly by contract only"
         print(f"{name:9s} {binary}   default model: {conf.get(name + '.model') or '-'}   {modes}")
-    print("claude    concord:implementer subagent (sonnet / haiku / opus) on the Claude subscription; wrap with --begin / --end")
+    print("claude    implementer subagent (sonnet / haiku / opus) on the Claude subscription; wrap with --begin / --end")
     print("planner   the planning session itself (tests, trivial edits); wrap with --begin PHASE --label planner / --end")
     return 0
 
@@ -7999,6 +8095,11 @@ def main():
                         "line) for this plan text; --begin and executor runs need an APPROVE (exit 11)")
     parser.add_argument("--estimate", action="store_true", help="phase minutes from the run ledger, lanes, critical "
                         "path and ETA of the plan; stores the ETA for the drift gate")
+    parser.add_argument("--phases", action="store_true", help="print each phase of the plan's current approved "
+                        "revision and the state its runs leave it in: PASS, CHANGED (a later revision changed what its "
+                        "PASS graded), FAIL, OPEN, NO VERDICT or NOT RUN; a CHANGED, FAIL or NOT RUN phase needs a "
+                        "run, an OPEN run --end and a verdict, a NO VERDICT run a verdict; exit 11 when the plan on "
+                        "disk has no recorded APPROVE")
     parser.add_argument("--report", action="store_true", help="write the test report for the owner's acceptance test "
                         "(REPORT_<ticket>-<id>.md in the runs root) and stop the drift clock")
     parser.add_argument("--abort", metavar="RUN_ID", help="release a session run's lock without a report")
@@ -8021,7 +8122,8 @@ def main():
     parser.add_argument("--packet", action="store_true",
                         help="with --review: write the review prompt for a Claude reviewer subagent, call no model")
     parser.add_argument("--review-record", metavar="RUN_ID", help="store a Claude reviewer's output on the run")
-    parser.add_argument("--reviewer", help="with --review-record: reviewer name (e.g. concord:reviewer-opus55)")
+    parser.add_argument("--reviewer", help="with --review-record: reviewer name (e.g. reviewer-opus55; the "
+                        "plugin's concord:reviewer-opus55 is stored without its prefix)")
     parser.add_argument("--file", help="with --review-record: file holding the reviewer's REVIEW-JSON answer")
     parser.add_argument("--review-pr", metavar="PR", help="review an open GitHub PR at its head (N, owner/repo#N or URL)")
     parser.add_argument("--delta", action="store_true",
@@ -8077,6 +8179,8 @@ def main():
         return cmd_plan_verdict(args)
     if args.estimate:
         return cmd_estimate(args)
+    if args.phases:
+        return cmd_phases(args)
     if args.report:
         return cmd_report(args)
     conf = load_conf()

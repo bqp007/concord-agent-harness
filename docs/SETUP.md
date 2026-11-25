@@ -54,11 +54,11 @@ A linked skill takes the name of its link, `concord:<name>`, and the plugin give
 
 ## Executors
 
-- `concord/models.conf` maps plain names to a harness and a model id: `free-deepseek-flash` and `free-glm-flash` on the OpenCode Zen free tier (no credits, a daily limit); `deepseek-flash` (default), `glm`, `minimax` and the Kimi and Qwen models (`concord.py --models` lists their names) on the OpenCode Go allowance; `zen-*` on OpenCode credits, used only after you agree. `sonnet`, `haiku` and `opus` always mean the Claude Code `concord:implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
+- `concord/models.conf` maps plain names to a harness and a model id: `free-deepseek-flash` and `free-glm-flash` on the OpenCode Zen free tier (no credits, a daily limit); `deepseek-flash` (default), `glm`, `minimax` and the Kimi and Qwen models (`concord.py --models` lists their names) on the OpenCode Go allowance; `zen-*` on OpenCode credits, used only after you agree. `sonnet`, `haiku` and `opus` always mean the Claude Code `implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
 - Reasoning effort for OpenCode models is the `#high` suffix on the model id.
 - `pi` runs the default executor and the other Go models. The native `qwen`, `dsh` and `kimi` harness adapters ship but are untested in this release. An executor name always means its own harness: `concord.py qwen <phase>` and `concord.py kimi <phase>` run the native adapters, never a Go model.
 - Executors receive only allow-listed environment variables: a base list (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `LANG`, `LC_*`, `TZ`, `XDG_*`) and the names `executors.conf` lists for the harness as `<harness>.env`. Add a name there when a harness needs one; `--dry-run` prints the names a run passes.
-- Review tiers are fixed in `concord.py` (`TIER_RANK`, `REVIEWER_RANK`): low = a cheap `--review` run, medium and high = the `concord:reviewer-opus55` agent; the dispatcher drops the `concord:` prefix before it compares. At the PR gate a review counts at most at its reviewer's rank, and `--pr-status` names the reviewer a pull request still needs. To retarget a tier, change the agent file's `model:` line and the `REVIEWER_RANK` entry together; `concord/tests/lean_test.sh` pins the names.
+- Review tiers are fixed in `concord.py` (`TIER_RANK`, `REVIEWER_RANK`): low = a cheap `--review` run, medium and high = the `reviewer-opus55` agent; the dispatcher drops a plugin agent's `concord:` prefix before it compares. At the PR gate a review counts at most at its reviewer's rank, and `--pr-status` names the reviewer a pull request still needs. To retarget a tier, change the agent file's `model:` line and the `REVIEWER_RANK` entry together; `concord/tests/lean_test.sh` pins the names.
 
 ## Other harnesses
 
@@ -68,8 +68,8 @@ The dispatcher does not depend on Claude Code. What the Claude Code adapter prov
 |---|---|---|---|
 | `CLAUDE.md` | the standing rules the planner follows | `AGENTS.md` at the repository root (same text) | paste into the planner's system prompt |
 | `/concord:run`, the `concord:*` skills, `/concord:rules-review` | step lists for the planner | saved prompts with the same text | run the steps by hand; every one is a `concord.py` call |
-| `concord:implementer*` agents | Claude models as executors on the subscription | not available; use OpenCode executors for every phase | same |
-| `concord:reviewer-opus*` agents | medium and high review tiers | a second Codex session fed the packet from `concord.py --review <run> --packet`, its REVIEW-JSON recorded with `--review-record` | same, with any strong model; keep the reviewer's context fresh |
+| `implementer*` agents | Claude models as executors on the subscription | not available; use OpenCode executors for every phase | same |
+| `reviewer-opus*` agents | medium and high review tiers | a second Codex session fed the packet from `concord.py --review <run> --packet`, its REVIEW-JSON recorded with `--review-record` | same, with any strong model; keep the reviewer's context fresh |
 | hookify rules | block destructive commands before they run | Codex's own sandbox and approval policy | your shell's discipline |
 
 Reports, ledgers, the plan approval, red runs, the PASS rule, scope enforcement on OpenCode and the PR-gate check live in `concord.py` and work the same everywhere.

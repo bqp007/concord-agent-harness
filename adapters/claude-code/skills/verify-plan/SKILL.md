@@ -6,7 +6,7 @@ argument-hint: <plan file>
 
 # Verify a plan
 
-The planner does not check its own plan. Spawn the `concord:plan-verifier` agent from a fresh context, on the model the planning session does not use (`fable` or `opus`), with the plan and the facts that the plan does not state. It reads the code the plan touches and answers with one VERDICT block.
+The planner does not check its own plan. Spawn the `plan-verifier` agent, by the name the Concord rules in CLAUDE.md give it, from a fresh context, on the model the planning session does not use (`fable` or `opus`), with the plan and the facts that the plan does not state. It reads the code the plan touches and answers with one VERDICT block.
 
 A Concord plan (`PLAN_<ticket>.md` in a repository with the dispatcher) is approved for its exact text:
 - `concord.py --lint <phase> --plan <PLAN> --repo <dir>` for each phase (no model call); fix what its ACCEPTANCE LINT and PLAN LINT lines name. Each lint writes the plan's approval-relevant text to a plan read and prints `PLAN-READ: <path>`: the verifier reads the newest one.

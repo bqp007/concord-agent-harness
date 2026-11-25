@@ -103,10 +103,10 @@ has "risk floor high" && has "sec/key.py matches sec/*" && has "reviewer-opus55"
   && ok "--review (flash) names the floor, the matched path and the reviewer the phase needs" \
   || { bad "--review printed no floor note"; tail -3 "$T/out.txt"; }
 packet "$S"
-has "needs concord:reviewer-opus55" && ok "--packet of a medium phase on a high-floor path names the reviewer the raised tier needs" \
+has "needs reviewer-opus55" && ok "--packet of a medium phase on a high-floor path names the reviewer the raised tier needs" \
   || { bad "no needs-reviewer note"; tail -3 "$T/out.txt"; }
 run 3 "echo '# r' >> docs/x.md"; L=$(rid); flash "$L"; packet "$L"
-has "risk floor medium" && has "docs/x.md matches docs/*" && has "needs concord:reviewer-opus55" \
+has "risk floor medium" && has "docs/x.md matches docs/*" && has "needs reviewer-opus55" \
   && ok "low phase on a medium-floor path: --packet names the floor and reviewer-opus55" \
   || { bad "medium floor"; tail -2 "$T/out.txt"; }
 run 12 "echo '# m' >> docs/x.md"; Q=$(rid); packet "$Q"

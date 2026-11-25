@@ -10,7 +10,7 @@ A review answers the three closed questions of `~/.claude/concord/REVIEW.md` abo
 
 ## An ordinary change
 
-The reviewer did not write the change: when this session wrote or shaped it, spawn a fresh `concord:reviewer-opus55` agent; review it here only when this session had no part in it. Pin what is under review (a commit range, a branch against its merge base, a pull request, or the working tree against HEAD) and check that the diff is not empty. Its intent comes from the pull request or issue, the commit messages, a spec the user names, or the user's words; with none, judge the change against the promises of the existing code and say so. A reviewer agent gets a brief file in `$TMPDIR`: the diff command, the intent and the path of REVIEW.md. Nothing is recorded and no `.git/concord` state is written.
+The reviewer did not write the change: when this session wrote or shaped it, spawn a fresh `reviewer-opus55` agent, by the name the Concord rules in CLAUDE.md give it; review it here only when this session had no part in it. Pin what is under review (a commit range, a branch against its merge base, a pull request, or the working tree against HEAD) and check that the diff is not empty. Its intent comes from the pull request or issue, the commit messages, a spec the user names, or the user's words; with none, judge the change against the promises of the existing code and say so. A reviewer agent gets a brief file in `$TMPDIR`: the diff command, the intent and the path of REVIEW.md. Nothing is recorded and no `.git/concord` state is written.
 
 ## Inside the Concord workflow
 

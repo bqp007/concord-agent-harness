@@ -68,7 +68,7 @@ ETA: <N> min, lands at <hh:mm> local
   minutes; `--estimate` turns them and the run ledger into minutes. `After:` names only a real wait, with its reason.
 - Tier: the planner's judgment of the plan's size, which sets the estimate's final revision and turns on the drift clock;
   no line count decides it.
-- Risk (default medium) picks the reviewer: low = approve-only flash, else concord:reviewer-opus55. High: untrusted
+- Risk (default medium) picks the reviewer: low = approve-only flash, else the reviewer-opus55 agent. High: untrusted
   input, scores or thresholds, security, money, data deletion or concurrency.
 - Files: every changed file, exact paths, comma-separated; scope is enforced during the run only on OpenCode, and every
   run's report checks it (OUT OF SCOPE); the run lock lets phases with disjoint Files run in one checkout at once. Only planner phases list the repo's `Cases:` file.

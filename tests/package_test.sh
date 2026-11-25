@@ -162,6 +162,13 @@ inst_o() { mkdir -p "$H/.claude" "$H/dot" && printf 'DOTFILES\n' > "$H/dot/CLAUD
 inst_p() { mkdir -p "$H/.claude" && { echo MINE; cat "$K/../tests/fixtures/CLAUDE-2.0.md"; echo AFTER; } > "$H/.claude/CLAUDE.md" &&   # the 2.0 block, merged by hand, no markers
   cp "$H/.claude/CLAUDE.md" "$H/before" && ! inst --no-tests > "$H/out" 2>&1 && cmp -s "$H/before" "$H/.claude/CLAUDE.md" &&
   grep -qi 'marker' "$H/out" && [ ! -e "$H/.claude/concord" ] && [ ! -e "$H/.claude/settings.json" ]; }
+# a heading of the user's own that only starts like Concord's is no Concord block: the dry run and the install go on;
+# the block Concord ships now, without its markers, is refused like the 2.0 block
+inst_pp() { local md="$H/.claude/CLAUDE.md" own='# Default workflow: plan, then pair program'
+  mkdir -p "$H/.claude" && printf '%s\nMINE\n' "$own" > "$md" && inst --dry-run --no-tests > "$H/out" 2>&1 &&
+  inst --no-tests > "$H/out" 2>&1 && grep -qxF "$own" "$md" && grep -qxF '<!-- concord:begin -->' "$md" &&
+  grep -vF '<!-- concord:' "$ROOT/$A/CLAUDE.md" > "$md" && cp "$md" "$H/before" && ! inst --no-tests > "$H/out" 2>&1 &&
+  cmp -s "$H/before" "$md" && grep -qi marker "$H/out"; }
 inst_q() { mkdir -p "$H/.claude/concord/tests" && echo mine > "$H/.claude/concord/tests/mine_test.sh" &&
   inst --no-tests >/dev/null && { [ -f "$H/.claude/concord/tests/mine_test.sh" ] || ls "$H"/.claude/concord/backup/*/tests/mine_test.sh >/dev/null 2>&1; }; }
 # the concord folder exists without concord.py: the files this install overwrites are backed up first
@@ -315,7 +322,7 @@ assert os.path.isabs(w) and os.path.isfile(w), c
 inst_jj() { mkdir -p "$H/.claude" && printf '%s' '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":null}]}]}}' > "$H/.claude/settings.json" &&
   { inst --no-tests > "$H/out" 2>&1; [ $? = 2 ]; } && grep -qF 'PostToolUse' "$H/out" && ! grep -q Traceback "$H/out" &&
   [ ! -e "$H/.claude/concord" ] && [ ! -e "$H/.claude/CLAUDE.md" ]; }
-s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb dd ee ff gg hh ii jj kk ll mm nn oo; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb dd ee ff gg hh ii jj kk ll mm nn oo pp; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.
@@ -379,7 +386,9 @@ s_docs() { local h f
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).
   local scope="README.md docs CONTRIBUTING.md $A $K/PLAN_TEMPLATE.md $K/repo-notes/README.md"
   check docs/plugin-commands "! git grep -n -I --untracked -E '(^|[^:a-z])/(run|plan-then-delegate|delegate|rules-review)([^/a-z.-]|\$)' -- $scope"
-  check docs/plugin-agents "! git grep -n -I --untracked -E '(^|[^:a-z0-9/-])(implementer-opus48|reviewer-opus48|reviewer-opus55|reviewer-delta|plan-verifier)([^.a-z0-9-]|\$)|\`implementer\`' -- $scope | grep -v ':name: ' | grep -v '^$A/CLAUDE.md:'"; }
+  # the docs name each agent by its role; the installed CLAUDE.md block gives the name to spawn it by (concord:<name> in
+  # the plugin), so only the setup table spells the plugin names
+  check docs/agent-names "! git grep -n -I --untracked -E 'concord:(implementer|reviewer-|plan-verifier)' -- $scope | grep -v '^docs/SETUP.md:[0-9]*:| Agents |'"; }
 
 s_blog() {
   check blog/exists "[ -f docs/BLOG.md ]"
