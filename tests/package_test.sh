@@ -10,7 +10,10 @@ ROOT=$PWD
 SCRUB_FILE=${CONCORD_SCRUB_FILE:-$HOME/.config/concord/scrub.txt}
 K=concord; A=adapters/claude-code
 pass=0; fail=0
-tmpd() { mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX"; }
+# Every temporary folder of a run lives under one root, removed when the run exits.
+TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX") || exit 2
+trap 'rm -rf "$TMPROOT"' EXIT
+tmpd() { mktemp -d "$TMPROOT/t.XXXXXX"; }
 check() { local name=$1; shift; local out
   if out=$(cd "$ROOT" && eval "$*" 2>&1); then echo "check $name: ok"; pass=$((pass+1))
   else echo "check $name: FAIL $(echo "$out" | tail -1 | cut -c1-120)"; fail=$((fail+1)); fi; }
