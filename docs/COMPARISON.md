@@ -2,7 +2,7 @@
 
 Concord grew out of reading other workflows and papers, keeping what held up in daily use. This page sets it beside the systems it learned from, each read against the same questions: the unit of work, who plans and who writes code, where a human decides, what evidence a run leaves, who reviews, which rules code enforces rather than a prompt requests, isolation, learning, cost and results. The facts come from each project's source or paper as read on 21 October 2026; only Concord itself was run.
 
-<p align="center"><img src="figures/fig0-concord-layers.svg" alt="Concord's governance layers and which of them this repository builds" width="760"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="figures/fig0-concord-layers-dark.svg"><img src="figures/fig0-concord-layers.svg" alt="Concord's governance layers and which of them this repository builds" width="760"></picture></p>
 
 ## At a glance
 
@@ -33,7 +33,7 @@ MetaGPT turns a one-line requirement into a repository through a chain of typed 
 
 ## Harness evolution and review research
 
-<p align="center"><img src="figures/fig4-papers-to-changes.svg" alt="Eight papers and the change each one made to Concord" width="760"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="figures/fig4-papers-to-changes-dark.svg"><img src="figures/fig4-papers-to-changes.svg" alt="Eight papers and the change each one made to Concord" width="760"></picture></p>
 
 Several recent papers let an agent rewrite its own harness and keep a change when a score improves. Concord took specific mechanisms from them and left the automatic loop alone:
 
@@ -43,7 +43,7 @@ Several recent papers let an agent rewrite its own harness and keep a change whe
 - **Terminal-RSI:** trajectories passed every scenario check yet failed the full verifier. Concord re-runs acceptance after the executor stops and has a TEST_DEFECT cause for failures that come from the test rather than the code.
 - **Deep Review:** reviewers each own one segment of a long document but read all of it. Concord built a segmented review of large diffs, then retired it after it added about 400 lines that no daily diff needed; the review cap and the file-group split remain.
 
-Harness² from Google Research evolves a harness for a frozen executor model and keeps a library entry only when behavioural contrasts support it. It has no human gate during a run. Concord borrowed the shape of this repository from it: a short definition, the loop figure, results, a demo that needs no credentials, a citation.
+Harness² from Google Research evolves a harness for a frozen executor model and keeps a library entry only when behavioral contrasts support it. It has no human gate during a run. Concord borrowed the shape of this repository from it: a short definition, the loop figure, results, a demo that needs no credentials, a citation.
 
 ## What Concord skipped on purpose
 
@@ -60,7 +60,7 @@ Harness² from Google Research evolves a harness for a frozen executor model and
 
 ## How it grew
 
-<p align="center"><img src="figures/fig0b-timeline.svg" alt="How the workflow grew from 10 to 21 October 2026" width="760"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="figures/fig0b-timeline-dark.svg"><img src="figures/fig0b-timeline.svg" alt="How the workflow grew from 10 to 21 October 2026" width="760"></picture></p>
 
 ## Sources
 

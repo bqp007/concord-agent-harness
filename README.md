@@ -1,126 +1,126 @@
-<p align="center"><img src="assets/concord-wordmark.svg" alt="Concord" width="360"></p>
+<h3 align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/concord-wordmark-dark.svg"><img src="assets/concord-wordmark.svg" alt="Concord" width="360"></picture><br>
+  A governed workflow for AI coding agents
+</h3>
 
 <p align="center">
-<a href="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml"><img alt="tests" src="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml/badge.svg"></a>
-<a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-<img alt="Python 3.9+, standard library only" src="https://img.shields.io/badge/python-3.9%2B%20stdlib-informational.svg">
+  <a href="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml"><img alt="tests" src="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="docs/WORKFLOW.md"><img alt="Docs: workflow" src="https://img.shields.io/badge/Docs-Workflow-6D28D9"></a>
+  <a href="#results"><img alt="Case study" src="https://img.shields.io/badge/Case%20study-ten%20days-B45309"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-0F766E"></a>
+  <img alt="Python 3.9+ stdlib" src="https://img.shields.io/badge/Python-3.9%2B%20stdlib-475569">
 </p>
 
-**Concord keeps you in control of AI coding agents.**
+<p align="center">
+  <a href="#try-it-without-credentials"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/demo-dark.svg"><img src="docs/assets/readme/demo-light.svg" alt="The demo in a terminal: a scripted executor edits outside its scope and fails, then passes." width="760"></picture></a>
+</p>
 
-Agents now write code faster than people can read it. Review quietly turns into approval, and after a few weeks nobody can say why the system is shaped the way it is. Concord spends your limited attention where it matters. A strong model plans each change, has the failing tests written first, writes the small fixes and checks every result. Cheap models write the bulky code; each run's report flags any edit outside the phase's files. An independent reviewer checks each change at its risk level, and a cheap delta review checks each fix. You approve the plan and commit the result. A standard-library Python dispatcher enforces the arrangement (a plan approval bound to the text the verifier read, tests that must fail first, a PASS only on recorded acceptance results, review tiers, a ledger of verdicts with their causes), so it still holds on a busy day.
+A **harness** is the system around a model that lets it act as an agent: prompts, tools, skills, orchestration. **Governance** is what keeps a person accountable for what the agents ship: who decides, what counts as evidence, and what a verdict means.
 
-In its first ten days of daily use it recorded 293 verdicts; 82% of the phases given to a cheap model passed on the first attempt, for US$7.50 of model spend in total.
+Concord is a governance layer for coding agents. It separates three roles that one agent session would otherwise hold:
 
-Concord holds four outcomes firm and leaves the rest to the planner's judgment within the plan you approved:
+* **Who decides.** You settle the plan's open questions, approve it and commit.
+* **Who writes.** A strong model plans and writes tests and small changes; low-cost models write bulky code inside each phase's declared files.
+* **Who judges.** A standard-library Python dispatcher runs the acceptance commands and records verdicts with their causes; a fresh reviewer reads each change at its risk tier.
 
-- **Governance.** You settle consequential behavior and architecture decisions, however small the change; review judges the design you approved.
-- **Testing.** Every changed behavior and path is accounted for; a test stays when it catches a failure the rest of the suite would miss where it matters.
-- **Code quality.** An independent reviewer examines each consequential change and its affected callers; a design failure stays visible until it is resolved.
-- **Truthful outcomes.** PASS and REVIEWED mean what they say, a waiver names its scope, and recovery keeps your work.
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig2-loop-dark.svg"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan, grill, verifier, your go, failing tests, implement, check, review, report, your commit." width="760"></picture></p>
 
-**Status:** a working harness, used daily and actively developed. New versions ship through the plugin marketplace and this repository; see [Install](#install) for how to update.
-
-<p align="center"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan or split, grill, verifier, go, failing tests, implement, check, review, report" width="760"></p>
+In its first ten days of daily use, Concord recorded 293 verdicts; 82% of phases given to a low-cost model passed on the first attempt, for US$7.50 of executor spend. This is a case study by one developer, not a controlled experiment.
 
 ## Contents
 
-- [How it works](#how-it-works)
-- [Install](#install)
-- [Try it without credentials](#try-it-without-credentials)
-- [Run a ticket](#run-a-ticket)
-- [Components](#components)
-- [Safety](#safety)
-- [Results](#results)
-- [How it compares](#how-it-compares)
-- [Citation](#citation)
-- [Contributing](#contributing)
-- [License](#license)
+[Principles](#principles), [How it differs](#how-it-differs), [How it works](#how-it-works), [Install](#install), [Try it](#try-it-without-credentials), [Run a ticket](#run-a-ticket), [Components](#components), [Safety](#safety-and-limits), [Results](#results)
+
+## Principles
+
+Each promise is kept by code up to its limit. A test asserts each refusal in the table: `guards_test.sh` for P1 and P6, `delegate_test.sh` and `testquality_test.sh` for P2, `papers_test.sh` for P3, P4 and P7, and `prgate_test.sh` for P5, all in `concord/tests/` ([exit codes](docs/REFERENCE.md#exit-codes)).
+
+| Promise | Mechanism | Refusal you can reproduce | Limit |
+|---|---|---|---|
+| **P1.** Runs follow the approved plan text | A recorded APPROVE binds to the text's hash | An edited plan's run exits 11, even with `--user-approved` | The code checks only that a recorded APPROVE quotes the text's hash, not who wrote it, and it neither records nor checks your go/no-go |
+| **P2.** Tests fail before the code exists | The red run: acceptance runs on the untouched tree first | A delegated phase whose tests already pass exits 6 | A session run (`--begin`) only warns |
+| **P3.** A PASS rests on recorded results | The dispatcher re-runs the acceptance commands on a copy of the run's result | An unexpected or missing result: PASS exits 7 | A forced PASS is listed first; weak tests pass weak code |
+| **P4.** Each phase declares its files first | A change outside `Files:` and `Follow-through:` rejects the run | `REJECTED (not graded)`; PASS exits 7 | Only OpenCode refuses the edit while the run is in progress; on the other executors the edit is found after the run |
+| **P5.** Review rises with risk | Each file in a pull request needs its riskiest run's tier; high needs two model families | `--pr-status` exits 1 until every file is covered, no finding open | A review covers only what its reviewer read |
+| **P6.** Every run is recorded; overrides come first | Ledgers keep every verdict, cause and finding, and the report's first section lists every override, such as a forced PASS | `--report` exits 2 while a run lacks a verdict | The planner assigns causes; no second rater |
+| **P7.** You commit | Concord never commits; a staged file or moved HEAD rejects a run | A file staged after the run began makes `--grade` exit 7 and names the file | No code stops the planning session from committing; that rule is an instruction |
+
+## How it differs
+
+Of the systems compared, only Concord binds an approval to the exact plan text and re-runs the acceptance commands itself. Its dispatcher refuses a run whose plan text has no recorded APPROVE, and a PASS unless every acceptance command it re-ran gave the expected result. Source: [docs/COMPARISON.md](docs/COMPARISON.md).
+
+| Kind of harness | What you approve | What a PASS rests on | Who reviews | What is recorded |
+|---|---|---|---|---|
+| Plan mode and subagents (Claude Code) | Permission prompts and the plan | Nothing built in | Optional | Nothing built in |
+| Role-play frameworks (MetaGPT, ChatDev) | Nothing during a run | Unit tests or execution feedback | Author or same model | Typed documents or chat chains |
+| Workflow plugins (ECC, agentic-sdlc) | Prompt-text gates, advisory sign-offs | Reports quoting commands and exit codes | A separate agent | Gate reports, persisted state |
+| Self-improving harnesses (Harness²) | Nothing during a run | Behavioral contrasts | Automated selector or judge | Rollout ledgers |
+| Concord | Every plan; the commit | Acceptance results the dispatcher re-ran | A fresh agent by risk tier; two families at high | Every run, verdict, cause and finding |
 
 ## How it works
 
-1. **Plan.** In Claude Code, `/concord:run execute <task>` (the planner session writes every phase) or `/concord:run delegate <task>` (each phase goes to the executor the plan assigns). The planner reads the code, the spec, any `Cases:` file and the skills, then writes an early `PLAN_<ticket>.md`: done when, ship, design, test plan, conflicts, open questions, and per phase the executor, risk, files, follow-through files (the docs or build lists its change requires), steps, `Size:` and `After:`. A ticket whose parts can land and be reviewed apart gets a split plan instead: a table of child tickets cut along their seams, verified and approved once, after which each child runs this loop with its own plan, go and pull request. A grill follows: at most five blocking questions with defaults. `concord.py --lint` checks each phase and writes the plan read: the text a verifier agent (`plan-verifier`) then reads. The verifier checks the plan's claims against the code, its acceptance commands, its risk labels and its Test plan, and answers CUT, MERGE and FIX items; its APPROVE holds only for the text it read. `concord.py --estimate` prints the lanes, the critical path and the ETA. You give one go/no-go on the lanes, the ETA and the cuts.
-2. **Tests first.** For a changed behavior, tests that fail on the current code are written in their own run, and the planner checks that each fails for the stated reason before any implementation starts. The dispatcher refuses to start a delegated phase whose acceptance already passes.
-3. **Implement.** In execute mode the planner writes each phase inside a recorded `--begin`/`--end` run. In delegate mode it writes what costs less to write than to specify, and `concord.py <model> <phase>` runs a bulky phase on a cheap model, free tier first. On OpenCode (the `free-*` models), edits outside the phase's `Files:` and `Follow-through:` are refused; the default `deepseek-flash` runs on the pi harness, where only the report's out-of-scope lines catch them. Phases run in parallel lanes. A lock covers a set of files, not a checkout, so phases whose `Files:` and `Follow-through:` are disjoint run in one worktree at once; a shared file gets a fork.
-4. **Check and review.** The dispatcher takes the checkout the executor left as the run's candidate, runs the acceptance commands on a copy of it and writes an evidence report: scope, the red run, acceptance on the candidate. A run that changed anything outside its write scope is rejected and graded only after a cleanup (`--grade`). The planner reads its blocking lines, trusts its acceptance results and reads the run's change; a PASS needs the expected result of every acceptance command, in a checkout that still holds the candidate. A review round is a full review at the risk tier (a flash model at low, Opus 5.5 at medium, Opus 5.5 and a flash model from another family at high), fixes, then a cheap delta review that closes each finding it shows fixed; a change the delta cannot tie to a finding needs a review at its own tier. It stops at 0 open BLOCKER and HIGH, and the dispatcher caps the full reviews of a pull request. A MEDIUM is fixed only in a real flow; the rest go to the DAT. A review covers only what its reviewer could read: every text file is shown as text, and a binary file needs your words naming it. A finding stays open until a review on the same history shows it fixed; a force-push or a rebase carries it to the next review.
-5. **Record.** `concord.py --report` writes the test report from recorded data once every run of the plan has a verdict, stops the drift clock and closes the plan to new runs in its ticket checkout and that checkout's forks. It opens with the overrides (each forced PASS beside its failed commands, each waiver and owner go-ahead, each PASS whose phase a later revision changed), then the phases (who wrote each, the plan revision its run followed, the graded candidate and the latest review of it), test plan, test lines, review rounds, open items for the DAT and time against the ETA. Every FAIL carries a cause (EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER, BLOCKED); after three executor failures the planner stops and asks. Runs and verdicts go to `~/.claude/concord/runs.jsonl`; findings to a ledger.
-6. **KB update and commit.** The session replaces the repo-notes lines the ticket changed, runs `KB command:` when set, and merges the approved case diff into the `Cases:` file. You commit. Concord never commits or pushes.
+1. **Plan.** The planner reads the code, writes `PLAN_<ticket>.md` and asks at most five questions.
+2. **Verify and go.** A verifier checks the plan against the code; you give the go.
+3. **Tests first.** Failing tests are written and checked to fail for the stated reason.
+4. **Implement.** The planner writes each phase, or low-cost models write bulky ones in parallel.
+5. **Check and review.** The dispatcher grades each run; a reviewer reads each change at its risk tier.
+6. **Report and commit.** The report lists overrides first; you read it and commit.
 
-[docs/WORKFLOW.md](docs/WORKFLOW.md) walks through one ticket from plan to commit.
+Details: [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 ## Install
 
 ```bash
 git clone https://github.com/bqp007/concord-agent-harness.git && cd concord-agent-harness
-bash install.sh --dry-run   # shows every link, copy, keep and backup; writes nothing
-bash install.sh             # the default: links the commands, agents and skills into ~/.claude, installs the dispatcher, then runs its suites
+bash install.sh --dry-run   # previews; writes nothing
+bash install.sh
 ```
 
-The default install symlinks the commands, agents and skills into `~/.claude` and edits your live setup: it writes the Concord rules into `~/.claude/CLAUDE.md` between `<!-- concord:begin -->` and `<!-- concord:end -->`, and adds to `~/.claude/settings.json` the keys it lacks: the drift hook (a PostToolUse command that starts Python only in a repository where Concord keeps drift data), compaction windows for two models, and `sandbox.excludedCommands` entries that let `gh` and `git push`, `fetch`, `pull` and `clone` run outside Claude Code's sandbox. It checks both files before it writes anything, backs up each file it changes and leaves everything outside the markers untouched.
-
-CI runs every suite from a checkout on Python 3.12, on Ubuntu and macOS. The installed copy and Python 3.9, the documented minimum, are not run in CI.
-
-For the plugin marketplace layout instead, `bash install.sh --plugin` installs the dispatcher and prints the commands to run in Claude Code:
-
-```text
-/plugin marketplace add bqp007/concord-agent-harness
-/plugin install concord@concord
-```
-
-To update, run `git pull` then `bash install.sh` in the clone, and restart Claude Code.
-
-Prose style lives in `~/.claude/concord/style.conf` (`prose = lean`, the default, selects lean STE, or write a sentence of your own). Plans carry a tier (S, M or L), a drift brake stops a run that outgrows its plan, and a plan verifier challenges each plan first: [docs/WORKFLOW.md](docs/WORKFLOW.md#size-drift-and-verification). Requirements (bash, git, Python 3.9+, Claude Code, OpenCode for the cheap executors), executor configuration and other harnesses such as Codex: [docs/SETUP.md](docs/SETUP.md).
+The install backs up and edits `~/.claude/CLAUDE.md` and `~/.claude/settings.json`, letting `gh`, `git push`, `git fetch`, `git pull` and `git clone` run outside Claude Code's sandbox in every project. It needs bash, git, Python 3.9+ and Claude Code; `--plugin` uses the marketplace instead. To update: `git pull`, `bash install.sh`, restart Claude Code ([setup](docs/SETUP.md)).
 
 ## Try it without credentials
 
 ```bash
-bash scripts/demo.sh          # add --keep to inspect the run folders afterwards
+bash scripts/demo.sh
 ```
 
-The demo runs the whole loop in both modes in about a minute inside a temporary folder, with a scripted executor instead of a model: no network, no account, nothing written outside that folder. A toy repository has a bug and a failing test. In delegate mode the first attempt fixes the bug but also edits a file outside the phase's scope, so the report flags it and the phase fails with cause EXECUTOR. The second attempt stays in scope: the red run, the passing acceptance, a review and the PASS verdict follow. In execute mode a second copy of the repository runs the same ticket with the phase assigned to the planner: the script plays the planning session and writes the fix inside a recorded `--begin`/`--end` run, with the same check, review and verdict. Each ticket's report then shows who wrote each phase, the plan revision, the graded candidate and its review. The plan it uses is [examples/PLAN_example.md](examples/PLAN_example.md).
+The demo runs both modes in about a minute with a scripted executor in a temporary folder: no network, no account. In delegate mode the first attempt edits outside its files and fails with cause EXECUTOR; the second passes. Execute mode follows ([walk-through](docs/SETUP.md#the-demo)).
 
 ## Run a ticket
 
-```bash
-python3 ~/.claude/concord/wt.py new <TICKET>     # one git worktree per ticket
-# in Claude Code, inside the worktree:
-#   /concord:run execute <what you want done>    plan, open questions, verifier, your go, then this session writes every phase
-#   /concord:run delegate <what you want done>   the same, with each phase on the executor the plan assigns
-#   /concord:run delegate --plan PLAN_<ticket>.md <phase|all>   continue an approved plan from where its records stand
-python3 ~/.claude/concord/concord.py --pr-status <PR>   # exits 0 only when the PR's current diff is REVIEWED
-```
+| You type | What happens |
+|---|---|
+| `python3 ~/.claude/concord/wt.py new <TICKET>` | A worktree and branch for the ticket |
+| `/concord:run delegate <task>` (or `execute`) in Claude Code | Plan, questions, verifier, your go; each phase written, checked, reviewed |
+| `git commit`, after reading the report | The report lists every override first |
 
-`/concord:plan-then-delegate <task>` and `/concord:delegate <phases>` still work: they call `/concord:run delegate`. The five skills also work on their own, without a ticket: `/concord:design-review` (the callers a change affects and the choices that are the owner's), `/concord:plan` (a plan draft), `/concord:verify-plan` (a fresh verifier), `/concord:lean-testing` (the smallest check that catches the regression) and `/concord:review-change` (findings on any diff, branch or pull request). [docs/SETUP.md](docs/SETUP.md#names) lists the exact names in each install mode.
-
-Exit codes: 1 `--pr-status` short of REVIEWED, or a REVISE plan verdict; 2 usage, plan or lock, a review answer that quotes no packet of its run, or a PASS given from a checkout other than the run's; 3 a Claude model on the run path, or a tool (git, gh) missing or failing; 4 unknown model, or `--fork-graded` on a fork, or toward a destination, with an open run; 5 billing guard; 6 acceptance already green (red run); 7 PASS refused (an acceptance result missing or unexpected, a rejected run, a post-run command that changed the tree or a grading file, or a checkout that no longer holds the graded candidate or the grading files it was graded with, in content and executable bit), or `--grade` refused (the checkout differs from the run's start outside its write scope); 8 a full review past the cap of reviewed heads; 9 a provider refused a review (nothing recorded); 10 drift block, or a plan whose report is written; 11 no APPROVE from the plan verifier for this plan text, or a stored plan read changed after its APPROVE; 75 the PR head is unsettled or unverified (gh reports one head and the fetched pull ref another, or one of the two cannot be read; nothing judged or written, run again); 124 timeout; 125 resource limit. `concord.py --help` lists every command.
+Commands, exit codes, causes: [docs/REFERENCE.md](docs/REFERENCE.md). The five skills also work alone ([names](docs/SETUP.md#names)).
 
 ## Components
 
-| Path | Installs to | What it is |
-|---|---|---|
-| `concord/concord.py` | `~/.claude/concord/` | the dispatcher: runs one plan phase on one executor, reports the evidence, reviews it, records the verdict |
-| `concord/wt.py` | `~/.claude/concord/` | one git worktree per ticket; links large untracked folders from the main checkout |
-| `concord/CONTRACT.md` | `~/.claude/concord/` | the contract every executor reads first: twelve rules and the report format |
-| `concord/PLAN_TEMPLATE.md` | `~/.claude/concord/` | the plan format |
-| `concord/REVIEW.md` | `~/.claude/concord/` | the review task: three closed questions, severities, the REVIEW-JSON format |
-| `concord/*.conf` | `~/.claude/concord/` (kept if present) | model registry and billing routes, harness settings, worktree links |
-| `concord/tests/` | `~/.claude/concord/tests/` | the regression suites; `run_all.sh` runs them in parallel with a fake HOME |
-| `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:run` (execute or delegate mode), the skills `concord:design-review`, `concord:plan`, `concord:verify-plan`, `concord:lean-testing` and `concord:review-change`, the wrappers `/concord:plan-then-delegate` and `/concord:delegate`, `/concord:rules-review`, and the implementer, verifier and reviewer agents; also four hook rules (`install.sh --repo`), and the CLAUDE.md rules block and settings keys the installer writes |
-| `scripts/demo.sh`, `examples/` | nowhere | the credential-free demo and its plan |
-| `tests/` | nowhere | the repository's own checks: `package_test.sh` (scrub, layout, agents, Python, install, style, hygiene, docs) and `demo_test.sh` |
-| `docs/` | nowhere | setup, the workflow, the comparison, the pilot, figures |
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig0-concord-layers-dark.svg"><img src="docs/figures/fig0-concord-layers.svg" alt="Concord's governance layers and what this repository builds" width="760"></picture></p>
 
-## Safety
+| Path | What it is |
+|---|---|
+| `concord/concord.py` | The dispatcher |
+| `concord/wt.py` | One git worktree per ticket |
+| `concord/*.md`, `*.conf` | Executor contract, review task, plan format, model registry, settings |
+| `adapters/claude-code/` | The plugin: command, skills, agents, hook rules |
+| `concord/tests/`, `tests/` | Suites and repository checks |
 
-- **Enforced by the dispatcher:** the plan approval, bound to the text the verifier read; the red run; the out-of-scope report, and refusal of out-of-scope edits on OpenCode; a PASS refused unless every acceptance command has its expected result after the run, the commands left tracked and in-scope files as they found them, and no acceptance file changed; the review tier and the closing of findings at the PR gate; the billing guard (Claude models never go to another harness); an allow-list of the environment variables an executor receives.
-- **Advisory:** the executor contract and the hook rules are instructions a model can ignore. Scope is enforced only on OpenCode, and only for its edit tools, not for shell redirection; the default executor runs on pi, where only the report catches an out-of-scope edit. The hook rules catch common spellings of destructive commands; they are reminders, not a barrier. The backup of in-scope files taken before every run is the real safety net.
-- **Network:** the dispatcher's only request of its own is `--models --verify`, which fetches OpenCode's public model catalogs. Executors and reviewers reach their model providers through their harness; `--review-pr` uses the GitHub CLI.
-- **Git:** Concord never commits, pushes or changes branches in your checkout; `wt.py` creates and removes worktrees only when you ask.
-- **Not a sandbox:** agents run shell commands as your user. On macOS the OpenCode and pi executors run under a Seatbelt profile, which is skipped on Linux and inside another sandbox such as Claude Code's; the acceptance commands that run after an executor run its code unsandboxed. Known gaps, recommendations and how to report a vulnerability: [SECURITY.md](SECURITY.md).
+Full table: [docs/REFERENCE.md](docs/REFERENCE.md#components).
+
+## Safety and limits
+
+- **Enforced by the dispatcher:** plan approval, red run, PASS rule, scope rejection, review tiers, billing guard, executor environment allow-list.
+- **Advisory:** the executor contract and hook rules.
+- **Not a sandbox:** agents run commands as your user; acceptance commands run the executor's code unsandboxed ([SECURITY.md](SECURITY.md)).
+
+The executors are OpenCode and the `pi` CLI; the native `qwen`, `dsh` and `kimi` adapters also ship but are untested in this release. The demo needs no executor. In execute mode the planning session writes every phase, so an executor is needed only for the reviews that run on a cheap flash model: the low-tier review, and the second review from another model family that a high-risk change needs ([setup](docs/SETUP.md#executors)).
 
 ## Results
 
-One developer used Concord daily from 11 to 20 October 2026 while shipping a production mobile security product. The ledger it shipped with records:
+One developer's ledger, 11 to 20 October 2026, shipping a production mobile security product:
 
 | Measure | Value |
 |---|---|
@@ -131,15 +131,11 @@ One developer used Concord daily from 11 to 20 October 2026 while shipping a pro
 | Executor phases passing on the first attempt | 91 of 111 (82%) |
 | Executor spend at list prices | US$7.50 in total, median US$0.02 per run |
 
-Most failures were plan gaps, not executor mistakes, which is why tests are written and checked red before any code, and every delegated phase is linted and its plan verified before it runs. This is an exploratory case study by one person who also assigned the failure causes, not a controlled experiment.
-
-## How it compares
-
-[docs/COMPARISON.md](docs/COMPARISON.md) sets Concord beside the workflows it learned from (ECC, agentic-sdlc, agent-protocols, Claude Code's own plan mode, subagents and hooks, Harness², MetaGPT, ChatDev and recent harness-evolution research): what it adopted, what it skipped on purpose and what it still lacks.
+Threats to validity: one developer, one product, ten days; the same person assigned the causes. [docs/PILOT.md](docs/PILOT.md) sets out a paired comparison.
 
 ## Citation
 
-If you use Concord, please cite it. GitHub's "Cite this repository" button reads [CITATION.cff](CITATION.cff).
+See also [CITATION.cff](CITATION.cff).
 
 ```bibtex
 @software{pham2026concord,
@@ -152,10 +148,12 @@ If you use Concord, please cite it. GitHub's "Cite this repository" button reads
 
 ## Contributing
 
-Changes to Concord take a short plain plan, tests that fail first, an independent review of the diff and a maintainer's acceptance; they do not run through Concord itself. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Changes need a plain plan, failing tests first, an independent review and a maintainer's acceptance: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
 MIT, see [LICENSE](LICENSE). The papers cited in the documentation belong to their authors.
+
+## Disclaimer
 
 Concord is an independent project by Bao Q. Pham. Product and model names (such as Claude, Claude Code, OpenCode and DeepSeek) are used only to describe compatibility; they are trademarks of their owners, who do not sponsor or endorse this project.

@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use Concord, please cite it as below."
 type: software
 title: "Concord: a governed workflow for AI coding agents"
-abstract: "Concord keeps people in control of AI coding agents. A strong model plans each change and checks the result, low-cost models implement it inside a fixed file scope, an independent reviewer checks every change at its risk level, and a small dispatcher enforces file scope, tests first, review tiers and attempt caps while recording every verdict with its cause."
+abstract: "Concord keeps people in control of AI coding agents. A strong model plans each change and checks the result, low-cost models implement it, an independent reviewer checks every change at its risk level, and a small dispatcher enforces tests first and review tiers while recording every verdict with its cause. The dispatcher rejects a run that changed a file outside the phase's declared files, and only on OpenCode is such an edit refused while the run is in progress."
 authors:
   - family-names: Pham
     given-names: "Bao Q."

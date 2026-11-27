@@ -11,6 +11,14 @@ This guide covers requirements, installation, executors and configuration. The [
 
 The demo (`bash scripts/demo.sh`) needs only bash, git and Python.
 
+## The demo
+
+```bash
+bash scripts/demo.sh          # add --keep to inspect the run folders afterwards
+```
+
+The demo runs the whole loop in both modes in about a minute inside a temporary folder, with a scripted executor instead of a model: no network, no account, nothing written outside that folder. A toy repository has a bug and a failing test. In delegate mode the first attempt fixes the bug but also edits a file outside the phase's scope, so the run is rejected and the phase fails with cause EXECUTOR. The second attempt stays in scope: the red run, the passing acceptance, a review and the PASS verdict follow. In execute mode a second copy of the repository runs the same ticket with the phase assigned to the planner: the script plays the planning session and writes the fix inside a recorded `--begin`/`--end` run, with the same check, review and verdict. Each ticket's report then shows who wrote each phase, the plan revision, the graded candidate and its review. The plan it uses is [examples/PLAN_example.md](../examples/PLAN_example.md).
+
 ## Install
 
 ```bash
@@ -32,7 +40,7 @@ With `--plugin` the commands and agents come from the marketplace instead. Each 
 
 To update, run `git pull` then `bash install.sh`, and restart Claude Code.
 
-What `install.sh` does: first it checks that `settings.json` can be merged and that the `CLAUDE.md` markers pair, and it stops before writing anything when either fails (a `settings.json` that is not a JSON object, or whose `hooks` have another shape than Claude Code's, cannot be merged, and neither can a hook whose command is not a string); a `CLAUDE.md` that has the Concord heading but no markers stops the install with instructions. A relative `CLAUDE_HOME` is resolved from the current folder first. Then it copies `concord/` to `~/.claude/concord/` (or `$CLAUDE_HOME/concord/`). Whenever that folder already exists it first copies the old files to `~/.claude/concord/backup/<timestamp>-pre-install/`; backups are never pruned. The settings merge adds missing keys and removes only hook entries whose whole command is one this installer ships or shipped before (a shipped command you extended stays, and the installer names it), and the drift hook points into the `CLAUDE_HOME` it installs to. It merges from `settings.json` as the file is when it writes, through a temporary file beside it, so an edit made during the install is kept; a file that can no longer be merged by then is left as it was, and the installer says so. Suites that Concord retired (`card`, `lessons`, `map`, `reuse` and `slim`) are then removed from `tests/` (the backup keeps them); a suite of your own in `tests/` stays. `models.conf`, `executors.conf`, `worktrees.conf` and `repo-notes/README.md` are kept when they already exist, so your edits survive upgrades. `--no-tests` skips the suites; exit code 2 means a usage error or a missing prerequisite.
+What `install.sh` does: first it checks that `settings.json` can be merged and that the `CLAUDE.md` markers pair, and it stops before writing anything when either fails (a `settings.json` that is not a JSON object, or whose `hooks` have another shape than Claude Code's, cannot be merged, and neither can a hook whose command is not a string); a `CLAUDE.md` that has the Concord heading but no markers stops the install with instructions. A relative `CLAUDE_HOME` is resolved from the current folder first. Then it copies `concord/` to `~/.claude/concord/` (or `$CLAUDE_HOME/concord/`). Whenever that folder already exists it first copies the old files to `~/.claude/concord/backup/<timestamp>-pre-install/`; backups are never pruned. The settings merge adds missing keys and removes only hook entries whose whole command is one this installer ships or shipped before (a shipped command you extended stays, and the installer names it), and the drift hook points into the `CLAUDE_HOME` it installs to. It merges from `settings.json` as the file is when it writes, through a temporary file beside it, so an edit made during the install is kept; a file that can no longer be merged by then is left as it was, and the installer says so. Suites that Concord retired (`card`, `lessons`, `map`, `reuse` and `slim`) are then removed from `tests/` (the backup keeps them); a suite of your own in `tests/` stays. `models.conf`, `executors.conf`, `worktrees.conf`, `style.conf` and `repo-notes/README.md` are kept when they already exist, so your edits survive upgrades. `--no-tests` skips the suites; exit code 2 means a usage error or a missing prerequisite.
 
 Prose style: `~/.claude/concord/style.conf` sets `prose = lean` (the default, lean STE: short active sentences with articles, no filler) or a sentence of your own. The values `terse` and `lean`, and an empty value, all select lean STE. The planner, executors and reviewers follow it.
 
@@ -55,6 +63,7 @@ A linked skill takes the name of its link, `concord:<name>`, and the plugin give
 ## Executors
 
 - `concord/models.conf` maps plain names to a harness and a model id: `free-deepseek-flash` and `free-glm-flash` on the OpenCode Zen free tier (no credits, a daily limit); `deepseek-flash` (default), `glm`, `minimax` and the Kimi and Qwen models (`concord.py --models` lists their names) on the OpenCode Go allowance; `zen-*` on OpenCode credits, used only after you agree. `sonnet`, `haiku` and `opus` always mean the Claude Code `implementer` subagent on your subscription and are never sent to another harness (the dispatcher refuses with exit 5). `concord.py --resolve "<name>"` shows how a name resolves; `--models --verify` checks the ids against OpenCode's catalogs.
+- `models.conf` is a registry you own. The installer copies it once and keeps your copy on every upgrade, so a model that a later release adds or renames in `concord/models.conf` reaches you only when you merge it in. Model ids and free tiers change at the providers. `python3 ~/.claude/concord/concord.py --models --verify` fetches OpenCode's public Zen and Go catalogs and marks each `opencode/` and `opencode-go/` id as available or not listed; ids for other harnesses carry no mark, and a catalog that cannot be reached is named and left unchecked. This is the dispatcher's only network request of its own.
 - Reasoning effort for OpenCode models is the `#high` suffix on the model id.
 - `pi` runs the default executor and the other Go models. The native `qwen`, `dsh` and `kimi` harness adapters ship but are untested in this release. An executor name always means its own harness: `concord.py qwen <phase>` and `concord.py kimi <phase>` run the native adapters, never a Go model.
 - Executors receive only allow-listed environment variables: a base list (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `LANG`, `LC_*`, `TZ`, `XDG_*`) and the names `executors.conf` lists for the harness as `<harness>.env`. Add a name there when a harness needs one; `--dry-run` prints the names a run passes.
@@ -94,5 +103,7 @@ bash tests/demo_test.sh                    # the credential-free demo, end to en
 bash concord/tests/run_all.sh              # the dispatcher's suites against this checkout; skipped checks are counted apart
 bash ~/.claude/concord/tests/run_all.sh   # the same suites against the installed copy
 ```
+
+CI runs the three checkout commands on Python 3.12, on Ubuntu and macOS. The installed copy and Python 3.9, the documented minimum, are not run in CI.
 
 `tests/package_test.sh scrub` reads private patterns from `~/.config/concord/scrub.txt` (or `$CONCORD_SCRUB_FILE`), one regular expression per line, so a fork can keep its own internal names out of a public copy without publishing them.
