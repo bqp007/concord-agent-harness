@@ -7,7 +7,7 @@
   <a href="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml"><img alt="tests" src="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://bqp007.github.io/concord-agent-harness/"><img alt="Website" src="https://img.shields.io/badge/Website-explainer%20and%20map-1D4ED8"></a>
   <a href="docs/WORKFLOW.md"><img alt="Docs: workflow" src="https://img.shields.io/badge/Docs-Workflow-6D28D9"></a>
-  <a href="#results"><img alt="Case study" src="https://img.shields.io/badge/Case%20study-ten%20days-B45309"></a>
+  <a href="#results"><img alt="Case study" src="https://img.shields.io/badge/Case%20study-46%20days-B45309"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-0F766E"></a>
   <img alt="Python 3.9+ stdlib" src="https://img.shields.io/badge/Python-3.9%2B%20stdlib-475569">
 </p>
@@ -27,7 +27,7 @@ Concord is a governance layer for coding agents. It separates three roles that o
 <p align="center"><a href="https://bqp007.github.io/concord-agent-harness/map/"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig2-loop-dark.svg"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan, grill, verifier, your go, failing tests, implement, check, review, report, your commit." width="760"></picture></a></p>
 <p align="center">Online: the <a href="https://bqp007.github.io/concord-agent-harness/">explainer</a> (the loop, step by step) and the <a href="https://bqp007.github.io/concord-agent-harness/map/">interactive map</a> (every command, skill and record).</p>
 
-Over its first ten days of daily production use by one developer, Concord recorded 293 verdicts; 82% of phases given to a low-cost model passed on the first attempt, for US$7.50 of executor spend.
+Over 46 days of production use by one developer, Concord recorded 1,315 verdicts; 84% of phases given to a low-cost model passed on the first attempt.
 
 ## Contents
 
@@ -124,18 +124,18 @@ The executors are OpenCode and the `pi` CLI; the native `qwen`, `dsh` and `kimi`
 
 ## Results
 
-One developer's ledger, 11 to 20 October 2026, shipping a production mobile security product:
+One developer's ledger, 11 October to 25 November 2026, shipping a production mobile security product:
 
 | Measure | Value |
 |---|---|
-| Plans | 42, across 30 checkouts |
-| Recorded verdicts | 293: 258 PASS, 35 FAIL |
-| Failure causes | 19 plan gaps, 7 executor, 5 flaky, 4 test defects |
-| Executor runs passing | 107 of 137 |
-| Executor phases passing on the first attempt | 91 of 111 (82%) |
-| Executor spend at list prices | US$7.50 in total, median US$0.02 per run |
+| Plans | 130, across 119 tickets |
+| Recorded verdicts | 1,315: 1,156 PASS, 159 FAIL |
+| Failure causes | 72 executor, 51 plan gaps, 18 blocked, 13 test defects, 5 flaky |
+| Executor runs passing | 738 of 866 (85%) |
+| Executor phases passing on the first attempt | 585 of 696 (84%) |
+| Executor spend at list prices, 11 to 20 October | US$7.50 for 137 runs, median US$0.02 per run |
 
-Setting: one developer, one product, ten days; the developer assigned each failure cause. [docs/PILOT.md](docs/PILOT.md) designs a paired comparison of the full loop with a lighter path on matched tickets.
+Method: the planner assigned each failure cause. The counts leave out 111 runs that a model provider refused. The spend row covers 11 to 20 October because the `pi` executor, which ran most later phases, records no per-run price. [docs/PILOT.md](docs/PILOT.md) designs a paired comparison of the full loop with a lighter path on matched tickets.
 
 ## Citation
 

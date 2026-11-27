@@ -47,15 +47,15 @@ Harness² from Google Research evolves a harness for a frozen executor model and
 
 ## What Concord skipped on purpose
 
-- **Unattended self-improvement.** Concord changes its own rules only through a ticket the owner approves, under a line budget. Its ledger, a few hundred verdicts, is too small to select changes on.
-- **Large catalogs of agents and personas.** They cover more ground, but every description costs context in every session, and most of Concord's failures were plan gaps, which a better plan fixes and another agent does not.
+- **Unattended self-improvement.** Concord changes its own rules only through a ticket the owner approves, under a line budget.
+- **Large catalogs of agents and personas.** They cover more ground, but every description costs context in every session. Executor mistakes (72 of Concord's 159 failures) are caught by the dispatcher's acceptance re-run and scope check, and plan gaps (51) are fixed by a better plan; another agent fixes neither.
 - **Web access for executors.** Harness² leaves the web open and records a rollout that fetched a grading rubric unprompted. On OpenCode, Concord denies the executor's web fetch and reports network use through the shell.
 
 ## What Concord still lacks
 
 - **Breadth and one-step install.** ECC and agentic-sdlc cover many more languages and stages. Concord covers one loop, and installs in two steps: a plugin for the commands and agents, which adds about 500 tokens to every session (ECC's catalog added roughly 33,000 on our setup), and a script for the dispatcher.
 - **Enforcement outside OpenCode's edit tools.** Claude Code's permission rules, hooks and sandbox act at the tool layer; Concord's scope check covers OpenCode's edit tools, not shell redirection, so the backup taken before every run is the real safety net.
-- **A controlled evaluation.** Harness², MILO and Harmony Harness report benchmark results over repeated runs. Concord's numbers come from one developer's ten days, and the same person assigned the failure causes.
+- **A controlled evaluation.** Harness², MILO and Harmony Harness report benchmark results over repeated runs. Concord's numbers come from one developer's 46 days, and the planner assigned the failure causes.
 - **The rest of the governance model.** A machine-checked contract registry, path reservations before parallel runs, and evidence bound to a hash of the whole checked state; today only the plan text and the acceptance files are hashed.
 
 ## How it grew
