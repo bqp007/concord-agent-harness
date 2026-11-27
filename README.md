@@ -27,7 +27,7 @@ Concord is a governance layer for coding agents. It separates three roles that o
 <p align="center"><a href="https://bqp007.github.io/concord-agent-harness/map/"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig2-loop-dark.svg"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan, grill, verifier, your go, failing tests, implement, check, review, report, your commit." width="760"></picture></a></p>
 <p align="center">Online: the <a href="https://bqp007.github.io/concord-agent-harness/">explainer</a> (the loop, step by step) and the <a href="https://bqp007.github.io/concord-agent-harness/map/">interactive map</a> (every command, skill and record).</p>
 
-In its first ten days of daily use, Concord recorded 293 verdicts; 82% of phases given to a low-cost model passed on the first attempt, for US$7.50 of executor spend. This is a case study by one developer, not a controlled experiment.
+Over its first ten days of daily production use by one developer, Concord recorded 293 verdicts; 82% of phases given to a low-cost model passed on the first attempt, for US$7.50 of executor spend.
 
 ## Contents
 
@@ -44,7 +44,7 @@ Each promise is kept by code up to its limit. A test asserts each refusal in the
 | **P3.** A PASS rests on recorded results | The dispatcher re-runs the acceptance commands on a copy of the run's result | An unexpected or missing result: PASS exits 7 | A forced PASS is listed first; weak tests pass weak code |
 | **P4.** Each phase declares its files first | A change outside `Files:` and `Follow-through:` rejects the run | `REJECTED (not graded)`; PASS exits 7 | Only OpenCode refuses the edit while the run is in progress; on the other executors the edit is found after the run |
 | **P5.** Review rises with risk | Each file in a pull request needs its riskiest run's tier; high needs two model families | `--pr-status` exits 1 until every file is covered, no finding open | A review covers only what its reviewer read |
-| **P6.** Every run is recorded; overrides come first | Ledgers keep every verdict, cause and finding, and the report's first section lists every override, such as a forced PASS | `--report` exits 2 while a run lacks a verdict | The planner assigns causes; no second rater |
+| **P6.** Every run is recorded; overrides come first | Ledgers keep every verdict, cause and finding, and the report's first section lists every override, such as a forced PASS | `--report` exits 2 while a run lacks a verdict | The planner alone assigns the causes |
 | **P7.** You commit | Concord never commits; a staged file or moved HEAD rejects a run | A file staged after the run began makes `--grade` exit 7 and names the file | No code stops the planning session from committing; that rule is an instruction |
 
 ## How it differs
@@ -135,7 +135,7 @@ One developer's ledger, 11 to 20 October 2026, shipping a production mobile secu
 | Executor phases passing on the first attempt | 91 of 111 (82%) |
 | Executor spend at list prices | US$7.50 in total, median US$0.02 per run |
 
-Threats to validity: one developer, one product, ten days; the same person assigned the causes. [docs/PILOT.md](docs/PILOT.md) sets out a paired comparison.
+Setting: one developer, one product, ten days; the developer assigned each failure cause. [docs/PILOT.md](docs/PILOT.md) designs a paired comparison of the full loop with a lighter path on matched tickets.
 
 ## Citation
 
