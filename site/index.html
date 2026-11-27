@@ -486,31 +486,32 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
   <section class="section" id="results" aria-labelledby="results-h">
     <h2 id="results-h">Results</h2>
     <div class="results">
-      <p class="results-intro">One developer used Concord daily from 11 to 20 October 2026 while shipping a production mobile security product. The ledger it shipped with records:</p>
+      <p class="results-intro">One developer used Concord from 11 October to 25 November 2026 while shipping a production mobile security product. The ledger it shipped with records:</p>
       <ul class="stats">
-        <li><span class="stat-value">293</span><span class="stat-label">recorded verdicts<span class="sub">258 PASS, 35 FAIL</span></span></li>
-        <li><span class="stat-value">82<span class="unit">%</span></span><span class="stat-label">of executor phases passed on the first attempt<span class="sub">91 of 111</span></span></li>
-        <li><span class="stat-value"><span class="unit">US$</span>7.50</span><span class="stat-label">executor spend at list prices, in total<span class="sub">median US$0.02 per run</span></span></li>
+        <li><span class="stat-value">1,315</span><span class="stat-label">recorded verdicts<span class="sub">1,156 PASS, 159 FAIL</span></span></li>
+        <li><span class="stat-value">84<span class="unit">%</span></span><span class="stat-label">of executor phases passed on the first attempt<span class="sub">585 of 696</span></span></li>
+        <li><span class="stat-value"><span class="unit">US$</span>7.50</span><span class="stat-label">executor spend at list prices<span class="sub">11 to 20 October, 137 runs; median US$0.02 per run</span></span></li>
       </ul>
       <ul class="stats small">
-        <li><span class="stat-value">42</span><span class="stat-label">plans<span class="sub">across 30 checkouts</span></span></li>
-        <li><span class="stat-value">107<span class="unit"> of 137</span></span><span class="stat-label">executor runs passing</span></li>
-        <li><span class="stat-value">10<span class="unit"> days</span></span><span class="stat-label">of daily use<span class="sub">11 to 20 October 2026</span></span></li>
+        <li><span class="stat-value">130</span><span class="stat-label">plans<span class="sub">across 119 tickets</span></span></li>
+        <li><span class="stat-value">738<span class="unit"> of 866</span></span><span class="stat-label">executor runs passing</span></li>
+        <li><span class="stat-value">46<span class="unit"> days</span></span><span class="stat-label">of production use<span class="sub">40 with runs</span><span class="sub">11 October to 25 November 2026</span></span></li>
       </ul>
       <div class="causes">
-        <span class="eyebrow">Causes of the 35 failures</span>
-        <div class="cause-bar" role="img" aria-label="19 plan gaps, 7 executor, 5 flaky, 4 test defects">
-          <span style="flex: 19"></span><span style="flex: 7"></span><span style="flex: 5"></span><span style="flex: 4"></span>
+        <span class="eyebrow">Causes of the 159 failures</span>
+        <div class="cause-bar" role="img" aria-label="72 executor, 51 plan gaps, 18 blocked, 13 test defects, 5 flaky">
+          <span style="flex: 72"></span><span style="flex: 51"></span><span style="flex: 18"></span><span style="flex: 13"></span><span style="flex: 5"></span>
         </div>
         <ul class="cause-keys">
-          <li><i aria-hidden="true"></i>19 plan gaps</li>
-          <li><i aria-hidden="true"></i>7 executor</li>
+          <li><i aria-hidden="true"></i>72 executor</li>
+          <li><i aria-hidden="true"></i>51 plan gaps</li>
+          <li><i aria-hidden="true"></i>18 blocked</li>
+          <li><i aria-hidden="true"></i>13 test defects</li>
           <li><i aria-hidden="true"></i>5 flaky</li>
-          <li><i aria-hidden="true"></i>4 test defects</li>
         </ul>
       </div>
-      <p>Most failures were plan gaps, not executor mistakes, which is why tests are written and checked red before any code, and every delegated phase is linted and its plan verified before it runs.</p>
-      <p class="setting-note"><strong>Setting.</strong> One developer, one production product, ten days of daily use. The developer assigned each failure cause. A paired comparison with a lighter workflow is designed in <a href="https://github.com/bqp007/concord-agent-harness/blob/main/docs/PILOT.md">docs/PILOT.md</a>.</p>
+      <p>Executor mistakes (72) and plan gaps (51) account for 123 of the 159 failures. Executor mistakes are caught because the dispatcher re-runs the acceptance commands on a copy of each run&rsquo;s result and rejects a run that changes a file outside its phase&rsquo;s declared files. Plan gaps are why a verifier checks each plan against the code before it runs.</p>
+      <p class="setting-note"><strong>Method.</strong> The planner assigned each failure cause. The counts leave out 111 runs that a model provider refused. The spend covers 11 to 20 October because the pi CLI, which ran most later phases, records no per-run price. A paired comparison with a lighter workflow is designed in <a href="https://github.com/bqp007/concord-agent-harness/blob/main/docs/PILOT.md">docs/PILOT.md</a>.</p>
     </div>
   </section>
 
