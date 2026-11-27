@@ -1,18 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 380" width="640" height="380">
-  <defs><style>text{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;fill:#111827}.s{font-size:12px;fill:#475569}.v{font-size:14px;font-weight:700}.b{font-size:14px;font-weight:600}</style></defs>
-  <rect width="640" height="380" fill="#ffffff"/>
-  <text x="320" y="30" text-anchor="middle" style="font-size:17px;font-weight:700">DeepSeek v4.1 Flash: reasoning variant vs reasoning spent</text>
-  <text x="320" y="50" text-anchor="middle" class="s">mean reasoning tokens · 5 runs each on one combinatorics problem</text>
-  <g stroke="#e5e7eb" stroke-width="1">
-    <line x1="80" y1="81.8" x2="600" y2="81.8"/><line x1="80" y1="136.4" x2="600" y2="136.4"/><line x1="80" y1="190.9" x2="600" y2="190.9"/><line x1="80" y1="245.5" x2="600" y2="245.5"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 380" width="680" height="380">
+  <defs><style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;fill:#111827}.title{font-size:19px;font-weight:700}.t{font-size:14.5px;font-weight:700}.s{font-size:12.5px}.m{font-size:12px;fill:#475569}.q{font-size:11.5px}.h{font-size:11.5px;font-weight:700;fill:#475569;letter-spacing:.06em}.b{font-weight:600}.c{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}</style></defs>
+  <rect width="680" height="380" rx="12" fill="#FFFFFF"/>
+  <g transform="translate(20 0)">
+    <text x="320" y="30" text-anchor="middle" class="title">DeepSeek v4.1 Flash: reasoning variant vs reasoning spent</text>
+    <text x="320" y="50" text-anchor="middle" class="m">mean reasoning tokens · 5 runs each on one combinatorics problem</text>
+    <g stroke="#CBD5E1" stroke-width="1">
+      <line x1="80" y1="81.8" x2="600" y2="81.8"/><line x1="80" y1="136.4" x2="600" y2="136.4"/><line x1="80" y1="190.9" x2="600" y2="190.9"/><line x1="80" y1="245.5" x2="600" y2="245.5"/>
+    </g>
+    <line x1="80" y1="300" x2="600" y2="300" stroke="#475569" stroke-width="1.5"/>
+    <text x="72" y="85.8" text-anchor="end" class="m">1,000</text><text x="72" y="140.4" text-anchor="end" class="m">750</text><text x="72" y="194.9" text-anchor="end" class="m">500</text><text x="72" y="249.5" text-anchor="end" class="m">250</text><text x="72" y="304" text-anchor="end" class="m">0</text>
+    <rect x="130" y="184.4" width="100" height="115.6" rx="3" fill="#94A3B8"/>
+    <rect x="270" y="160.4" width="100" height="139.6" rx="3" fill="#5EEAD4"/>
+    <rect x="410" y="77.5" width="100" height="222.5" rx="3" fill="#0F766E"/>
+    <text x="180" y="176" text-anchor="middle" class="t">~530</text><text x="320" y="152" text-anchor="middle" class="t">~640</text><text x="460" y="69" text-anchor="middle" class="t">~1,020</text>
+    <text x="180" y="322" text-anchor="middle" class="t">default</text><text x="320" y="322" text-anchor="middle" class="t">high</text><text x="460" y="322" text-anchor="middle" class="t">max</text>
+    <text x="180" y="342" text-anchor="middle" class="m">4/5 correct</text><text x="320" y="342" text-anchor="middle" class="m" style="fill:#0F766E;font-weight:700">4/5 correct · pinned</text><text x="460" y="342" text-anchor="middle" class="m">5/5 correct</text>
+    <text x="320" y="368" text-anchor="middle" class="m">A variant is a ceiling, not an amount: on easy questions all three stop early.</text>
   </g>
-  <line x1="80" y1="300" x2="600" y2="300" stroke="#374151" stroke-width="1.5"/>
-  <text x="72" y="85.8" text-anchor="end" class="s">1,000</text><text x="72" y="140.4" text-anchor="end" class="s">750</text><text x="72" y="194.9" text-anchor="end" class="s">500</text><text x="72" y="249.5" text-anchor="end" class="s">250</text><text x="72" y="304" text-anchor="end" class="s">0</text>
-  <rect x="130" y="184.4" width="100" height="115.6" rx="4" fill="#94a3b8"/>
-  <rect x="270" y="160.4" width="100" height="139.6" rx="4" fill="#5eead4"/>
-  <rect x="410" y="77.5" width="100" height="222.5" rx="4" fill="#0f766e"/>
-  <text x="180" y="176" text-anchor="middle" class="v">~530</text><text x="320" y="152" text-anchor="middle" class="v">~640</text><text x="460" y="69" text-anchor="middle" class="v">~1,020</text>
-  <text x="180" y="322" text-anchor="middle" class="b">default</text><text x="320" y="322" text-anchor="middle" class="b">high</text><text x="460" y="322" text-anchor="middle" class="b">max</text>
-  <text x="180" y="342" text-anchor="middle" class="s">4/5 correct</text><text x="320" y="342" text-anchor="middle" class="s">4/5 correct</text><text x="460" y="342" text-anchor="middle" class="s" style="fill:#0f766e;font-weight:700">5/5 correct · now pinned</text>
-  <text x="320" y="368" text-anchor="middle" class="s">A variant is a ceiling, not an amount: on easy questions all three stop early.</text>
 </svg>

@@ -24,10 +24,10 @@ SUITES="acclint delegate delta guards papers pr_review protocol simplify testqua
 
 # Every relative link, reference link and image in the given markdown files names a file that would be
 # published: present, and tracked or untracked-but-not-ignored (a link into an ignored folder breaks on GitHub).
-LINK_RE=$'\\]\\([^)#[:space:]]+|^\\[[^]]+\\]: *[^#[:space:]]+|src=["\'][^"\'#]+'
+LINK_RE=$'\\]\\([^)#[:space:]]+|^\\[[^]]+\\]: *[^#[:space:]]+|src(set)?=["\'][^"\'#]+'
 links_ok() { local f l p bad=0
   for f in "$@"; do [ -f "$f" ] || continue
-    for l in $(grep -oE "$LINK_RE" "$f" | sed -E 's/^\]\(//; s/^\[[^]]*\]: *//; s/^src=.//'); do
+    for l in $(grep -oE "$LINK_RE" "$f" | sed -E 's/^\]\(//; s/^\[[^]]*\]: *//; s/^src(set)?=.//'); do
       case "$l" in http://*|https://*|mailto:*) continue;; esac
       p="$(dirname "$f")/$l"
       { [ -e "$p" ] && [ -n "$(git ls-files -co --exclude-standard -- "$p")" ]; } || { echo "$f -> $l"; bad=1; }
@@ -376,7 +376,7 @@ s_hygiene() {
   check hygiene/no-pycache "[ -z \"\$(git ls-files | grep -E '__pycache__|\.pyc\$')\" ]"; }
 
 s_docs() { local h f
-  for h in Contents 'How it works' Install 'Try it without credentials' 'Run a ticket' Components Safety Results Citation Contributing License; do
+  for h in Contents Principles 'How it differs' 'How it works' Install 'Try it without credentials' 'Run a ticket' Components Safety Results Citation Contributing License; do
     check "docs/readme-$(echo "$h" | tr 'A-Z ' 'a-z-')" "grep -qiE '^#{1,3} +$h' README.md"; done
   for f in CONTRIBUTING.md docs/SETUP.md docs/COMPARISON.md assets/concord-wordmark.svg; do check "docs/exists-$f" "[ -f '$f' ]"; done
   check docs/readme-links "grep -q 'docs/SETUP.md' README.md && grep -q 'docs/WORKFLOW.md' README.md && grep -q install.sh README.md"
@@ -384,6 +384,7 @@ s_docs() { local h f
   check docs/links "links_ok README.md CONTRIBUTING.md docs/*.md"
   check docs/lint-count "counts_ok \$(sed -n '/^def acceptance_lint(/,/^def /p' $K/concord.py | grep -c 'out\.append(') defects docs/WORKFLOW.md"
   for f in docs/figures/*.svg; do check "docs/figure-$(basename "$f")" "grep -qF '$(basename "$f")' README.md docs/*.md"; done
+  check docs/figures-current "python3 -B -I scripts/figures.py --check"
   check docs/no-todo "! grep -lwE 'TODO|TBD|XXX' README.md docs/*.md $A/CLAUDE.md install.sh CONTRIBUTING.md"
   check docs/claude-md "grep -qF '<!-- concord:begin -->' $A/CLAUDE.md && grep -qF '<!-- concord:end -->' $A/CLAUDE.md"
   # Commands and agents come from the concord plugin, so docs name them concord:<name> (agent file names and name: lines excepted).
