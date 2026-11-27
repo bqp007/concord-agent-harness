@@ -157,6 +157,18 @@ s23 87 'policy(retries=3, timeout=10)'
 dans "$T/d.txt" "$YES" '[{"hunk": "H1", "explained_by": "F1"}]'; opus 87 medium reviewer-delta "$T/d.txt" --delta; st 87
 has "REVIEWED at" && ! has "UNREVIEWED" && ! has "FINDINGS OPEN" && [ $RC -eq 0 ] \
   && ok "a fix that changes only retries: F1 closes, the hunk is explained by it, the file is covered (REVIEWED, exit 0)" || { bad "explained hunk rc=$RC"; tail -4 "$T/out.txt"; }
+# a high-tier file also needs a review from another model family; a reviewer-delta (Claude) delta carries that one too
+printf -- '- Risk floor high: a.py\n' > "$T/concord/repo-notes/clone.md"
+newpr 89 "printf 'policy(retries=2, timeout=10)\n' > a.py"; hfinding "$T/f1.txt" a.py 1 "retries too low"
+opus 89 high concord:reviewer-opus55 "$T/f1.txt" || { echo "setup failed: PR 89 review"; cat "$T/out.txt"; exit 1; }
+FAKE_CLEAN=1 $DP --review-pr 89 --via qwen --model fake/m --tier high --repo "$R" > "$T/out.txt" 2>&1 \
+  || { echo "setup failed: PR 89 flash review"; cat "$T/out.txt"; exit 1; }
+pushn 89 "printf 'policy(retries=3, timeout=10)\n' > a.py"
+dans "$T/d.txt" "$YES" '[{"hunk": "H1", "explained_by": "F1"}]'; opus 89 high reviewer-delta "$T/d.txt" --delta; st 89
+has "REVIEWED at high" && ! has "UNREVIEWED" && [ $RC -eq 0 ] \
+  && ok "high tier: a delta that explains the fix carries the flash review of the reviewed head as well (REVIEWED at high, exit 0)" \
+  || { bad "high-tier carry rc=$RC"; tail -4 "$T/out.txt"; }
+rm -f "$T/concord/repo-notes/clone.md"
 
 echo "== a cheap delta closes F1 and leaves F2 open; a later full review covers the file but closes nothing"
 newpr 88 "printf 'retries = 2\ntimeout = 10\n' > f.py; printf 'g = 1\n' > g.py"

@@ -37,6 +37,7 @@ Risk: medium
 Size: ~<N> lines
 After: 1 (<the reason it waits>)
 Files: path/to/module.py
+Follow-through: docs/module.md
 Steps:
 1. <the change, naming functions>
 Notes:
@@ -68,10 +69,20 @@ ETA: <N> min, lands at <hh:mm> local
   minutes; `--estimate` turns them and the run ledger into minutes. `After:` names only a real wait, with its reason.
 - Tier: the planner's judgment of the plan's size, which sets the estimate's final revision and turns on the drift clock;
   no line count decides it.
-- Risk (default medium) picks the reviewer: low = approve-only flash, else the reviewer-opus55 agent. High: untrusted
+- Risk (default medium) picks the review: low = approve-only flash, medium = the reviewer-opus55 agent, high = the
+  reviewer-opus55 agent and a flash review from another model family, both of the same change. High: untrusted
   input, scores or thresholds, security, money, data deletion or concurrency.
-- Files: every changed file, exact paths, comma-separated; scope is enforced during the run only on OpenCode, and every
-  run's report checks it (OUT OF SCOPE); the run lock lets phases with disjoint Files run in one checkout at once. Only planner phases list the repo's `Cases:` file.
+- Files: every changed file with behavior, exact paths, comma-separated; scope is enforced during the run only on
+  OpenCode, and every run's report checks it (OUT OF SCOPE); the run lock lets phases whose Files and Follow-through
+  are disjoint run in one checkout at once. Only planner phases list the repo's `Cases:` file.
+- Follow-through: patterns for the files that change only because the phase's change requires it and carry no
+  behavior of their own: docs that describe the changed code, build source lists, generated notes. They join the
+  write scope, the lock and the drift check, and the run's report lists the ones changed (`follow-through:`). Never
+  tests, fixtures, grading files or the `Cases:` file: a Test plan Home file stays a grading file whatever a pattern
+  covers.
+- Split: a ticket whose parts can land and be reviewed apart gets a `## Split` table instead of phases,
+  `| Child | Done when | Files | Interface it gives the others | After |`, one row per child ticket. It is verified
+  and approved once; each child then gets its own plan and run (`/concord:run`, "A large ticket").
 - Notes: the dispatcher inlines each pointer's current code into the executor's task, resolving functions by name, as
   line numbers drift between runs.
 - Acceptance: fast, deterministic offline commands in backticks that check behaviour, not wiring, tell right from

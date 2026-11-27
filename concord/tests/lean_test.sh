@@ -78,6 +78,15 @@ has "REVIEWED at" && ! has "UNREVIEWED" && ok "1 a newer flash review beside it 
 newpr 42 c.py 'c = 1'
 C0=$(calls); flash 42 --tier high; st 42
 [ "$(calls)" = "$((C0+1))" ] && has "UNREVIEWED" && ok "1 content only a flash review cleared is not covered at high" || { bad "1 flash cover"; tail -2 "$T/out.txt"; }
+printf -- '- Risk floor high: d.py\n' > "$T/concord/repo-notes/clone.md"
+newpr 43 d.py 'd = 1'
+opus 43 high concord:reviewer-opus55; st 43
+has "UNREVIEWED" && has "d.py needs a review from another model family" \
+  && ok "1 high tier: reviewer-opus55 alone leaves the file unreviewed until another model family reads it" \
+  || { bad "1 opus55 alone at high"; tail -3 "$T/out.txt"; }
+flash 43 --tier high; st 43
+has "REVIEWED at high" && ! has "UNREVIEWED" && has "d.py: high by reviewer-opus55 and " \
+  && ok "1 high tier: a flash review of the same head completes it" || { bad "1 opus55 and flash at high"; tail -3 "$T/out.txt"; }
 pushpr 37 b.py 'b = 2'
 flash 37 --delta --tier high; st 37
 has "UNREVIEWED" && ! has ": REVIEWED" && ok "1 a flash delta on a code fix does not carry the Opus review" || { bad "1 flash delta"; tail -3 "$T/out.txt"; }
@@ -112,6 +121,24 @@ run "echo 'PROVIDER_REFUSALS = (\"usage limit exceeded\", ...)'; printf 'y = 1\n
 run "echo 'Error: usage limit exceeded'; i=0; while [ \$i -lt 70 ]; do echo line \$i; i=\$((i+1)); done"
 ! has "PROVIDER LIMIT" && ok "1 a failed run whose refusal text is not in the last 60 lines: no PROVIDER LIMIT line" \
   || { bad "1 early text"; grep PROVIDER "$T/out.txt"; }
+
+echo "== 1 the report lists a high-tier phase that only reviewer-opus55 reviewed"
+H="$T/high"; gitrepo "$H"; ( cd "$H" && printf 'x = 1\n' > a.py && printf '.claude/\n' > .gitignore && git add -A && git commit -qm init \
+  && printf '# Plan\n## Phase 1 - x\nExecutor: deepseek-flash\nRisk: high\nFiles: a.py\nAcceptance:\n- `grep -q y a.py`\n\n## Phase 2 - z\nExecutor: deepseek-flash\nRisk: high\nFiles: z.py\nAcceptance:\n- `grep -q y z.py`\n' > PLAN_H.md ) \
+  || { echo "setup failed: high repo"; exit 1; }
+approve PLAN_H.md "$H" || exit 1
+hrun(){ FAKE_ACTIONS="$2" $DP "$1" --plan PLAN_H.md --via qwen --model fake/m --no-baseline --repo "$H" > "$T/out.txt" 2>&1
+  sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1; }
+H1=$(hrun 1 "printf 'y = 1\n' > a.py"); [ -n "$H1" ] && $DP --verdict "$H1" PASS --repo "$H" > /dev/null 2>&1 \
+  && H2=$(hrun 2 "printf 'y = 1\n' > z.py") && [ -n "$H2" ] && $DP --verdict "$H2" PASS --repo "$H" > /dev/null 2>&1 \
+  || { echo "setup failed: two high-tier runs and their PASS"; exit 1; }
+printf '%b' "$JCLEAN" > "$T/hclean.txt"
+record "$H1" concord:reviewer-opus55 "$T/hclean.txt" "$H" > /dev/null 2>&1 && record "$H2" concord:reviewer-opus55 "$T/hclean.txt" "$H" > /dev/null 2>&1 \
+  && $DP --review "$H2" --via qwen --model fake/m --repo "$H" > /dev/null 2>&1 || { echo "setup failed: reviews of the high-tier runs"; exit 1; }
+$DP --report --plan PLAN_H.md --repo "$H" > "$T/rep.txt" 2>&1; REP=$(sed -n 's/^report: //p' "$T/rep.txt" | head -1); [ -f "$REP" ] || REP="$T/none"
+grep -qF -- "- phase 1 (run $H1) high tier: no review from another model family" "$REP" && ! grep -qF -- "- phase 2 (run $H2)" "$REP" \
+  && ok "1 the report lists the high-tier phase reviewed by reviewer-opus55 alone, not the one a flash review also read" \
+  || { bad "1 two-family report line"; grep -e '^- phase' "$REP" 2>/dev/null || tail -3 "$T/rep.txt"; }
 fi
 
 if sel 2; then
