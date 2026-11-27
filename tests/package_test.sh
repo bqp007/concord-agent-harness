@@ -1,6 +1,6 @@
 #!/bin/bash
 # Repository contract checks. Run from anywhere: bash tests/package_test.sh [SECTION [TREE ...]]
-# Sections: scrub layout agents python install style hygiene docs (none = all); blog runs only when named.
+# Sections: scrub layout agents python install style hygiene docs site (none = all); blog runs only when named.
 # `scrub` takes trees to scope it and reads its patterns from ${CONCORD_SCRUB_FILE:-~/.config/concord/scrub.txt}
 # (one extended regular expression per line, kept outside the repository; no file = section skipped).
 # Output: one "check <section>/<name>: ok|FAIL <detail>" per check, then "passed N, failed M"; exit 0 iff M = 0.
@@ -54,7 +54,7 @@ s_scrub() { local trees="$*" t pat
   [ -f "$SCRUB_FILE" ] || { echo "skip scrub (no pattern file)"; return 0; }
   pat=$(tmpd)/patterns; grep -vE '^[[:space:]]*(#|$)' "$SCRUB_FILE" > "$pat"
   [ -s "$pat" ] || { check scrub/pattern-file "echo no patterns in $SCRUB_FILE; false"; return; }
-  [ -n "$trees" ] || trees="$K adapters install.sh README.md docs LICENSE SECURITY.md CONTRIBUTING.md CITATION.cff scripts examples tests assets .github .gitignore .claude-plugin"
+  [ -n "$trees" ] || trees="$K adapters install.sh README.md docs LICENSE SECURITY.md CONTRIBUTING.md CITATION.cff scripts examples tests assets site .github .gitignore .claude-plugin"
   for t in $trees; do [ -e "$t" ] || { [ $# = 0 ] && continue; check "scrub/$t" "echo no such tree; false"; continue; }
     check "scrub/$t" "n=\$(grep -rnIE -f '$pat' '$t' | wc -l | tr -d ' '); [ \"\$n\" = 0 ] || { echo \"\$n matches\"; false; }"
   done
@@ -400,7 +400,14 @@ s_blog() {
   check blog/references "[ \$(grep -cE '^\[[0-9]+\]' docs/BLOG.md) -le 10 ]"
   check blog/links "links_ok docs/BLOG.md"; }
 
-SECTIONS="scrub layout agents python install style hygiene docs"
+# The Pages site: the map's generated data matches the repository (scripts/site_map.py names what differs), and both
+# pages exist.
+s_site() {
+  check site/map-data "python3 -B -I scripts/site_map.py --check"
+  check site/explainer-page "[ -f site/index.html ]"
+  check site/map-page "[ -f site/map/index.html ]"; }
+
+SECTIONS="scrub layout agents python install style hygiene docs site"
 if [ $# = 0 ]; then for s in $SECTIONS; do "s_$s"; done
 else sec=$1; shift; case " $SECTIONS blog " in *" $sec "*) "s_$sec" "$@";; *) echo "unknown section: $sec" >&2; exit 2;; esac; fi
 echo "passed $pass, failed $fail"
