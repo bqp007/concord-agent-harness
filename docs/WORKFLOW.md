@@ -80,6 +80,6 @@ DeepSeek Flash runs at effort `high`. In five runs per variant on one hard probl
 - Start trees and candidates are git objects that no ref holds: `git gc` prunes them after `gc.pruneExpire` (two weeks by default), and a run whose trees are gone runs again.
 - A join checks the destination before and after it applies the change, not during the apply: an edit made in that moment is reported, not undone.
 - The grading copy holds the candidate, the linked folders and the grading files outside the tree, nothing else: an acceptance command that reads another ignored file fails there until its folder is in `<repo>.links`, and build output starts empty, so the acceptance must build what it tests. A change inside a linked folder goes unseen.
-- Failure causes are assigned by the orchestrator that wrote the plans; no second rater has checked them.
-- Whether the full loop pays for itself against a lighter path is still being measured: [PILOT.md](PILOT.md).
+- Failure causes are assigned by the orchestrator that wrote the plans.
+- A paired comparison of the full loop with a lighter path, on matched tickets, is designed in [PILOT.md](PILOT.md).
 - The line budgets of `/concord:rules-review` keep the rules small; [COMPARISON.md](COMPARISON.md) maps what Concord lacks.

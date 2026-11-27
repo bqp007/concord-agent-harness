@@ -1070,19 +1070,15 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
 .cause-keys li:nth-child(3) i { opacity: 0.5; }
 .cause-keys li:nth-child(4) i { opacity: 0.32; }
 
-.caveat {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--s3);
+.setting-note {
   margin: 0 !important;
-  padding: var(--s4);
-  border-radius: 10px;
-  background: var(--you-soft);
-  color: var(--ink);
-  font-size: 0.98rem;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 0.9rem;
   line-height: 1.58;
 }
-.caveat svg { width: 20px; height: 20px; color: var(--you); margin-top: 2px; }
+.setting-note strong { color: var(--ink); font-weight: 650; }
 
 /* ---------- Install ---------- */
 

@@ -411,7 +411,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <div class="p-body"><dl>
           <dt>Mechanism</dt><dd>Every run and verdict goes to a ledger, a FAIL with its cause: EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER or BLOCKED; only EXECUTOR counts as an attempt. <code>--report</code> writes the test report from recorded data and opens with the overrides: each forced PASS beside its failed commands, each waiver and owner go-ahead.</dd>
           <dt class="refusal">Refusal you can reproduce</dt><dd><code>--report</code> refuses while a run of the plan has no verdict (exit 2). Once the report is written, a new run or <code>--begin</code> on that plan exits 10.</dd>
-          <dt class="limit">Limit</dt><dd>The planner assigns the failure causes, and no second rater checks them. A FAIL recorded without a cause gets only a reminder.</dd>
+          <dt class="limit">Limit</dt><dd>The planner alone assigns the failure causes. A FAIL recorded without a cause gets only a reminder.</dd>
         </dl></div>
       </details>
 
@@ -510,7 +510,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         </ul>
       </div>
       <p>Most failures were plan gaps, not executor mistakes, which is why tests are written and checked red before any code, and every delegated phase is linted and its plan verified before it runs.</p>
-      <p class="caveat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 11v6M12 7.5v.01"/></svg><span><strong>A case study, not an experiment.</strong> These numbers come from one person, who also assigned the failure causes; no second rater checked them, and nothing was compared against a control. Whether the full loop pays for itself against a lighter path is still being measured, with the paired pilot described in <a href="https://github.com/bqp007/concord-agent-harness/blob/main/docs/PILOT.md">docs/PILOT.md</a>.</span></p>
+      <p class="setting-note"><strong>Setting.</strong> One developer, one production product, ten days of daily use. The developer assigned each failure cause. A paired comparison with a lighter workflow is designed in <a href="https://github.com/bqp007/concord-agent-harness/blob/main/docs/PILOT.md">docs/PILOT.md</a>.</p>
     </div>
   </section>
 
