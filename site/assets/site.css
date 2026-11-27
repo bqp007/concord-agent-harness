@@ -535,7 +535,7 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
 .seg button[aria-pressed="true"] {
   background: var(--seg-on-bg);
   color: var(--seg-on-ink);
-  box-shadow: var(--shadow-sm), 0 0 0 1px var(--line-soft);
+  box-shadow: var(--shadow-sm), 0 0 0 1px var(--edge);
 }
 .switch {
   display: inline-flex;
@@ -555,7 +555,8 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
   height: 20px;
   border-radius: 999px;
   background: var(--line);
-  transition: background-color 0.2s var(--ease);
+  box-shadow: inset 0 0 0 1px var(--edge);
+  transition: background-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
   flex: none;
 }
 .switch .track::after {
@@ -568,7 +569,7 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
   transition: transform 0.2s var(--ease);
 }
-.switch[aria-checked="true"] .track { background: var(--stop); }
+.switch[aria-checked="true"] .track { background: var(--stop); box-shadow: inset 0 0 0 1px var(--stop); }
 .switch[aria-checked="true"] .track::after { transform: translateX(14px); }
 
 .loop-stage {

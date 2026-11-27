@@ -152,8 +152,10 @@
       tip: 'You commit and merge. Concord never commits, pushes or changes branches in your checkout.' },
     split: { role: 'planner', title: 'Split plan', sub: ['child tickets, one go', 'each runs this loop'], section: 'step-plan', aux: true,
       tip: 'A ticket whose parts can land and be reviewed apart becomes child tickets, verified and approved once.' },
-    redrun: { role: 'stop', title: 'Not run · exit 6', sub: ['acceptance passes', 'before the change'], section: 'step-tests', fail: true,
-      tip: 'Delegate mode: a phase whose acceptance already passes is not started (exit 6).' },
+    redrun: { role: 'stop', title: { delegate: 'Not run · exit 6', execute: 'Baseline warning' }, section: 'step-tests', fail: true,
+      sub: { delegate: ['acceptance passes', 'before the change'], execute: ['acceptance passes,', 'the run starts anyway'] },
+      tip: { delegate: 'Delegate mode: a phase whose acceptance already passes is not started (exit 6).',
+        execute: 'Execute mode: a session run whose acceptance already passes starts anyway, with a BASELINE WARNING.' } },
     reject: { role: 'stop', title: 'Rejected · not graded', sub: ['an edit outside the scope', 'no candidate, no PASS'], section: 'step-check', fail: true,
       tip: 'A change outside Files: and Follow-through: rejects the run; a PASS on it exits 7.' }
   };
@@ -341,6 +343,7 @@
 
     function roleOf(id) { var r = NODES[id].role; return r === 'impl' ? (mode === 'execute' ? 'planner' : 'exec') : r; }
     function edgeRole(id) { var r = EDGE_ROLE[id] || 'planner'; return r === 'impl' ? (mode === 'execute' ? 'planner' : 'exec') : r; }
+    function nodeTitle(id) { var t = NODES[id].title; return typeof t === 'string' ? t : t[mode]; }
     function nodeSub(id) { var s = NODES[id].sub; return Array.isArray(s) ? s : s[mode]; }
     function nodeTip(id) { var t = NODES[id].tip; return typeof t === 'string' ? t : t[mode]; }
     function stepText(id) { var t = TEXT[id]; return typeof t === 'string' ? t : t[mode]; }
@@ -475,7 +478,7 @@
       var g = el('g', { 'class': 'node r-' + roleOf(id) + (d.aux ? ' is-aux' : '') + (d.fail ? ' fail-part' : ''),
         'data-node': id, tabindex: '0', role: 'button' }, parent);
       var subs = nodeSub(id);
-      var label = (d.n ? 'Step ' + d.n + ', ' : '') + d.title + ': ' + subs.join(' ') + '. Opens its explanation.';
+      var label = (d.n ? 'Step ' + d.n + ', ' : '') + nodeTitle(id) + ': ' + subs.join(' ') + '. Opens its explanation.';
       g.setAttribute('aria-label', label);
 
       el('rect', { 'class': 'halo', x: b.x - 7, y: b.y - 7, width: b.w + 14, height: b.h + 14, rx: 18 }, g);
@@ -489,7 +492,7 @@
       var block = ts * 0.74 + 6 + ss + (subs.length - 1) * gap + ss * 0.22;
       var top = b.y + (b.h - block) / 2;
       var base = top + ts * 0.74;
-      text(g, b.cx, base, d.title, 'title', ts);
+      text(g, b.cx, base, nodeTitle(id), 'title', ts);
       subs.forEach(function (s, i) { text(g, b.cx, base + 6 + ss + i * gap, s, 'sub', ss); });
 
       if (d.n) {
@@ -608,7 +611,7 @@
       narKicker.textContent = d.n ? stepName(i) + ' · ' + ROLE_NAME[roleOf(s.node)] : stepName(i);
       narText.innerHTML = stepText(s.node);
       narration.setAttribute('data-role', roleOf(s.node));
-      range.setAttribute('aria-valuetext', stepName(i) + ', ' + d.title);
+      range.setAttribute('aria-valuetext', stepName(i) + ', ' + nodeTitle(s.node));
       Object.keys(nodeEls).forEach(function (id) {
         var g = nodeEls[id];
         var idx = indexOfNode(id);
@@ -676,6 +679,12 @@
         kick();
       }
     }
+    // A jump to a chosen step counts as the reader's pause: autoplay must not resume and carry the figure away.
+    function holdStep() {
+      if (playing) setPlaying(false);
+      userPaused = true;
+      autoPaused = false;
+    }
     function userToggle() {
       if (playing) { setPlaying(false); userPaused = true; }
       else { userPaused = false; autoPaused = false; setPlaying(true); }
@@ -698,7 +707,7 @@
       var target = loc.i + dir;
       if (loc.phase === 'travel') target = dir > 0 ? loc.i : loc.i - 1;
       target = clamp(target, 0, steps.length - 1);
-      if (playing) { setPlaying(false); userPaused = true; }
+      holdStep();
       seek(arrival(target), true);
     }
     function seekToNode(id, animate) {
@@ -729,7 +738,7 @@
       tip.innerHTML = '';
       var name = document.createElement('span');
       name.className = 'tip-name';
-      name.textContent = (d.n ? d.n + '. ' : '') + d.title;
+      name.textContent = (d.n ? d.n + '. ' : '') + nodeTitle(id);
       tip.appendChild(name);
       tip.appendChild(document.createTextNode(nodeTip(id)));
       tip.style.setProperty('--c', 'var(--' + roleOf(id) + ')');
@@ -763,7 +772,7 @@
       hideTip();
       stage.scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth', block: 'center' });
       if (stepNode) {
-        if (playing) { setPlaying(false); userPaused = true; }
+        holdStep();
         seekToNode(stepNode, true);
       }
       setHighlight(ids, 2800);

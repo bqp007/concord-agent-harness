@@ -78,21 +78,21 @@
       <article class="role-card r-you" data-role="you">
         <header>
           <h3>Who decides</h3>
-          <button type="button" class="fig-chip k-you" data-fig-role="you" aria-label="Show who decides in the figure">&darr; in figure</button>
+          <button type="button" class="fig-chip k-you" data-fig-role="you" aria-label="Show who decides in figure">&darr; in figure</button>
         </header>
         <p><span class="who">You.</span> You answer the planner&rsquo;s questions, give one go/no-go on the plan and make the commit. Consequential behavior and architecture choices come to you, however small the change.</p>
       </article>
       <article class="role-card r-write" data-role="write">
         <header>
           <h3>Who writes</h3>
-          <button type="button" class="fig-chip k-planner" data-fig-role="write" aria-label="Show who writes in the figure">&darr; in figure</button>
+          <button type="button" class="fig-chip k-planner" data-fig-role="write" aria-label="Show who writes in figure">&darr; in figure</button>
         </header>
         <p><span class="t-planner">A strong model</span> plans each change, has the failing tests written first, writes the small fixes and checks every result. In delegate mode, <span class="t-exec">low-cost models</span> write the bulky phases inside the files each phase declares.</p>
       </article>
       <article class="role-card r-judge" data-role="judge">
         <header>
           <h3>Who judges</h3>
-          <button type="button" class="fig-chip k-judge" data-fig-role="judge" aria-label="Show who judges in the figure">&darr; in figure</button>
+          <button type="button" class="fig-chip k-judge" data-fig-role="judge" aria-label="Show who judges in figure">&darr; in figure</button>
         </header>
         <p><span class="t-judge">A verifier</span> that did not write the plan challenges it, and <span class="t-judge">a reviewer</span> that did not write the change reads it at its risk tier. <span class="t-disp">The dispatcher</span>, not the writer, runs the acceptance commands and refuses a PASS without their expected results.</p>
       </article>
@@ -120,7 +120,7 @@
           <button type="button" class="switch" role="switch" aria-checked="false" data-action="fail"><span class="track" aria-hidden="true"></span>Show refusals</button>
         </div>
 
-        <div class="loop-stage" tabindex="0" aria-label="The Concord loop. Space plays or pauses the animation; the left and right arrow keys step through it.">
+        <div class="loop-stage" role="group" tabindex="0" aria-label="The Concord loop. Space plays or pauses the animation; the left and right arrow keys step through it.">
           <svg class="loop-svg" role="group" aria-labelledby="loop-svg-title"></svg>
           <noscript><p class="loop-fallback">The animated figure needs JavaScript. The loop runs: plan, questions, independent verifier, your go, tests that fail first, implement, check, review by risk tier, report, your commit. Each step is described below.</p></noscript>
         </div>
@@ -167,12 +167,12 @@
     <section class="step" id="step-plan" aria-labelledby="h-plan">
       <div class="step-head">
         <h3 id="h-plan"><span class="num">1.</span> Plan, or split a large ticket</h3>
-        <button type="button" class="fig-chip k-planner" data-fig-step="plan" aria-label="Show step 1 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-planner" data-fig-step="plan" aria-label="Show step 1 in figure">&uarr; in figure</button>
       </div>
       <p>Work starts in Claude Code with <code>/concord:run execute &lt;task&gt;</code> or <code>/concord:run delegate &lt;task&gt;</code>. The planner reads the code, the spec, any <code>Cases:</code> file and the skills once, then writes an early <code>PLAN_&lt;ticket&gt;.md</code>: a Done when line, the design, a Test plan, conflicts between sources, open questions, and per phase its executor, risk, files, follow-through files, steps, size and dependencies.</p>
       <p>A phase&rsquo;s <code>Follow-through:</code> line names the files that change only because the phase&rsquo;s change requires it, such as the docs that describe the changed code, so you approve them with the plan. A ticket whose parts can land and be reviewed apart gets a split plan instead: a table of child tickets cut along their seams, verified and approved once, after which each child runs this loop with its own plan and go.</p>
       <div class="codeblock">
-        <span class="code-label">A plan phase &middot; the demo&rsquo;s phase 2 with <code>Size:</code>, <code>After:</code> and <code>Follow-through:</code> added, in the format of <code>concord/PLAN_TEMPLATE.md</code></span>
+        <span class="code-label">A plan phase &middot; the demo&rsquo;s phase 2 with <code>Size:</code>, <code>After:</code> and <code>Follow-through:</code> added and <code>Out of scope:</code> adjusted to match, in the format of <code>concord/PLAN_TEMPLATE.md</code></span>
 <pre><code><span class="k">## Phase 2 - Count quantities in the cart total</span>
 <span class="k">Executor:</span> free-deepseek-flash
 <span class="k">Risk:</span> low
@@ -187,14 +187,14 @@
 <span class="k">Decisions:</span> an empty list still totals `0`.
 <span class="k">Acceptance:</span>
 - `python3 tests/check_cart.py`
-<span class="k">Out of scope:</span> any other file; do not edit the test.</code></pre>
+<span class="k">Out of scope:</span> any file other than `cart.py` and `docs/cart.md`; do not edit the test.</code></pre>
       </div>
     </section>
 
     <section class="step r-you" id="step-questions" aria-labelledby="h-questions">
       <div class="step-head">
         <h3 id="h-questions"><span class="num">2.</span> Questions</h3>
-        <button type="button" class="fig-chip k-you" data-fig-step="questions" aria-label="Show step 2 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-you" data-fig-step="questions" aria-label="Show step 2 in figure">&uarr; in figure</button>
       </div>
       <p>Before anyone checks the plan, the planner asks at most five blocking questions, each with a default. This is the first point where you take part: you answer the questions, or let the defaults stand. Choices the code cannot settle are listed under <code>## Open questions</code> in the plan.</p>
     </section>
@@ -202,7 +202,7 @@
     <section class="step" id="step-verifier" aria-labelledby="h-verifier">
       <div class="step-head">
         <h3 id="h-verifier"><span class="num">3.</span> An independent verifier</h3>
-        <button type="button" class="fig-chip k-judge" data-fig-step="verifier" aria-label="Show step 3 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-judge" data-fig-step="verifier" aria-label="Show step 3 in figure">&uarr; in figure</button>
       </div>
       <p><code>concord.py --lint</code> checks each phase without a model call and writes the <button type="button" class="term" data-term="plan-read">plan read</button>: the approval-relevant text of the plan, saved under a name taken from its hash. The <code>plan-verifier</code> agent reads that file and checks the plan against the code: that every item serves the goal, that its claims about interfaces and callers are true, that each acceptance command fails before the work, and that each <code>Risk:</code> fits what the phase touches. It answers with CUT, MERGE and FIX items.</p>
       <p><code>--plan-verdict</code> records an APPROVE answer that quotes the plan read&rsquo;s hash, and it holds only for that exact text. The dispatcher checks the hash, not who wrote the answer. Every run reads the plan once and checks that text against the approved revisions; a run whose plan text has none exits 11, and no words of yours open that gate.</p>
@@ -218,7 +218,7 @@ PLAN-READ: &hellip;/shop/.git/concord/plan-reads/f0ddb9d2b50101d7.md
     <section class="step r-you" id="step-go" aria-labelledby="h-go">
       <div class="step-head">
         <h3 id="h-go"><span class="num">4.</span> Your go</h3>
-        <button type="button" class="fig-chip k-you" data-fig-step="go" aria-label="Show step 4 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-you" data-fig-step="go" aria-label="Show step 4 in figure">&uarr; in figure</button>
       </div>
       <p><code>concord.py --estimate</code> turns each phase&rsquo;s <code>Size:</code> and <code>After:</code> lines and the run ledger into lanes, a critical path and an ETA. You then give one <button type="button" class="term" data-term="go">go/no-go</button> on the lanes, the ETA and the verifier&rsquo;s cuts.</p>
       <p>The go holds while the work stays as you saw it: when a later fix changes anything in a phase beyond who writes it, its size, its wait, its notes or its risk, the planner shows you the change and asks for that phase&rsquo;s go again. The dispatcher requires a recorded APPROVE of the plan text, though it cannot tell who wrote it; your go is a stop that the planning session&rsquo;s instructions require.</p>
@@ -232,7 +232,7 @@ ETA: 15 min (critical path); started at 10:00, it lands at 10:15.</code></pre>
     <section class="step" id="step-tests" aria-labelledby="h-tests">
       <div class="step-head">
         <h3 id="h-tests"><span class="num">5.</span> Tests that fail first</h3>
-        <button type="button" class="fig-chip k-planner" data-fig-step="tests" aria-label="Show step 5 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-planner" data-fig-step="tests" aria-label="Show step 5 in figure">&uarr; in figure</button>
       </div>
       <p>For each changed behavior, tests that fail on the current code are written in their own run, and the planner checks that each one fails for the stated reason before any implementation starts. A routine change under characterization checks needs no separate red run.</p>
       <p>The phase&rsquo;s <button type="button" class="term" data-term="acceptance">acceptance commands</button> then serve as the red run. Before an executor starts, the dispatcher runs them on a copy of the untouched tree; a delegated phase whose acceptance already passes is not run (exit 6), because its tests do not test it. In execute mode the session run starts with a warning instead.</p>
@@ -254,7 +254,7 @@ ETA: 15 min (critical path); started at 10:00, it lands at 10:15.</code></pre>
     <section class="step" id="step-implement" aria-labelledby="h-implement">
       <div class="step-head">
         <h3 id="h-implement"><span class="num">6.</span> Implement</h3>
-        <button type="button" class="fig-chip k-exec" data-fig-step="implement" aria-label="Show step 6 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-exec" data-fig-step="implement" aria-label="Show step 6 in figure">&uarr; in figure</button>
       </div>
       <p>In execute mode the planning session writes each phase inside a recorded <code>--begin</code>/<code>--end</code> run, which takes the same backup, scope report and checks as any other run. In delegate mode the planner still writes what costs less to write than to specify, and <code>concord.py &lt;model&gt; &lt;phase&gt;</code> runs each bulky phase on a low-cost model, free tier first.</p>
       <p>An executor reads the run&rsquo;s snapshot of the approved plan, never the plan file, and a shared contract that tells it to change only its phase&rsquo;s files. On OpenCode, edits outside the phase&rsquo;s <code>Files:</code> and <code>Follow-through:</code> are refused during the run; on other harnesses the report&rsquo;s out-of-scope lines catch them. A lock covers a set of files rather than a checkout, so phases whose files are disjoint run in one worktree at the same time. In the demo, the first attempt also edits a file outside its scope:</p>
@@ -276,7 +276,7 @@ changed in scope: cart.py (+1 -1)
     <section class="step" id="step-check" aria-labelledby="h-check">
       <div class="step-head">
         <h3 id="h-check"><span class="num">7.</span> Check</h3>
-        <button type="button" class="fig-chip k-disp" data-fig-step="check" aria-label="Show step 7 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-disp" data-fig-step="check" aria-label="Show step 7 in figure">&uarr; in figure</button>
       </div>
       <p>After the run, the dispatcher compares the checkout with the start state it kept in its own memory, where the executor cannot rewrite it. A change outside the write scope, a deletion outside it, a staged path or a moved HEAD rejects the run: no post-run command runs and there is no candidate. Otherwise the checkout as the writer left it becomes the run&rsquo;s candidate, and the acceptance commands run on a copy of it.</p>
       <p>The report comes from these snapshots, never from the writer&rsquo;s account. A PASS needs the expected result of every acceptance command, in a checkout that still holds the candidate; otherwise <code>--verdict PASS</code> exits 7. A FAIL is recorded with its cause, and only EXECUTOR failures count as attempts: after three, the planner stops and asks you.</p>
@@ -297,7 +297,7 @@ baseline: all acceptance commands failed before the change, as expected (check t
     <section class="step" id="step-review" aria-labelledby="h-review">
       <div class="step-head">
         <h3 id="h-review"><span class="num">8.</span> Review by risk tier</h3>
-        <button type="button" class="fig-chip k-judge" data-fig-step="review" aria-label="Show step 8 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-judge" data-fig-step="review" aria-label="Show step 8 in figure">&uarr; in figure</button>
       </div>
       <p>The phase&rsquo;s <code>Risk:</code> line sets the <button type="button" class="term" data-term="tier">risk tier</button>, and the tier sets who reviews. High risk means untrusted input, scores or thresholds, security, money, data deletion or concurrency.</p>
       <div class="tiers">
@@ -323,7 +323,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
     <section class="step" id="step-report" aria-labelledby="h-report">
       <div class="step-head">
         <h3 id="h-report"><span class="num">9.</span> Report</h3>
-        <button type="button" class="fig-chip k-disp" data-fig-step="report" aria-label="Show step 9 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-disp" data-fig-step="report" aria-label="Show step 9 in figure">&uarr; in figure</button>
       </div>
       <p>Once every run of the plan has a verdict, <code>concord.py --report</code> writes the test report from recorded data, stops the drift clock and closes the plan to new runs: a later run on it exits 10. The report opens with the <button type="button" class="term" data-term="overrides">overrides</button>: each forced PASS beside its failed commands, each waiver and owner go-ahead, and each PASS whose phase a later revision changed. Then come the phases, with who wrote each, the plan revision its run followed, the graded candidate and its latest review.</p>
       <div class="codeblock">
@@ -346,9 +346,9 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
     <section class="step r-you" id="step-commit" aria-labelledby="h-commit">
       <div class="step-head">
         <h3 id="h-commit"><span class="num">10.</span> Your commit</h3>
-        <button type="button" class="fig-chip k-you" data-fig-step="commit" aria-label="Show step 10 in the figure">&uarr; in figure</button>
+        <button type="button" class="fig-chip k-you" data-fig-step="commit" aria-label="Show step 10 in figure">&uarr; in figure</button>
       </div>
-      <p>The session replaces the repository notes the ticket changed and merges the approved case changes into the <code>Cases:</code> file. Then you commit and merge. Concord never commits, pushes or changes branches in your checkout.</p>
+      <p>The session replaces the repository notes the ticket changed and merges the approved case changes into the <code>Cases:</code> file. Then you commit and merge. The dispatcher never commits, pushes or changes branches in your checkout; the planning session is told not to, by an instruction rather than by code.</p>
     </section>
   </section>
 
@@ -418,9 +418,9 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
       <details class="principle">
         <summary><span class="p-num">P7</span><span class="p-title">You commit</span><span class="p-exit">rejected, exit 7</span><svg class="p-chev" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg></summary>
         <div class="p-body"><dl>
-          <dt>Mechanism</dt><dd>Concord never commits, pushes or changes branches in your checkout. A run that stages a path, moves HEAD or changes the branch is rejected, and OpenCode&rsquo;s rules deny an executor <code>git commit</code>, <code>git push</code> and similar commands.</dd>
+          <dt>Mechanism</dt><dd>The dispatcher never commits, pushes or changes branches in your checkout, and the planning session is told not to. A run that stages a path, moves HEAD or changes the branch is rejected, and OpenCode&rsquo;s rules deny an executor <code>git commit</code>, <code>git push</code> and similar commands.</dd>
           <dt class="refusal">Refusal you can reproduce</dt><dd>The run report lists the staged path or the moved HEAD as a rejection, and a PASS on that run exits 7.</dd>
-          <dt class="limit">Limit</dt><dd>Outside OpenCode, the git rules in the executor contract are instructions a model can ignore: a commit is caught after the run, not prevented. <code>wt.py new</code> creates a branch and a worktree per ticket when you ask.</dd>
+          <dt class="limit">Limit</dt><dd>No code stops the planning session from committing outside a run: that rule is an instruction in Concord&rsquo;s Claude Code rules and the run command, and the dispatcher sees a moved HEAD only inside a run. Outside OpenCode, the git rules in the executor contract are instructions a model can ignore too: a commit during a run is caught after the run, not prevented. <code>wt.py new</code> creates a branch and a worktree per ticket when you ask.</dd>
         </dl></div>
       </details>
     </div>
@@ -535,7 +535,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
       <pre><code id="cmd-demo">bash scripts/demo.sh</code></pre>
       <button type="button" class="copy-btn" data-copy-from="cmd-demo" aria-label="Copy the demo command"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6"/><path d="M10.5 5V3.6A1.6 1.6 0 0 0 8.9 2H3.6A1.6 1.6 0 0 0 2 3.6v5.3a1.6 1.6 0 0 0 1.6 1.6H5"/></svg><span class="label">Copy</span></button>
     </div>
-    <p>The demo runs the whole loop in both modes in about a minute, inside a temporary folder, with a scripted executor instead of a model: no network, no account, nothing written outside that folder. Add <code>--keep</code> to inspect the run folders afterwards.</p>
+    <p>The demo runs the whole loop in both modes in about a minute, inside a temporary folder, with a scripted executor instead of a model: no network, no account, nothing left outside that folder. Add <code>--keep</code> to inspect the run folders afterwards.</p>
 
     <div class="req">
       <div>
@@ -551,7 +551,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <ul>
           <li>OpenCode for the free tier, the one path where out-of-scope edits are refused during the run</li>
           <li>The pi CLI for models on the OpenCode Go allowance</li>
-          <li>Without either, the dispatcher still runs Claude subagent phases, reviews and verdicts</li>
+          <li>Without either, Claude subagent phases, verdicts and the medium-tier review by <code>reviewer-opus55</code> still work; the low-tier review and the second review from another model family that a high-risk change needs cannot run</li>
         </ul>
       </div>
     </div>

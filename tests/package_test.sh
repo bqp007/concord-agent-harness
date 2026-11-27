@@ -54,7 +54,7 @@ s_scrub() { local trees="$*" t pat
   [ -f "$SCRUB_FILE" ] || { echo "skip scrub (no pattern file)"; return 0; }
   pat=$(tmpd)/patterns; grep -vE '^[[:space:]]*(#|$)' "$SCRUB_FILE" > "$pat"
   [ -s "$pat" ] || { check scrub/pattern-file "echo no patterns in $SCRUB_FILE; false"; return; }
-  [ -n "$trees" ] || trees="$K adapters install.sh README.md docs LICENSE SECURITY.md CONTRIBUTING.md CITATION.cff scripts examples tests assets .github .gitignore .claude-plugin"
+  [ -n "$trees" ] || trees="$K adapters install.sh README.md docs LICENSE SECURITY.md CONTRIBUTING.md CITATION.cff scripts examples tests assets site .github .gitignore .claude-plugin"
   for t in $trees; do [ -e "$t" ] || { [ $# = 0 ] && continue; check "scrub/$t" "echo no such tree; false"; continue; }
     check "scrub/$t" "n=\$(grep -rnIE -f '$pat' '$t' | wc -l | tr -d ' '); [ \"\$n\" = 0 ] || { echo \"\$n matches\"; false; }"
   done
