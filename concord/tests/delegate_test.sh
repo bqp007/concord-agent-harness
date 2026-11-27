@@ -47,6 +47,13 @@ line "DELETED:" "c.py" && ok "deletion reported" || bad "deleted: $(grep '^DELET
 line "STAGED BY EXECUTOR:" "a.py" && ok "staged edit reported" || bad "staged: $(grep -i staged "$T/out.txt")"
 grep "^REJECTED" "$T/out.txt" | grep -qF "PLAN_T.md" && ok "plan edit rejects the run" || bad "plan edit not in the rejection"
 line "GIT INTERNALS CHANGED:" ".git/hooks/pre-commit (new)" && ok "new git hook reported" || bad "internals: $(grep -i internals "$T/out.txt")"
+newrepo; printf '# Plan\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nFollow-through: docs/**, **/CMakeLists.txt, *.md\nAcceptance:\n- `grep -q y a.py`\n' > "$R/PLAN_T.md"
+approve PLAN_T.md "$R" || exit 1
+run 'echo y >> a.py; mkdir -p docs lib; echo d > docs/new.md; echo b > lib/CMakeLists.txt; echo n > NOTES.md; echo "# edited" >> PLAN_T.md'
+line "follow-through:" "docs/new.md" && line "follow-through:" "lib/CMakeLists.txt" && line "follow-through:" "NOTES.md" \
+  && grep "^REJECTED" "$T/out.txt" | grep -qF "PLAN_T.md" && ! grep "^REJECTED" "$T/out.txt" | grep -qE "docs/new.md|CMakeLists|NOTES.md" \
+  && ok "Follow-through globs keep their stars (docs/**, **/CMakeLists.txt, *.md); one that matches the plan still leaves a plan edit rejected" \
+  || { bad "follow-through globs"; grep -E "^(REJECTED|follow-through|changed in scope|OUT OF SCOPE)" "$T/out.txt"; }
 
 echo "== guards"
 newrepo; echo y >> "$R/a.py"; git -C "$R" commit -qam "a already has y"
@@ -89,6 +96,19 @@ for mode in ("readonly", "full"):
 print("  ok   OpenCode: Code Mode, subagents, web search denied in every mode; autoupdate + project config off"
       if not problems else "  FAIL OpenCode permission set: " + "; ".join(problems))
 sys.exit(1 if problems else 0)
+EOF
+[ $? -eq 0 ] && pass=$((pass+1)) || fail=$((fail+1))
+python3 -I - "$T/concord/concord.py" "$T" <<'EOF'
+import importlib.util, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+repo = Path(sys.argv[2]) / "no-docs-yet"; repo.mkdir()
+pats = d.edit_patterns(repo, d.parse_files("Files: a.py\nFollow-through: docs/**, **/CMakeLists.txt\n"))
+want = [f for w in ("a.py", "docs/**", "**/CMakeLists.txt") for f in (w, str(repo / w))]
+print("  ok   OpenCode may edit what Files: and Follow-through: name, in a folder that does not exist yet too, and nothing else"
+      if sorted(pats) == sorted(want) else f"  FAIL OpenCode edit patterns: {pats!r}, want {want!r}")
+sys.exit(0 if sorted(pats) == sorted(want) else 1)
 EOF
 [ $? -eq 0 ] && pass=$((pass+1)) || fail=$((fail+1))
 

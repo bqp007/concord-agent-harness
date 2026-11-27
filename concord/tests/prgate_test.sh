@@ -237,7 +237,9 @@ opus 73 high concord:reviewer-opus55 "$T/clean.txt" --exclude parser.py; st 73
 has "UNREVIEWED" && has "parser.py" && ! has "WAIVER" && [ $RC -eq 1 ] && ok "7 --exclude parser.py without the owner's words: UNREVIEWED naming parser.py (exit 1)" || { bad "7 exclude rc=$RC"; tail -3 "$T/out.txt"; }
 opus 73 high concord:reviewer-opus55 "$T/clean.txt" --exclude parser.py --user-approved "go ahead"; st 73
 has "UNREVIEWED" && has "parser.py" && ! has "WITH OWNER WAIVER" && [ $RC -eq 1 ] && ok "7 words that do not name parser.py waive nothing" || { bad "7 vague words rc=$RC"; tail -3 "$T/out.txt"; }
-opus 73 high concord:reviewer-opus55 "$T/clean.txt" --exclude parser.py --user-approved "skip parser.py, the owner said so"; st 73
+opus 73 high concord:reviewer-opus55 "$T/clean.txt" --exclude parser.py --user-approved "skip parser.py, the owner said so"
+# release.py needs high, so it also takes a review from another model family: a flash model
+FAKE_JSON="$T/clean.txt" flash 73 fake/m --tier high --files release.py; st 73
 has "WITH OWNER WAIVER: parser.py excluded" && has "REVIEWED at" && [ $RC -eq 0 ] && ok "7 words naming parser.py: REVIEWED ... WITH OWNER WAIVER: parser.py excluded (exit 0)" || { bad "7 waiver rc=$RC"; tail -3 "$T/out.txt"; }
 newpr 74 parser.py 'p = 74' release.py 'r = 74'
 opus 74 high concord:reviewer-opus55 "$T/clean.txt" --files parser.py; FAKE_JSON="$T/clean.txt" flash 74 fake/m --tier high --files release.py --user-approved "release.py is fine"; st 74

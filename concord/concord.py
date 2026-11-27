@@ -49,9 +49,10 @@ refuses to start a harness without an explicit non-Claude model.
 
 The script does not verify the work. It snapshots the working tree (including gitignored paths),
 hashes the plan, runs the CLI in the repo root, and reports in-scope changes, changes outside the
-phase's `Files:` list (source counted; untracked build/cache output listed separately), deletions,
-staged edits, git hooks/config edits, branch or HEAD movement, and any edit to the plan file. On
-OpenCode the `Files:` list is enforced through its edit permission rules; elsewhere it is advisory.
+phase's write scope, its `Files:` and `Follow-through:` lists (source counted; untracked build/cache
+output listed separately), deletions, staged edits, git hooks/config edits, branch or HEAD movement,
+and any edit to the plan file. On OpenCode the write scope is enforced through its edit permission
+rules; elsewhere it is advisory.
 The calling agent re-runs the acceptance commands printed in the report (captured before the run)
 and records its verdict with --verdict.
 Before the executor starts, the acceptance commands run once on a grading copy of the untouched tree (red run): a
@@ -135,7 +136,7 @@ BACKUP_CAP_BYTES = 200 * 1024 * 1024
 NOTES_CAP_CHARS = 4000
 POINTER_CAP_CHARS = 60_000      # code inlined per Notes: pointer (D4)
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
-GUARDS_NOTE = ("guards: the contract and bash deny rules are advisory; Files: scope is enforced only on OpenCode "
+GUARDS_NOTE = ("guards: the contract and bash deny rules are advisory; the write scope is enforced only on OpenCode "
                "(edit/write/patch tools, not shell redirection); the backup is the real safety net")
 # Git metadata an executor must never touch (hooks run as the user on the next commit).
 GIT_INTERNAL_FILES = ("config", "info/exclude", "info/attributes")
@@ -151,7 +152,7 @@ TIER_RANK = {"low": 1, "medium": 2, "high": 3}
 TIER_NAME = {1: "low", 2: "medium", 3: "high"}
 REVIEWER_RANK = {"reviewer-opus55": 3}
 TIER_REVIEWER = {"low": "a flash review (concord.py --review)", "medium": "reviewer-opus55",
-                 "high": "reviewer-opus55"}
+                 "high": "reviewer-opus55 and a flash review from another model family (concord.py --review)"}
 APPROVE_ONLY = ("APPROVE-ONLY REVIEW: this change is low tier. Only a BLOCKER or HIGH finding (each with a "
                 "reproduction) or a clause FAIL holds it; a MEDIUM you report is kept as a note and not judged. None "
                 "found: findings [] and verdict CLEAN, which approves the change.")
@@ -607,7 +608,8 @@ def file_identity(path):
 
 PHASE_HEAD = re.compile(r"^(#{1,6})\s*Phase\s+(\d+(?:\.\d+)*)\b.*$", re.I | re.M)
 PHASE_WORD = re.compile(r"(\d+)(?:\.([1-9]\d*))?")
-FIELD_NAMES = ("Executor|Purpose|Risk|Files|Context|Interfaces|Notes|Inputs|Steps|Examples?|Edge cases|Decisions|"
+FIELD_NAMES = ("Executor|Purpose|Risk|Files|Follow-through|Context|Interfaces|Notes|Inputs|Steps|Examples?|Edge cases|"
+               "Decisions|"
                "Budget|Baseline|Characterize|Acceptance|Out of scope|Size|After")
 FIELD = re.compile(r"^\s*(?:[-*]\s*)?\**\s*(" + FIELD_NAMES + r")(?:(?<=inputs)\s+(?:and\s[^:*\n]{1,40}|"
                    r"\([^():*\n]{1,40}\)))?\s*\**\s*:", re.I)
@@ -687,19 +689,43 @@ def parse_executor(phase_text):
 
 
 def parse_files(phase_text):
-    inline, body = field_block(phase_text, "Files")
+    """The phase's write scope: its `Files:` entries, then the `Follow-through:` entries that Files does not list."""
+    own, follow = parse_scope(phase_text)
+    return own + follow
+
+
+def parse_scope(phase_text):
+    """(`Files:` entries, `Follow-through:` entries that Files does not list). Follow-through names the files that
+    change only because the phase's change requires it, such as docs and build lists; it never makes a file of the
+    Test plan writable (acceptance_list reads Files alone)."""
+    own = parse_paths(phase_text, "Files")
+    return own, [p for p in parse_paths(phase_text, "Follow-through") if p not in own]
+
+
+def parse_paths(phase_text, name):
+    inline, body = field_block(phase_text, name)
     strip_notes = lambda s: re.sub(r"\([^)]*\)", " ", s)
     inline = strip_notes(inline).strip()
     # Comma-separated when commas are present (paths may contain spaces), else whitespace-separated.
     toks = re.split(r"\s*,\s*", inline) if "," in inline else inline.split()
     for line in body:
-        line = re.sub(r"^\s*[-*\d.)]+\s*", "", strip_notes(line))
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", strip_notes(line))      # a list marker, never a glob's `*`
         toks.append(re.split(r"\s+[-:]", line.strip(), maxsplit=1)[0])
     out = []
-    for t in (clean_path(t) for t in toks):
+    for t in (clean_entry(t) for t in toks):
         if t and t.lower() != "none" and re.search(r"[A-Za-z0-9]", t):
             out.append(t)
     return out
+
+
+def clean_entry(token):
+    """A path or glob of a `Files:` or `Follow-through:` entry (`docs/**`, `**/CMakeLists.txt`, `*.cmake`): quotes and
+    backticks go, every `*` of the glob stays, and markdown bold around a path (`**a.py**`) goes."""
+    token = token.strip().strip("`'\"").strip()
+    inner = token[2:-2]
+    if len(token) > 4 and token.startswith("**") and token.endswith("**") and inner[:1] != "/" and inner[-1:] != "/":
+        token = inner.strip().strip("`'\"")
+    return token[2:] if token.startswith("./") else token
 
 
 def parse_acceptance(phase_text):
@@ -1493,12 +1519,13 @@ def state_changes(repo, st):
 
 
 def in_write_scope(rec, path):
-    """Whether a run may write `path`: its Files:, and for a planner session run also the plan and the grading files
-    (the planner writes the tests that grade a phase and edits the plan). Any other run never writes a grading file,
-    not even one its Files: lists (the repository's Cases file). `rec` is a run's state or meta."""
+    """Whether a run may write `path`: its write scope (Files: and Follow-through:), and for a planner session run also
+    the plan and the grading files (the planner writes the tests that grade a phase and edits the plan). Any other run
+    never writes the plan or a grading file, not even one its write scope covers (the repository's Cases file, a plan
+    that a `Follow-through:` pattern matches). `rec` is a run's state or meta."""
     if rec.get("executor") == "planner":
         return in_scope(path, [*rec["files"], rec["plan"], *rec["grading_files"]])
-    return in_scope(path, rec["files"]) and path not in rec["grading_files"]
+    return in_scope(path, rec["files"]) and path not in rec["grading_files"] and path != rec["plan"]
 
 
 def outside_files(repo):
@@ -2078,7 +2105,7 @@ def check_free(holders, files):
 
 
 def acquire_lock(root, run_id, manual=False, files=()):
-    """Lock this run's Files: runs with disjoint Files share a checkout, and a manual (--begin) lock stays held
+    """Lock this run's write scope (Files: and Follow-through:): runs with disjoint scopes share a checkout, and a manual (--begin) lock stays held
     until --end or --abort. Dead non-manual holders are dropped, and each side records the other's Files as
     `shared`, so a concurrent run's edits are not out of scope. A lock in the pre-3.0 format (the one shared
     <git-common-dir>/concord/.lock) is refused, never read as free."""
@@ -2242,7 +2269,8 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     the baseline (red run), characterization and static checks on a grading copy of the start tree, then take the
     pre-run snapshot last."""
     conf = conf or {}
-    files = parse_files(phase_text)
+    own, follow = parse_scope(phase_text)
+    files = own + follow
     acceptance = parse_acceptance(phase_text)
     risk = parse_word(phase_text, "Risk", ("low", "medium", "high"), "medium")
     baseline_mode = parse_word(phase_text, "Baseline", ("fail", "pass", "skip"), "fail")
@@ -2267,7 +2295,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     (run_dir / "phase.md").write_text(phase_text + "\n")
     # The start tree is taken and the grading files are pinned first; the red run, the characterization and the static
     # checks then run on a grading copy of that tree, so nothing they write reaches the checkout or the tree.
-    grading = acceptance_list(repo, plan_text(plan), files)
+    grading = acceptance_list(repo, plan_text(plan), own)
     keep = sorted(set(to_back_up) | set(grading))           # in-scope files and graders stay in the tree, build-named or not
     try:
         start_tree = capture_tree(repo, tuple(generated_globs(conf)), frozenset(keep))
@@ -2318,7 +2346,8 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "acceptance_expect": expect, "no_baseline": not do_baseline, "backup_hashes": backup_hashes,
         "start_kinds": start_kinds, "start_exec": start_exec, "backup_links": backup_links,
         "phase": phase, "who": who, "executor": executor, "model": model, "name": name, "mode": mode,
-        "files": files, "acceptance": acceptance, "grading_files": grading, "grading_inputs": pins,
+        "files": files, "follow_through": follow, "acceptance": acceptance, "grading_files": grading,
+        "grading_inputs": pins,
         "grading_inputs_exec": pin_execs,
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
@@ -2587,8 +2616,9 @@ def finish_run(run_dir, rc, secs=None, st=None):
     concurrent = lock_shared(run_dir.parent, st["run_id"])
     changed, created, deleted = ([p for p in group if in_scope(p, files) or not in_scope(p, concurrent)]
                                  for group in (changed, created, deleted))
-    # The write scope is the phase's Files: (a planner session run also writes the plan and the grading files, the
-    # tests that grade the phase): a change outside it, like the other changes listed below, rejects the run.
+    # The write scope is the phase's Files: and Follow-through: (a planner session run also writes the plan and the
+    # grading files, the tests that grade the phase): a change outside it, like the other changes listed below, rejects
+    # the run.
     touched = changed + created
     stats = numstat(repo, [p for p in changed if post.get(p, ["??"])[0] not in ("??", "!!")])
     scope_in = [p for p in touched if in_write_scope(st, p)]
@@ -2674,8 +2704,12 @@ def finish_run(run_dir, rc, secs=None, st=None):
         lines.insert(1, "REJECTED (not graded): " + "; ".join(rejected))
         lines.insert(2, f"  no post-run command ran and there is no candidate: restore with concord.py --restore "
                         f"{st['run_id']} or clean up, then grade the checkout with concord.py --grade {st['run_id']}")
+    follow = st.get("follow_through") or []
+    own = [f for f in files if f not in follow]
     lines += [
         "changed in scope: " + (", ".join(describe(p) for p in scope_in) or "none"),
+        *(["follow-through: " + (", ".join(p for p in scope_in if in_scope(p, follow) and not in_scope(p, own))
+                                 or "none")] if follow else []),
         "OUT OF SCOPE (source): " + (", ".join(describe(p) for p in source_oos) or "none"),
         "generated (untracked build/cache output; not counted): "
         + (f"{len(generated)} file(s): " + ", ".join(generated[:5]) + (", ..." if len(generated) > 5 else "")
@@ -2859,7 +2893,8 @@ def pick_executor(args, target, phase, conf, entries):
 
 
 # Drift brakes: time against the ETA --estimate stored (else the plan's ETA:), size against Size:, changed files
-# against the union of its Files: lists. Warn at 1.2x, block at 1.5x or at a changed file outside Files.
+# against the union of its Files: and Follow-through: lists. Warn at 1.2x, block at 1.5x or at a changed file outside
+# that union.
 DRIFT_WARN, DRIFT_BLOCK = 1.2, 1.5
 DRIFT_IDLE = 600                                       # a longer gap between checks counts only where a run covered it
 DRIFT_KEYS = ("tickets", "verdicts", "estimates", "reports")   # not a 3.0.x checkout entry; 3.1 reads the last three only
@@ -3635,7 +3670,7 @@ def cmd_run(args, target, phase, conf):
     if approval_note:
         notes.append(approval_note)
     if allow_edit:
-        notes.append(f"edit scope enforced: OpenCode may edit only the {len(files)} Files: entries "
+        notes.append(f"edit scope enforced: OpenCode may edit only the {len(files)} Files: and Follow-through: entries "
                      "(edit/write/patch tools; shell redirection is not covered)")
     elif files:
         notes.append(f"edit scope is advisory on {executor} (contract only)")
@@ -4755,6 +4790,15 @@ def reviewer_rank(reviewer):
     return rank
 
 
+def other_family(review):
+    """Whether a recorded review came from outside the Claude model family: a model on another harness (a flash
+    review), which this script never gives a Claude model. A Claude subagent's answer is billed to the Claude
+    subscription; a review with no billing record proves no family. The high tier needs one such review beside
+    reviewer-opus55."""
+    bill = str(review.get("billing") or "")
+    return bool(bill) and not bill.startswith("Claude subscription")
+
+
 def required_tier_rank(repo, meta):
     """The review tier rank a phase must reach: its phase tier, raised by any repo-notes risk floor."""
     required = phase_tier(meta)
@@ -4932,6 +4976,8 @@ def cmd_review_packet(args):
           f"CLAUDE.md give it, with prompt "
           f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record "
           f"{run_dir.name} --reviewer <name> --file <its output saved to a file>")
+    if required_tier_rank(repo, meta) == TIER_RANK["high"]:
+        print(f"high tier: also a review from another model family: concord.py --review {run_dir.name} (a flash model)")
     return 0
 
 
@@ -5779,6 +5825,8 @@ def write_pr_packet(root, n, slug, base, head, tier, files, excluded, task, tag=
     print(f"next: spawn the reviewer-opus55 agent, by the name the Concord rules in CLAUDE.md give it, with prompt "
           f"\"Review packet: {packet}\" (Claude subscription), then: concord.py --review-record {run_dir.name} "
           f"--reviewer <name> --file <its output saved to a file>")
+    if tier == "high" and not since:
+        print(f"high tier: also a review from another model family: concord.py --review-pr {n} (a flash model)")
     return 0
 
 
@@ -6171,12 +6219,14 @@ def pr_open_findings(repo, root, n, slug, head):
     return [f for f in found if not pr_finding_resolution(repo, f, head)]
 
 
-def pr_coverage(repo, entries, mb, head):
+def pr_coverage(repo, entries, mb, head, other_only=False):
     """{path: (tier rank, reviewer)} of the files of the PR diff at `head` that a review covers. A file is covered when
     (a) a review of that head read it, or (b) it is covered at an ancestor head and either unchanged since or read by
     a delta review of this head that explained every hunk of it (D15: a delta covers only a file that was covered at its
     base; a file new since then needs a review of its own). A binary file is never covered (D12): it is dropped from
-    the coverage of every head (`cov`), so credit never passes through a head where the file was binary."""
+    the coverage of every head (`cov`), so credit never passes through a head where the file was binary. With
+    other_only, only the full reviews from another model family (other_family) cover a file; a delta review still
+    carries the coverage of its base, whoever ran it."""
     valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
     memo = {}
 
@@ -6197,7 +6247,7 @@ def pr_coverage(repo, entries, mb, head):
 
         at_h = [e for e in valid if e["head"] == h]
         for e in at_h:
-            if not e["since"]:
+            if not e["since"] and (not other_only or other_family(e)):
                 for f in e["scope"]:
                     put(f, e["counted"], e["reviewer"])
         for e in at_h:
@@ -6320,10 +6370,18 @@ def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
     the diff saying which review covers it. Returns the exit code: 0 only for REVIEWED."""
     valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
     cover = pr_coverage(repo, entries, mb, head)
+    high = TIER_RANK["high"]
+    other = pr_coverage(repo, entries, mb, head, other_only=True) if high in need.values() else {}
+
+    def wants(f):                     # what file f still needs, or "" when its reviews cover it
+        if f not in cover or cover[f][0] < need[f]:
+            return TIER_NAME[need[f]]
+        return "a review from another model family" if need[f] == high and f not in other else ""
+
     waived = sorted({f for e in valid if e["head"] == head for f in (e["meta"].get("waived") or []) if f in files})
     open_ = pr_open_findings(repo, root, n, slug, head)
     binary = pr_binary_files(repo, mb, head, [f for f in files if f not in waived])
-    uncovered = [f for f in files if f not in waived and (f in binary or f not in cover or cover[f][0] < need[f])]
+    uncovered = [f for f in files if f not in waived and (f in binary or wants(f))]
     tier = TIER_NAME[max(need.values(), default=TIER_RANK["medium"])]
     stale = len(entries) - len(valid)
     if open_:
@@ -6334,7 +6392,7 @@ def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
                      + ", ".join(f"{k} {sev}" for sev, k in kinds.items()) + ")")
     elif uncovered:
         head_line = "UNREVIEWED (" + ", ".join(f"{f} is binary and needs an owner waiver" if f in binary
-                                                else f"{f} needs {TIER_NAME[need[f]]}" for f in uncovered) + ")"
+                                                else f"{f} needs {wants(f)}" for f in uncovered) + ")"
     else:
         head_line = f"REVIEWED at {tier}" + (f" WITH OWNER WAIVER: {', '.join(waived)} excluded" if waived else "")
     print(f"CURRENT HEAD {head[:8]}: {head_line}")
@@ -6352,10 +6410,11 @@ def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
             print(f"  {f}: waived by owner")
         elif f in binary:
             print(f"  {f}: binary, needs an owner waiver")
-        elif f in cover and cover[f][0] >= need[f]:
-            print(f"  {f}: {TIER_NAME[cover[f][0]]} by {cover[f][1]}")
+        elif not wants(f):
+            print(f"  {f}: {TIER_NAME[cover[f][0]]} by {cover[f][1]}"
+                  + (f" and {other[f][1]}" if need[f] == high else ""))
         else:
-            print(f"  {f}: needs {TIER_NAME[need[f]]}")
+            print(f"  {f}: needs {wants(f)}")
     print(graded_line(repo, root, head))
     return 0 if not open_ and not uncovered else 1
 
@@ -7118,6 +7177,10 @@ def report_overrides(repo, root, runs, plan_rel, changed):
                        + (f"reviewed below its tier: needs {TIER_NAME[need]}, best review counts at {TIER_NAME[done]}"
                           if done else f"not reviewed (needs {TIER_NAME[need]})")
                        + (" (its other reviews saw an earlier candidate)" if len(reviews) > (done > 0) else ""))
+        elif need == TIER_RANK["high"] and not any(other_family(r) for r in reviews
+                                                   if r.get("candidate", graded) == graded):
+            out.append(f"- phase {phase} (run {run}) high tier: no review from another model family (a flash review "
+                       "beside reviewer-opus55)")
     for meta_path in sorted(Path(root).glob("pr*-*/meta.json")):
         try:
             m = json.loads(meta_path.read_text())
@@ -8088,7 +8151,8 @@ def main():
     parser.add_argument("--label", help="with --begin: executor label for the report (default: plan's Executor)")
     parser.add_argument("--end", metavar="RUN_ID", help="close a session run and write its report")
     parser.add_argument("--drift", action="store_true", help="print the plan's drift: time against ETA:, size "
-                        "against Size:, changed files against Files: (warn at 1.2x, block at 1.5x: exit 10)")
+                        "against Size:, changed files against Files: and Follow-through: (warn at 1.2x, block at 1.5x: "
+                        "exit 10)")
     parser.add_argument("--drift-hook", action="store_true", help="PostToolUse hook: tick the drift clock; print "
                         "only when the drift level changes")
     parser.add_argument("--plan-verdict", metavar="FILE", help="record the plan-verifier's answer (its VERDICT: "

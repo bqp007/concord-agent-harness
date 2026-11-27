@@ -13,7 +13,7 @@ A Concord plan (`PLAN_<ticket>.md` in a repository with the dispatcher) is appro
 - One round; a second, on a new plan read, only to confirm your fixes. Apply each item, or reject it with the owner decision that settles it.
 - Save the final answer to a file and record it: `concord.py --plan-verdict <file> --plan <PLAN>`. The approval holds only for the read whose hash the answer quotes. An edit outside the prose of `## Open questions`, `## Handoff` and `## Passes` needs a new read and verdict: until then every run of the plan exits 11, and no owner words (`--user-approved` included) stand in for it.
 
-Any other plan or spec: give the verifier the file itself and record nothing.
+Any other plan or spec, a split plan included (its `## Split` table has no phases to lint or run): give the verifier the file itself and record nothing. Each child ticket's plan is then verified on its own.
 
 ## Result
 

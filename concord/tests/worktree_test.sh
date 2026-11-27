@@ -82,18 +82,22 @@ touch "$T/release"; wait $P1; R1=$?
   && ok "second run in T1 blocked (same checkout), naming the shared file" || { bad "same-checkout block rc=$R4"; tail -3 "$T/r4.txt"; }
 grep "OUT OF SCOPE" "$T/r3.txt" | grep -qv ": none" && bad "main run flagged out-of-scope files: $(grep -i 'out of scope' "$T/r3.txt")" || ok "main run saw no worktree files"
 echo "== lock per set of files: disjoint runs share a checkout (2026-11-15, kit-flow)"
-printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | none | ADD | b.py |\n| c | none | ADD | c.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nAcceptance:\n- `grep -q y a.py b.py c.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py, c.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n' > "$W1/PLAN_F.md"; printf 'c\n' > "$W1/c.py"
+printf '# Plan\n## Test plan\n| Behavior | Existing tests | Action | Home |\n|---|---|---|---|\n| b | none | ADD | b.py |\n| c | none | ADD | c.py |\n\n## Phase 1 - change a\nExecutor: deepseek-flash\nFiles: a.py\nFollow-through: docs/**\nAcceptance:\n- `grep -q y a.py b.py c.py`\n\n## Phase 2 - make b\nExecutor: deepseek-flash\nFiles: b.py, z.py, c.py\nAcceptance:\n- `grep -q y b.py`\n\n## Phase 3 - no Files\nExecutor: deepseek-flash\nAcceptance:\n- `true`\n\n## Phase 4 - document d\nExecutor: deepseek-flash\nFiles: d.py\nFollow-through: docs/a.md\nAcceptance:\n- `grep -q y d.py`\n' > "$W1/PLAN_F.md"; printf 'c\n' > "$W1/c.py"
 approve PLAN_F.md "$W1" || exit 1
 FAKE_ACTIONS="i=0; while [ ! -e '$T/release2' ] && [ \$i -lt 300 ]; do sleep 0.1; i=\$((i+1)); done; echo y >> a.py" \
   $DP 1 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f1.txt" 2>&1 & PF=$!
 i=0; until [ -e "$L1" ] || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done
 printf 'z\n' > "$W1/z.py"; FAKE_ACTIONS='echo y > b.py; rm z.py; echo y >> c.py' $DP 2 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f2.txt" 2>&1; F2=$?
 FAKE_ACTIONS='true' $DP 3 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f3.txt" 2>&1; F3=$?
+FAKE_ACTIONS='true' $DP 4 --plan PLAN_F.md --via qwen --model fake/m --no-baseline --repo "$W1" > "$T/f5.txt" 2>&1; F5=$?
 touch "$T/release2"; wait $PF; F1=$?
 [ $F2 -eq 0 ] && grep -q "b.py" "$T/f2.txt" && ok "a run with disjoint Files ran in the same checkout while another ran" \
   || { bad "disjoint run rc=$F2"; tail -3 "$T/f2.txt"; }
 [ $F3 -eq 2 ] && grep -q "another delegated run is active in this checkout" "$T/f3.txt" \
   && ok "a run with no Files is refused while another runs (exit 2)" || { bad "no-Files run rc=$F3"; tail -3 "$T/f3.txt"; }
+[ $F5 -eq 2 ] && grep -qF "both list docs/**" "$T/f5.txt" \
+  && ok "a run whose Follow-through overlaps the live run's Follow-through is refused, naming the shared pattern (exit 2)" \
+  || { bad "follow-through lock rc=$F5"; tail -3 "$T/f5.txt"; }
 [ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 2 lines (+2 -0)" "$T/f1.txt" \
   && ! grep -q "^REJECTED" "$T/f1.txt" \
   && ok "the long run leaves the concurrent run's b.py, c.py and deleted z.py out of OUT OF SCOPE, DELETED, its diff size and its rejection" \

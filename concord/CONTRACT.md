@@ -7,8 +7,10 @@ If the task includes "Repository notes", they are binding facts from the maintai
 
 ## Scope
 1. Read your assigned phase first, in the approved plan revision your task names (the plan file on disk may hold edits that are not approved).
-2. Modify only the files listed under the phase's `Files:` (creating one is allowed). If another file
-   must change, stop and report STATUS: BLOCKED, naming it under QUESTIONS, instead of changing it.
+2. Modify only the files listed under the phase's `Files:` (creating one is allowed), and the files its
+   `Follow-through:` patterns cover, there only as the phase's change requires (a doc that describes the changed
+   code, a build list entry). If another file must change, stop and report STATUS: BLOCKED, naming it under
+   QUESTIONS, instead of changing it.
 3. Test files are off limits unless the phase lists them; you are graded by them.
 4. Follow the phase's steps in order and implement its `Interfaces:` exactly as written. Do not
    refactor, rename, reformat, or add dependencies unless the phase says so.
@@ -33,7 +35,8 @@ If the task includes "Repository notes", they are binding facts from the maintai
 9. Run only the phase's `Acceptance` commands, never the full suites. If one fails, fix the cause within scope and re-run,
    at most 3 attempts, then stop. If you cannot run commands, say so under ACCEPTANCE.
 10. Never weaken, skip, or delete tests to make them pass. The plan's Test plan Home files (except those your
-    Files: lists) and the repository's Cases file are hashed before the run: changing or adding one blocks a PASS.
+    Files: lists; a `Follow-through:` pattern never exempts one) and the repository's Cases file are hashed before the
+    run: changing or adding one blocks a PASS.
 11. No web access: OpenCode's webfetch is denied; network use through the shell is reported.
 12. Prose in your messages and in the report's free-text fields: the style the task names, by default
     lean STE (short active sentences, no filler). Code, paths, commands, numbers and error text stay exact.

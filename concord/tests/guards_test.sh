@@ -276,6 +276,17 @@ drun --user-approved "go on"; RC=$?; drift
 grep -rqs "user approved: go on" "$D/.git/concord" && ok "the run records the owner's words that passed a gate" || bad "approval note"
 printf 'y = 1\n' > "$D/b.py"; drun; RC=$?
 [ $RC -eq 10 ] && has "changed outside Files: b.py" && ok "a changed file outside Files blocks (exit 10)" || { bad "scope rc=$RC"; tail -2 "$T/out.txt"; }
+FT="$T/ft"; mkdir -p "$FT" && ( cd "$FT" && git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'x = 1\n' > a.py; git add -A && git commit -qm init
+  printf '# Plan\nTier: M\nSize: ~40 lines\nETA: 60 min\n\n## Phase 1 - p1\nExecutor: deepseek-flash\nFiles: a.py\nFollow-through: docs/**\nAcceptance:\n- `true`\n' > PLAN_FT.md ) \
+  || { echo "setup failed"; exit 1; }
+approve PLAN_FT.md "$FT" || exit 1
+FAKE_ACTIONS=true $DP 1 --plan PLAN_FT.md --via qwen --model fake/m --no-baseline --repo "$FT" > /dev/null 2>&1
+mkdir -p "$FT/docs" && printf 'n\n' > "$FT/docs/n.md" && printf 'y = 1\n' > "$FT/b.py"
+$DP --drift --plan PLAN_FT.md --repo "$FT" > "$T/out.txt" 2>&1
+has "changed outside Files: b.py" && ! has "docs/n.md" \
+  && ok "a planner edit inside Follow-through: is not outside the phase's scope; one outside both lines still is" \
+  || { bad "drift Follow-through"; tail -2 "$T/out.txt"; }
 python3 "$T/concord/wt.py" fork TD 1 --repo "$D" > /dev/null 2>&1; DF="$D/.claude/worktrees/TD-p1"
 FAKE_ACTIONS=true $DP 1 --plan PLAN_D.md --via qwen --model fake/m --no-baseline --repo "$DF" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 10 ] && has "DRIFT BLOCK" && ok "a run in a wt.py fork is gated by the ticket checkout's drift (exit 10)" \

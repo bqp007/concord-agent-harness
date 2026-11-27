@@ -416,5 +416,32 @@ grep '^OUT OF SCOPE (source):' "$T/out.txt" | grep -q 'b\.py' && grep '^changed 
   || { bad "9 permission-only change not reported"; grep -e '^changed in scope' -e '^OUT OF SCOPE' "$T/out.txt"; }
 fi
 
+if sel 10; then
+echo "== 10 Follow-through: the side-effect files a phase may change; a test the Test plan names still grades the run"
+mkrepo "${BASIC/Files: a.py/Files: a.py
+Follow-through: docs/**}"
+run "echo y >> a.py; mkdir -p docs; echo new > docs/a.md"
+! has "REJECTED" && grep '^changed in scope:' "$T/out.txt" | grep -q 'docs/a\.md' && grep '^follow-through:' "$T/out.txt" | grep -q 'docs/a\.md' \
+  && ok "10 an edit inside Follow-through: is in scope, graded and listed as follow-through" \
+  || { bad "10 follow-through edit"; grep -e '^REJECTED' -e '^changed in scope' -e '^follow-through' -e '^OUT OF SCOPE' "$T/out.txt"; }
+mkrepo '## Test plan
+| Behavior | Existing tests | Action | Home |
+|---|---|---|---|
+| a holds y | none | add | tests/t.sh |
+
+## Phase 1 - change a (P1 <- S1)
+Executor: deepseek-flash
+Risk: low
+Files: a.py
+Follow-through: tests/**
+Acceptance:
+- `sh tests/t.sh`'
+( cd "$R" && mkdir tests && printf 'grep -q y a.py\n' > tests/t.sh && git add tests && git commit -qm test ) || { echo "setup failed: tests/t.sh"; exit 1; }
+run "echo y >> a.py; echo true > tests/t.sh"
+has "REJECTED" && grep '^OUT OF SCOPE (source):' "$T/out.txt" | grep -q 'tests/t\.sh' \
+  && ok "10 a Test plan file that Follow-through: covers stays a grading file: the executor's edit of it is out of scope" \
+  || { bad "10 Follow-through: made a graded test writable"; grep -e '^REJECTED' -e '^changed in scope' -e '^OUT OF SCOPE' "$T/out.txt"; }
+fi
+
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]
