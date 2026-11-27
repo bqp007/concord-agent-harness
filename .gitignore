@@ -4,5 +4,6 @@ PLAN_*.md
 !examples/PLAN_example.md
 .DS_Store
 *.html
+!site/**/*.html
 /paper/
 *.pdf

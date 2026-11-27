@@ -99,7 +99,10 @@ Every FAIL verdict takes a cause with `--cause`. A FAIL recorded without one is 
 | `adapters/claude-code/` | Claude Code, as the `concord` plugin | `/concord:run` (execute or delegate mode), the skills `concord:design-review`, `concord:plan`, `concord:verify-plan`, `concord:lean-testing` and `concord:review-change`, the wrappers `/concord:plan-then-delegate` and `/concord:delegate`, `/concord:rules-review`, and the implementer, verifier and reviewer agents; also four hook rules (`install.sh --repo`), and the CLAUDE.md rules block and settings keys the installer writes |
 | `scripts/demo.sh`, `examples/` | Nowhere | The credential-free demo and its plan |
 | `scripts/figures.py` | Nowhere | Writes the dark twin of each figure, the wordmark and the demo card from its light SVG by swapping every color for its dark token. `--check` fails when a twin is missing, stale or has no light file, or a light SVG uses a color outside the token table. After editing a figure, run `python3 scripts/figures.py --write` |
-| `tests/` | Nowhere | The repository's own checks: `package_test.sh` (scrub, layout, agents, Python, install, style, hygiene, docs) and `demo_test.sh` |
+| `site/` | Nowhere; GitHub Pages serves it | The website: `index.html`, the explainer that plays one ticket's loop step by step, and `map/index.html`, the interactive map of every command, skill, agent and record, which reads its data from `map/data.js` |
+| `scripts/site_map.py` | Nowhere | Builds `site/map/data.js` from the map's nodes, views and edges in the script and from the repository: the front matter of the adapter's commands, skills and agents, and the help text of `concord.py` and `wt.py`. `--check` fails when `data.js` differs from a fresh build, a node's source file is missing, or a command, skill or agent has no node. Run `--write` after changing a command, skill or agent, the help text of `concord.py` or `wt.py`, or the map's nodes |
+| `.github/workflows/pages.yml` | Nowhere | Publishes `site/` to GitHub Pages on each push to `main` that changes `site/` or the workflow, and when run by hand |
+| `tests/` | Nowhere | The repository's own checks: `package_test.sh` (scrub, layout, agents, Python, install, style, hygiene, docs, site) and `demo_test.sh` |
 | `docs/` | Nowhere | Setup, the workflow, this reference, the comparison, the pilot, figures |
 
 ## The four outcomes

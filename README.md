@@ -5,6 +5,7 @@
 
 <p align="center">
   <a href="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml"><img alt="tests" src="https://github.com/bqp007/concord-agent-harness/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://bqp007.github.io/concord-agent-harness/"><img alt="Website" src="https://img.shields.io/badge/Website-explainer%20and%20map-1D4ED8"></a>
   <a href="docs/WORKFLOW.md"><img alt="Docs: workflow" src="https://img.shields.io/badge/Docs-Workflow-6D28D9"></a>
   <a href="#results"><img alt="Case study" src="https://img.shields.io/badge/Case%20study-ten%20days-B45309"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-0F766E"></a>
@@ -23,7 +24,8 @@ Concord is a governance layer for coding agents. It separates three roles that o
 * **Who writes.** A strong model plans and writes tests and small changes; low-cost models write bulky code inside each phase's declared files.
 * **Who judges.** A standard-library Python dispatcher runs the acceptance commands and records verdicts with their causes; a fresh reviewer reads each change at its risk tier.
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig2-loop-dark.svg"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan, grill, verifier, your go, failing tests, implement, check, review, report, your commit." width="760"></picture></p>
+<p align="center"><a href="https://bqp007.github.io/concord-agent-harness/map/"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig2-loop-dark.svg"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan, grill, verifier, your go, failing tests, implement, check, review, report, your commit." width="760"></picture></a></p>
+<p align="center">Online: the <a href="https://bqp007.github.io/concord-agent-harness/">explainer</a> (the loop, step by step) and the <a href="https://bqp007.github.io/concord-agent-harness/map/">interactive map</a> (every command, skill and record).</p>
 
 In its first ten days of daily use, Concord recorded 293 verdicts; 82% of phases given to a low-cost model passed on the first attempt, for US$7.50 of executor spend. This is a case study by one developer, not a controlled experiment.
 
@@ -67,6 +69,8 @@ Of the systems compared, only Concord binds an approval to the exact plan text a
 6. **Report and commit.** The report lists overrides first; you read it and commit.
 
 Details: [docs/WORKFLOW.md](docs/WORKFLOW.md).
+
+<p align="center"><a href="https://bqp007.github.io/concord-agent-harness/map/"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/map-dark.png"><img src="docs/assets/readme/map-light.png" alt="The overview of the interactive Concord map: from your ticket to your commit, the steps of a run, and the skills you can call at any time." width="760"></picture></a></p>
 
 ## Install
 
