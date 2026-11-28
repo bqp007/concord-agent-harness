@@ -131,9 +131,9 @@
     plan: { n: 1, role: 'planner', title: 'Plan', sub: ['phases, Files:, tests', 'or a split plan'], section: 'step-plan',
       tip: 'The planner writes PLAN_<ticket>.md: per phase its executor, risk, files and acceptance commands.' },
     questions: { n: 2, role: 'you', title: 'Questions', sub: ['at most five,', 'each with a default'], section: 'step-questions', you: true,
-      tip: 'At most five blocking questions, each with a default. You answer them or let the defaults stand.' },
+      tip: 'At most five blocking questions, each with a default. You answer them or let the defaults stand; the answers go into the plan.' },
     verifier: { n: 3, role: 'judge', title: 'Verifier', sub: ['an independent agent', 'APPROVE binds the text'], section: 'step-verifier',
-      tip: 'An agent that did not write the plan challenges it. Its APPROVE holds only for the text it read.' },
+      tip: 'An agent that did not write the plan challenges it. Its FIX items send the plan back to the planner; its APPROVE holds only for the text it read.' },
     go: { n: 4, role: 'you', title: 'Your go', sub: ['one go/no-go on', 'lanes, ETA and cuts'], section: 'step-go', you: true,
       tip: 'Your decision on the lanes, the computed ETA and the verifier’s cuts.' },
     tests: { n: 5, role: 'planner', title: 'Tests fail first', sub: ['written in their own run', 'checked red'], section: 'step-tests',
@@ -145,11 +145,11 @@
     check: { n: 7, role: 'disp', title: 'Check', sub: ['acceptance on a copy', 'of the candidate'], section: 'step-check',
       tip: 'The dispatcher runs the acceptance commands on a copy of the candidate and records the results.' },
     review: { n: 8, role: 'judge', title: 'Review', sub: ['tier set by risk', 'fix, then delta review'], section: 'step-review',
-      tip: 'A full review at the risk tier, then a cheap delta review that closes each fixed finding.' },
+      tip: 'A full review at the risk tier, then a cheap delta review that shows which findings the fix closed.' },
     report: { n: 9, role: 'disp', title: 'Report', sub: ['from recorded data', 'overrides first'], section: 'step-report',
       tip: 'The test report, written from recorded data once every run has a verdict. Overrides come first.' },
-    commit: { n: 10, role: 'you', title: 'Your commit', sub: ['you commit and merge', 'Concord never commits'], section: 'step-commit', you: true,
-      tip: 'You commit and merge. Concord never commits, pushes or changes branches in your checkout.' },
+    commit: { n: 10, role: 'you', title: 'Your commit', sub: ['you commit and merge,', 'not the dispatcher'], section: 'step-commit', you: true,
+      tip: 'You commit and merge. Concord never commits to a branch, pushes or changes branches in your checkout.' },
     split: { role: 'planner', title: 'Split plan', sub: ['child tickets, one go', 'each runs this loop'], section: 'step-plan', aux: true,
       tip: 'A ticket whose parts can land and be reviewed apart becomes child tickets, verified and approved once.' },
     redrun: { role: 'stop', title: { delegate: 'Not run · exit 6', execute: 'Baseline warning' }, section: 'step-tests', fail: true,
@@ -171,10 +171,10 @@
       ': Done when, a Test plan, and per phase its executor, ' + chip('Risk:') + ', ' + chip('Files:') + ' and ' + chip('Follow-through:') +
       '. A ticket whose parts can land apart becomes a ' + chip('split plan') + ' of child tickets.',
     questions: '<strong>Questions.</strong> The planner asks at most five blocking questions, each with a default. ' +
-      chip('You', 'you') + ' answer them, or let the defaults stand.',
+      chip('You', 'you') + ' answer them, or let the defaults stand, and the planner writes the answers into the plan before it goes to the verifier.',
     verifier: '<strong>Independent verifier.</strong> ' + chip('plan-verifier', 'judge') +
       ', an agent that did not write the plan, checks its claims against the code. Its ' + chip('APPROVE', 'judge') +
-      ' holds only for the exact text it read; without it, every run exits 11.',
+      ' holds only for the text it read; without it, every run exits 11. Its FIX items go back to the planner, who revises the plan; the verifier then reads the revised text and confirms the fixes.',
     go: '<strong>Your go.</strong> ' + chip('One go/no-go', 'you') +
       ' on the lanes, the computed ETA and the verifier’s cuts. A later change to a phase’s work comes back to you for that phase’s go.',
     tests: '<strong>Tests that fail first.</strong> Tests for each changed behavior are written in their own run, and the planner checks that each one ' +
@@ -193,7 +193,7 @@
     report: '<strong>Report.</strong> ' + chip('--report', 'disp') +
       ' writes the test report from recorded data once every run has a verdict, and closes the plan to new runs. It opens with the ' +
       chip('overrides', 'plain') + '.',
-    commit: '<strong>Your commit.</strong> ' + chip('You commit', 'you') + ' and merge. Concord never commits, pushes or changes branches in your checkout.',
+    commit: '<strong>Your commit.</strong> ' + chip('You commit', 'you') + ' and merge. Concord never commits to a branch, pushes or changes branches in your checkout.',
     redrun: {
       delegate: '<strong>Refused before it starts.</strong> The acceptance already passes before any change, so the test does not test the phase: the dispatcher prints ' +
         chip('NOT RUN', 'stop') + ' and exits 6. Fix the test, or mark the command (characterization).',
@@ -206,8 +206,8 @@
 
   var STEP_LIST = [
     { node: 'plan', via: null, also: ['split'] },
-    { node: 'questions', via: 'e1' },
-    { node: 'verifier', via: 'e2' },
+    { node: 'questions', via: 'e1', loop: true },
+    { node: 'verifier', via: 'e2', loop: true },
     { node: 'go', via: 'e3' },
     { node: 'tests', via: 'e4' },
     { node: 'implement', via: 'e5' },
@@ -218,8 +218,8 @@
   ];
   var FAIL_LIST = [
     { node: 'plan', via: null, also: ['split'] },
-    { node: 'questions', via: 'e1' },
-    { node: 'verifier', via: 'e2' },
+    { node: 'questions', via: 'e1', loop: true },
+    { node: 'verifier', via: 'e2', loop: true },
     { node: 'go', via: 'e3' },
     { node: 'tests', via: 'e4' },
     { node: 'redrun', via: 'f1' },
@@ -231,7 +231,10 @@
     { node: 'commit', via: 'e9' }
   ];
   var EDGE_ROLE = { e1: 'you', e2: 'judge', e3: 'you', e4: 'planner', e5: 'impl', e6: 'disp', e7: 'judge', e8: 'disp', e9: 'you',
-    f1: 'stop', f1b: 'impl', f2: 'stop', f2b: 'disp', loop: 'judge', split: 'planner' };
+    f1: 'stop', f1b: 'impl', f2: 'stop', f2b: 'disp', loop: 'judge', qloop: 'you', vloop: 'judge', split: 'planner' };
+  /* The return arcs and the step during which each one is drawn: the answers go into the plan, the verifier's FIX items send it
+     back to the planner, and confirmed review findings go back to the writer. */
+  var LOOP_AT = { qloop: 'questions', vloop: 'verifier', loop: 'review' };
   var FAIL_EDGES = { f1: 1, f1b: 1, f2: 1, f2b: 1 };
 
   /* Geometry. Nodes are [x, y] with the layout's size, or [x, y, w, h]. Edges are built from the node boxes. */
@@ -248,14 +251,14 @@
 
   var LAYOUTS = {
     wide: {
-      vb: [960, 604], vbPlain: 522, size: [156, 96], fs: { title: 15.5, sub: 12.5, auxTitle: 13.5, auxSub: 11.5 }, badge: { off: 15, r: 10 },
+      vb: [960, 604], vbPlain: 522, top: 52, size: [156, 96], fs: { title: 15.5, sub: 12.5, auxTitle: 13.5, auxSub: 11.5 }, badge: { off: 15, r: 10 },
       nodes: {
         plan: [26, 56], questions: [214, 56], verifier: [402, 56], go: [590, 56], tests: [778, 56],
         implement: [778, 344], check: [590, 344], review: [402, 344], report: [214, 344], commit: [26, 344],
         split: [140, 198, 200, 62], redrun: [596, 198, 214, 62], reject: [700, 530, 234, 62]
       },
       regions: [
-        { x: 10, y: 10, w: 940, h: 162, label: 'BEFORE ANY CODE', note: 'plan, challenge, approve' },
+        { x: 10, y: -42, w: 940, h: 214, lx: 715, label: 'BEFORE ANY CODE', note: 'plan, challenge, approve' },
         { x: 10, y: 300, w: 940, h: 212, label: 'BUILD AND JUDGE', note: 'write, check, review, record' }
       ],
       edges: function (L) {
@@ -272,11 +275,15 @@
           f1b: 'M' + B('redrun').cx + ',' + B('redrun').b + ' C' + B('redrun').cx + ',306 800,296 800,' + (B('implement').y - 3),
           f2: 'M' + B('implement').cx + ',' + B('implement').b + ' V' + (B('reject').y - 3),
           f2b: 'M' + B('reject').x + ',' + B('reject').cy + ' C' + B('check').cx + ',' + B('reject').cy + ' ' + B('check').cx + ',520 ' + B('check').cx + ',' + (B('check').b + 3),
-          loop: 'M536,' + B('review').b + ' C536,494 424,494 424,' + (B('review').b + 3)
+          loop: 'M536,' + B('review').b + ' C536,494 424,494 424,' + (B('review').b + 3),
+          qloop: 'M340,' + B('questions').y + ' C340,18 112,18 112,' + (B('plan').y - 3),
+          vloop: 'M480,' + B('verifier').y + ' C480,-14 78,-14 78,' + (B('plan').y - 3)
         };
       },
       labels: [
         { x: 94, y: 252, text: 'next ticket', anchor: 'end' },
+        { x: 226, y: 49, text: 'answers go into the plan', anchor: 'middle' },
+        { x: 279, y: -5, text: 'FIX items: the planner revises, the verifier reads again', anchor: 'middle' },
         { x: 480, y: 506, text: 'fix, then delta review', anchor: 'middle' },
         { x: 656, y: 548, text: 'clean up, then --grade', anchor: 'end', fail: true }
       ]
@@ -302,7 +309,9 @@
           f1b: 'M' + B('redrun').r + ',' + B('redrun').cy + ' C214,' + B('redrun').cy + ' 244,572 244,' + (B('implement').b + 3),
           f2: vDown(B('implement'), B('reject')),
           f2b: 'M' + B('reject').r + ',' + B('reject').cy + ' C399,' + B('reject').cy + ' 399,' + B('check').cy + ' ' + (B('check').r + 3) + ',' + B('check').cy,
-          loop: 'M' + B('review').x + ',278 C198,278 198,304 ' + (B('review').x - 3) + ',304'
+          loop: 'M' + B('review').x + ',278 C198,278 198,304 ' + (B('review').x - 3) + ',304',
+          qloop: 'M' + B('questions').r + ',178 C200,178 200,108 ' + (B('plan').r + 3) + ',108',
+          vloop: 'M' + B('verifier').r + ',262 C214,262 214,86 ' + (B('plan').r + 3) + ',86'
         };
       },
       labels: [
@@ -336,7 +345,7 @@
     var time = 0, playing = false, lastNow = 0, raf = 0, tween = null, scrubbing = false, endHold = 0;
     var shownIndex = -1;
     var started = false, userPaused = false, autoPaused = false;
-    var nodeEls = {}, progs = {}, token = null, ghost = null, loopProg = null, startPoint = null;
+    var nodeEls = {}, progs = {}, token = null, ghost = null, startPoint = null;
     var hlIds = null, hlTimer = 0;
 
     var TRAVEL = 0.85, DWELL = 4.4;
@@ -401,7 +410,7 @@
       nodeEls = {}; progs = {};
 
       var title = el('title', { id: 'loop-svg-title' }, svg);
-      title.textContent = 'The Concord loop: plan, questions, verifier, your go, tests that fail first, implement, check, review, report, your commit.';
+      title.textContent = 'The Concord loop: plan, questions, verifier (both send the plan back to the planner until it is approved), your go, tests that fail first, implement, check, review, report, your commit.';
 
       var defs = el('defs', null, svg);
       ['base', 'planner', 'exec', 'judge', 'disp', 'you', 'stop'].forEach(function (k) {
@@ -414,7 +423,7 @@
       L.regions.forEach(function (r) {
         var g = el('g', { 'class': 'region' }, gRegions);
         el('rect', { x: r.x, y: r.y, width: r.w, height: r.h, rx: 18 }, g);
-        var t = el('text', { x: r.x + r.w / 2, y: r.y + 26, 'text-anchor': 'middle' }, g);
+        var t = el('text', { x: r.lx || r.x + r.w / 2, y: r.y + 26, 'text-anchor': 'middle' }, g);
         var a = el('tspan', { 'class': 'region-label' }, t);
         a.textContent = r.label;
         var b = el('tspan', { 'class': 'region-note', dx: '10' }, t);
@@ -440,7 +449,6 @@
         var end = p.getPointAtLength(len);
         progs[id] = { el: p, len: len, f: 0, role: role, end: { x: end.x, y: end.y } };
       });
-      loopProg = progs.loop || null;
       if (paths.ret) {
         var tmp = el('path', { d: paths.ret }, svg);
         var rl = tmp.getTotalLength();
@@ -523,7 +531,8 @@
 
     function setViewBox() {
       var L = LAYOUTS[layoutName];
-      svg.setAttribute('viewBox', '0 0 ' + L.vb[0] + ' ' + (showFail ? L.vb[1] : L.vbPlain));
+      var top = L.top || 0;
+      svg.setAttribute('viewBox', '0 ' + (-top) + ' ' + L.vb[0] + ' ' + ((showFail ? L.vb[1] : L.vbPlain) + top));
     }
 
     function syncFailFocus() {
@@ -573,24 +582,27 @@
         var f = j < loc.i ? 1 : (j > loc.i ? 0 : (loc.phase === 'travel' ? (motion ? ease(loc.t) : 1) : 1));
         setProg(s.via, f);
       });
-      Object.keys(progs).forEach(function (id) { if (!used[id] && id !== 'loop' && id !== 'split') setProg(id, 0); });
+      Object.keys(progs).forEach(function (id) { if (!used[id] && !LOOP_AT[id] && id !== 'split') setProg(id, 0); });
 
       var s = steps[loc.i];
-      var reviewIdx = indexOfNode('review');
-      var loopF = 0;
-      if (loc.i > reviewIdx) loopF = 1;
-      else if (loc.i === reviewIdx && loc.phase === 'dwell') loopF = clamp((loc.t - 0.12) / 0.56, 0, 1);
-      setProg('loop', motion ? loopF : (loopF > 0 ? 1 : 0));
+      var ghostAt = null;
+      Object.keys(LOOP_AT).forEach(function (id) {
+        var k = indexOfNode(LOOP_AT[id]), f = 0;
+        if (k < 0) return;
+        if (loc.i > k) f = 1;
+        else if (loc.i === k && loc.phase === 'dwell') f = clamp((loc.t - 0.12) / 0.56, 0, 1);
+        setProg(id, motion ? f : (f > 0 ? 1 : 0));
+        if (progs[id] && motion && loc.i === k && f > 0 && f < 1) ghostAt = pointOn(id, ease(f));
+      });
       setProg('split', loc.i === 0 && loc.phase === 'dwell' ? (motion ? clamp(loc.t / 0.3, 0, 1) : 1) : (loc.i > 0 ? 1 : 0));
 
       var pt = (loc.phase === 'travel' && s.via && motion) ? pointOn(s.via, ease(loc.t)) : restPoint(loc.i);
       if (pt) token.setAttribute('transform', 'translate(' + pt.x.toFixed(2) + ',' + pt.y.toFixed(2) + ')');
       token.style.setProperty('--tc', 'var(--' + roleOf(s.node) + ')');
 
-      if (loopProg && motion && loc.i === reviewIdx && loopF > 0 && loopF < 1) {
-        var gp = pointOn('loop', ease(loopF));
-        ghost.setAttribute('cx', gp.x.toFixed(2));
-        ghost.setAttribute('cy', gp.y.toFixed(2));
+      if (ghostAt) {
+        ghost.setAttribute('cx', ghostAt.x.toFixed(2));
+        ghost.setAttribute('cy', ghostAt.y.toFixed(2));
         ghost.style.visibility = 'visible';
       } else {
         ghost.style.visibility = 'hidden';
@@ -918,13 +930,13 @@
     verifier: { name: 'Plan verifier', def: 'An agent that did not write the plan. It checks the plan against the code and answers CUT, MERGE and FIX items; its APPROVE holds only for the exact text it read.', nodes: ['verifier'] },
     'plan-read': { name: 'Plan read', def: 'The approval-relevant text of the plan, which --lint writes under a name taken from its hash. The verifier reads this file and quotes the hash.', nodes: ['verifier'] },
     go: { name: 'Go/no-go', def: 'Your decision on the lanes, the computed ETA and the verifier’s cuts. The planning session stops for it before the phases run.', nodes: ['go'] },
-    'red-run': { name: 'Red run', def: 'The acceptance commands, run on a copy of the untouched tree before the writer starts. They must fail; a delegated phase whose acceptance already passes is not run (exit 6).', nodes: ['tests', 'redrun'] },
+    'red-run': { name: 'Red run', def: 'The acceptance commands, run on a copy of the untouched tree before the writer starts. They must fail as a test fails: a timeout, a command that cannot run or a signal other than an abort is no red result, and the run’s report warns about it. A delegated phase whose acceptance already passes is not run (exit 6).', nodes: ['tests', 'redrun'] },
     scope: { name: 'Write scope', def: 'A phase’s Files: and Follow-through: lists together. A change outside them rejects the run.', nodes: ['implement', 'reject'] },
     candidate: { name: 'Candidate', def: 'The checkout as the writer left it. The acceptance commands run on a copy of it, and a PASS needs the checkout to still hold it.', nodes: ['check'] },
-    acceptance: { name: 'Acceptance commands', def: 'Fast offline commands listed in each phase. They must fail before the change and pass after it, unless marked (characterization).', nodes: ['tests', 'check'] },
+    acceptance: { name: 'Acceptance commands', def: 'Fast offline commands listed in each phase. They must fail before the change and pass after it; one marked (characterization) may already pass before it, and one marked (fails until …) must still fail as a test after it, until the phase it names.', nodes: ['tests', 'check'] },
     tier: { name: 'Risk tier', def: 'The phase’s Risk: line: low, medium (the default) or high. It decides who reviews the change.', nodes: ['review'] },
-    delta: { name: 'Delta review', def: 'A cheap review of a fix only. It closes each finding it shows fixed; a change it cannot tie to a finding needs a review at its own tier.', nodes: ['review'] },
-    overrides: { name: 'Overrides', def: 'The first section of the test report: each forced PASS beside its failed commands, each waiver and owner go-ahead, each PASS whose phase a later revision changed.', nodes: ['report'] },
+    delta: { name: 'Delta review', def: 'A cheap review of a fix only. At the PR gate the dispatcher closes each finding it shows fixed, and coverage carries over a changed hunk only when the delta ties it to a finding it closed whose scope holds the file; any other change, and a fix that largely rewrites a file, needs a review at its tier. For a phase, the planner judges from it which findings the fix closed.', nodes: ['review'] },
+    overrides: { name: 'Overrides', def: 'The first section of the test report: each forced PASS beside its failed commands while that PASS stands, each PASS with no acceptance command or no change, each waiver and owner go-ahead, each red run skipped or forced over, each unsandboxed run, each PASS over changes outside its Files:, each PASS whose phase a later revision changed, and each file short of the reviews its tier needs.', nodes: ['report'] },
     ledger: { name: 'Ledger', def: 'The record of every run and verdict with its cause (runs.jsonl), and of every review finding.', nodes: ['report'] },
     executor: { name: 'Executor', def: 'The model and harness that write a delegated phase, such as a free DeepSeek Flash model on OpenCode. It reads the shared executor contract first.', nodes: ['implement'] },
     'execute-mode': { name: 'Execute mode', def: '/concord:run execute: the planning session writes every phase inside recorded --begin/--end runs.', nodes: ['implement'] },

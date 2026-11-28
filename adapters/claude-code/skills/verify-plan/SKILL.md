@@ -8,10 +8,10 @@ argument-hint: <plan file>
 
 The planner does not check its own plan. Spawn the `plan-verifier` agent, by the name the Concord rules in CLAUDE.md give it, from a fresh context, on the model the planning session does not use (`fable` or `opus`), with the plan and the facts that the plan does not state. It reads the code the plan touches and answers with one VERDICT block.
 
-A Concord plan (`PLAN_<ticket>.md` in a repository with the dispatcher) is approved for its exact text:
+A Concord plan (`PLAN_<ticket>.md` in a repository with the dispatcher) is approved for the hash of its approval-relevant text:
 - `concord.py --lint <phase> --plan <PLAN> --repo <dir>` for each phase (no model call); fix what its ACCEPTANCE LINT and PLAN LINT lines name. Each lint writes the plan's approval-relevant text to a plan read and prints `PLAN-READ: <path>`: the verifier reads the newest one.
 - One round; a second, on a new plan read, only to confirm your fixes. Apply each item, or reject it with the owner decision that settles it.
-- Save the final answer to a file and record it: `concord.py --plan-verdict <file> --plan <PLAN>`. The approval holds only for the read whose hash the answer quotes. An edit outside the prose of `## Open questions`, `## Handoff` and `## Passes` needs a new read and verdict: until then every run of the plan exits 11, and no owner words (`--user-approved` included) stand in for it.
+- Save the final answer to a file and record it: `concord.py --plan-verdict <file> --plan <PLAN>`; an answer with more than one VERDICT or PLAN-HASH line records nothing (exit 2). The approval holds only for the read whose hash the answer quotes. An edit outside the prose of `## Open questions`, `## Handoff` and `## Passes` needs a new read and verdict: until then every run of the plan exits 11, and no owner words (`--user-approved` included) stand in for it.
 
 Any other plan or spec, a split plan included (its `## Split` table has no phases to lint or run): give the verifier the file itself and record nothing. Each child ticket's plan is then verified on its own.
 
