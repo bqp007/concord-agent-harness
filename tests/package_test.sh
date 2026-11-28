@@ -11,7 +11,8 @@ SCRUB_FILE=${CONCORD_SCRUB_FILE:-$HOME/.config/concord/scrub.txt}
 K=concord; A=adapters/claude-code
 pass=0; fail=0
 # Every temporary folder of a run lives under one root, removed when the run exits.
-TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/pkgtest.XXXXXX") || exit 2
+T0=${TMPDIR:-/tmp}   # macOS sets TMPDIR with a trailing slash; a path with // would not match the installer's normalized one
+TMPROOT=$(mktemp -d "${T0%/}/pkgtest.XXXXXX") || exit 2
 trap 'rm -rf "$TMPROOT"' EXIT
 tmpd() { mktemp -d "$TMPROOT/t.XXXXXX"; }
 check() { local name=$1; shift; local out
