@@ -116,10 +116,13 @@ echo "5. Verdict: record FAIL with cause EXECUTOR, because the change left the d
 out=$(D --verdict "$RUN1" FAIL --cause EXECUTOR --note "edited README.md outside Files" 2>&1); need "the FAIL verdict"
 printf '%s\n' "$out"
 
-# 6. Restore: the dispatcher backs up in-scope files only; the out-of-scope file goes back with git.
+# 6. Restore: the dispatcher backs up in-scope files only; the out-of-scope file goes back with git, so the restore
+# names README.md as not restored and exits 1 (a partial restore).
 echo "6. Restore: revert cart.py from the run's backup and README.md with git."
-out=$(D --restore "$RUN1" 2>&1); need "the restore"
+out=$(D --restore "$RUN1" 2>&1); rc=$?
 printf '%s\n' "$out"
+[ "$rc" = 1 ] && printf '%s\n' "$out" | grep -q '^restored cart.py$' && printf '%s\n' "$out" | grep -q '^NOT restored .*README\.md' ||
+  fail "the restore did not put back cart.py and name README.md as not restored (exit $rc)" "$rc"
 git -C "$W/shop" checkout -- README.md || fail "cannot revert README.md"
 
 # 7. Attempt 2: the same executor edits only cart.py; the red run turns green.
