@@ -1965,11 +1965,17 @@ def build_command(executor, binary, task, contract, model, mode, wall_text, run_
         cmd = sandbox_cmd(cmd, repo, run_dir, conf, args)
     elif executor == "pi":
         # pi loads no models unless it can write its agent folder and its session folder, and Seatbelt allows $TMPDIR
-        # but not the run folder: they live in a temporary folder, and <run>/pi links to the sessions for pi_usage
-        scratch = Path(tempfile.mkdtemp(prefix="concord-pi-"))
-        (agent := scratch / "agent").mkdir()
-        (scratch / "sessions").mkdir()
-        (run_dir / "pi").symlink_to(scratch / "sessions")
+        # but not the run folder: they live in a temporary folder, and <run>/pi links to the sessions for pi_usage. A
+        # second command for the same run (a review's retry) reuses that folder, so pi_usage counts every attempt.
+        link = run_dir / "pi"
+        if link.is_symlink() and link.resolve().is_dir():
+            scratch = link.resolve().parent
+        else:
+            scratch = Path(tempfile.mkdtemp(prefix="concord-pi-"))
+            (scratch / "agent").mkdir()
+            (scratch / "sessions").mkdir()
+            link.symlink_to(scratch / "sessions")
+        agent = scratch / "agent"
         for name in ("models.json", "models-store.json", "settings.json"):      # never auth.json
             if (src := Path.home() / ".pi" / "agent" / name).is_file():
                 shutil.copy2(src, agent / name)
@@ -4341,6 +4347,10 @@ REVIEW_SEVERITIES = ("BLOCKER", "HIGH", "MEDIUM", "NOTE")
 REVIEW_STATUSES = ("PASS", "FAIL", "UNCLEAR")
 REVIEW_DISCRIMINATES = ("yes", "no", "unknown")
 REVIEW_OPEN_STATUSES = ("BLOCKER", "HIGH", "MEDIUM")
+REVIEW_VERDICTS = ("CLEAN", "FIX", "BLOCK")
+# The findings that hold the PR gate until a later review resolves them: the status, the packets' open list, the answers
+# that resolve and the report read this one set. A MEDIUM or a NOTE is recorded and reported, and holds nothing.
+GATE_SEVERITIES = ("BLOCKER", "HIGH", "CLAUSE")
 _NO_REPRO_LABEL = "no reproduction, was "
 
 
@@ -4394,25 +4404,26 @@ def parse_review_json(text):
 
 
 def validate_review(obj):
-    """Schema-check and normalise a review object. Returns (clean dict, []) or (None, [errors]). Unknown keys are
-    ignored; keyword defaults and string coercions are applied here so downstream code sees one shape."""
+    """Schema-check and normalise a review object. Returns (clean dict, []) or (None, [errors]). A complete answer holds
+    the findings, the clauses and the tests as lists (each [] when there is none) and a verdict, as REVIEW.md asks: an
+    object with findings alone answers none of the questions and is no review. Unknown keys are ignored; keyword
+    defaults and string coercions are applied here so downstream code sees one shape."""
     if not isinstance(obj, dict):
         return None, ["review: the top level must be a JSON object"]
     if not isinstance(obj.get("findings"), list):
         return None, ["review: findings must be a list"]
     errors = []
-    clauses_raw = obj.get("clauses", [])
-    tests_raw = obj.get("tests", [])
-    if clauses_raw is None:
-        clauses_raw = []
-    if tests_raw is None:
-        tests_raw = []
+    clauses_raw = obj.get("clauses")
+    tests_raw = obj.get("tests")
     if not isinstance(clauses_raw, list):
-        errors.append("review: clauses must be a list")
+        errors.append("review: clauses must be a list ([] when the task gives no spec)")
         clauses_raw = []
     if not isinstance(tests_raw, list):
-        errors.append("review: tests must be a list")
+        errors.append("review: tests must be a list ([] when the diff touches no test)")
         tests_raw = []
+    verdict = obj.get("verdict")
+    if not isinstance(verdict, str) or verdict.strip().upper() not in REVIEW_VERDICTS:
+        errors.append(f"review: verdict must be one of {', '.join(REVIEW_VERDICTS)}")
     findings = []
     for k, f in enumerate(obj["findings"], 1):
         if not isinstance(f, dict):
@@ -4924,6 +4935,21 @@ def revised_phase_block(meta, run_dir):
             f"<<<REVISED-PHASE-{tok}>>>\n" + live.rstrip()[:POINTER_CAP_CHARS] + f"\n<<<END-REVISED-PHASE-{tok}>>>\n")
 
 
+def unusable_review(errors, verdict="UNPARSED"):
+    """The result of an answer that gives no review: UNPARSED (it does not parse) or FAILED (the review process did not
+    exit 0, whatever it printed). Nothing goes to the ledger, and the verdict is none that counts (REVIEW_VERDICTS)."""
+    return {"ok": False, "errors": errors, "verdict": verdict, "report": f"{verdict}: " + "; ".join(errors) + "\n",
+            "findings": [], "json": None, "counts": {"blockers": 0, "highs": 0, "mediums": 0, "clause_fails": 0},
+            "downgraded": {"outside_diff": 0}, "packet_sha": "", "resolutions": [], "hunks": []}
+
+
+def review_counts(review):
+    """Whether a recorded review answer counts as a review: its verdict parsed. A model review records its exit status
+    (`rc`) and, when its process failed, the verdict FAILED (run_model_review), so a parsed verdict is a completed
+    review; a review recorded by 3.3.0 or earlier, which holds no `rc`, counts as that version counted it."""
+    return review.get("verdict") in REVIEW_VERDICTS
+
+
 def process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, approve_only=False, extra=None):
     """_process_review under the ledger's lock: the ledger is read, extended and written in one critical section."""
     with ledger_lock(root, ledger_key(meta)):
@@ -4938,10 +4964,7 @@ def _process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, app
     ok/errors/findings/verdict/report/json/counts/downgraded and the answer's packet_sha, resolutions and hunks."""
     parsed, errors = parse_review_json(raw_text)
     if parsed is None:
-        return {"ok": False, "errors": errors, "verdict": "UNPARSED",
-                "report": "UNPARSED: " + "; ".join(errors) + "\n", "findings": [],
-                "json": None, "counts": {"blockers": 0, "highs": 0, "mediums": 0, "clause_fails": 0},
-                "downgraded": {"outside_diff": 0}, "packet_sha": "", "resolutions": [], "hunks": []}
+        return unusable_review(errors)
     findings = normalize_findings(parsed["findings"])
     if meta.get("candidate"):           # a phase review: a path inside the copy of the candidate names the file there
         mark = f"/tree-{meta['candidate'][:12]}/"
@@ -4974,21 +4997,20 @@ def _process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, app
             "finding_ids": [f["id"] for f in findings] + [c["id"] for c in fails]}
 
 
-def review_files(repo, meta, deleted=False, live=False):
-    """The files of the run's graded change (start tree to candidate) that are its own: not a concurrent run's (in its
-    Files: and not in this run's) and not what the report classed as generated (cache and build output such as
-    __pycache__, .pytest_cache), so reviewers see the phase's work, not tool debris. `deleted` keeps the files the run
-    deleted (a packet shows them with their diff). `live` (--mutate, which mutates the checkout) and a run without a
-    candidate: the run's changed and created files that still exist."""
+def review_files(repo, meta, live=False, cand=None):
+    """The files of the run's graded change (start tree to candidate, or to `cand`, a stored tree, when given) that are
+    its own: not a concurrent run's (in its Files: and not in this run's) and not what the report classed as generated
+    (cache and build output such as __pycache__, .pytest_cache), so reviewers see the phase's work, not tool debris. A
+    file the run deleted is part of the change: every review shows its diff. `live` (--mutate, which mutates the
+    checkout) and a run without a candidate: the run's changed and created files that still exist."""
     gen = set(meta.get("generated", []))
     if live or not meta.get("candidate"):
         return [f for f in sorted(set(meta.get("changed", []) + meta.get("created", [])))
                 if f not in gen and (repo / f).is_file()]
-    start, cand = stored_trees(repo, meta)
+    start, cand = (meta["start_tree"], cand) if cand else stored_trees(repo, meta)
     files, concurrent = meta["files"], meta.get("concurrent_files") or []
-    gone = set() if deleted else set(tree_paths(repo, start, cand, "D"))
     return [f for f in tree_paths(repo, start, cand)
-            if f not in gen and f not in gone and (in_scope(f, files) or not in_scope(f, concurrent))]
+            if f not in gen and (in_scope(f, files) or not in_scope(f, concurrent))]
 
 
 def stored_trees(repo, meta):
@@ -5030,6 +5052,65 @@ def required_tier_rank(repo, meta):
     if tier and TIER_RANK[tier] > TIER_RANK[required]:
         required = tier
     return TIER_RANK[required]
+
+
+def phase_review_gaps(repo, meta):
+    """The review coverage of a phase run's graded candidate, per file, as report lines ("" prefix: the caller names the
+    phase and run): each file of the graded change needs a review whose reviewer ranks at the phase's tier and that read
+    it, and at high also a review from another model family that read it. A review covers the files it recorded
+    (`files`) less the ones it saw by name only (`binary`) or past the packet's cap (`truncated`); a review recorded by
+    3.3.0 or earlier, which holds no `files`, covers the whole graded change as that version credited it. Only answers
+    that count (review_counts) of the graded candidate are read."""
+    need, graded = required_tier_rank(repo, meta), meta.get("verdict_candidate") or meta.get("candidate")
+    reviews = [r for r in meta.get("reviews") or [] if review_counts(r)]
+    current = [r for r in reviews if r.get("candidate", graded) == graded]
+    earlier = " (its other reviews saw an earlier candidate)" if len(current) < len(reviews) else ""
+    start = meta.get("start_tree")
+    if start and graded and trees_stored(repo, start, graded):
+        files = review_files(repo, meta, cand=graded)
+    else:                                       # the trees are pruned: the files the run recorded
+        gen = set(meta.get("generated") or [])
+        files = sorted({f for key in ("changed", "created", "deleted") for f in meta.get(key) or []} - gen)
+    best, other, unread = {}, set(), {}
+    for r in current:
+        for f in r.get("truncated") or []:
+            unread[f] = "cut at the packet cap"
+        for f in r.get("binary") or []:
+            unread[f] = "binary"
+        for f in set(r["files"] if "files" in r else files) - set(r.get("binary") or []) - set(r.get("truncated") or []):
+            best[f] = max(best.get(f, 0), reviewer_rank(r.get("reviewer")))
+            if other_family(r):
+                other.add(f)
+    if not any(best.get(f) for f in files) and (files or not current):
+        return [f"not reviewed (needs {TIER_NAME[need]})" + earlier
+                + "".join(f"; {f} {why}" for f, why in sorted(unread.items()) if f in files)]
+    below = [f for f in files if best.get(f, 0) < need]
+    if below:
+        return [f"reviewed below its tier: needs {TIER_NAME[need]}: "
+                + ", ".join((f"{f} counts at {TIER_NAME[best[f]]}" if best.get(f) else f"{f} not reviewed")
+                            + (f" ({unread[f]})" if f in unread else "") for f in below) + earlier]
+    missing = [f for f in files if f not in other]
+    if need == TIER_RANK["high"] and missing:
+        return ["high tier: no review from another model family (a flash review beside reviewer-opus55) read "
+                + ", ".join(missing)]
+    return []
+
+
+def review_input(repo, meta, files, cap=REVIEW_DIFF_CAP):
+    """(diff, binary, truncated): the run's graded change of `files` as review_diff gives it, cut at `cap` characters
+    (None: never), the files it shows by name only (binary) and the files the cut leaves partly or wholly unshown. The
+    review record names both kinds, and neither counts as read."""
+    start, cand = stored_trees(repo, meta)
+    parts = [review_diff(repo, meta, [f], cap=None) for f in files]
+    binary = [f for f in files if is_binary_change(repo, start, cand, f)]
+    diff, truncated, used = "".join(parts), [], 0
+    if cap is not None and len(diff) > cap:
+        for f, part in zip(files, parts):
+            if used + len(part) > cap:
+                truncated.append(f)
+            used += len(part)
+        diff = diff[:cap] + f"\n[diff truncated at {cap} characters; read the files for the rest]\n"
+    return diff, binary, truncated
 
 
 def fenced_diff(diff):
@@ -5096,9 +5177,10 @@ def candidate_copy(repo, run_dir, candidate):
 
 
 def review_context(args, repo, root, with_diff=True, packet=False):
-    """Everything a reviewer needs for a reported run: (run_dir, meta_path, meta, files, task). The diff is the run's
-    graded change (review_diff); a run without a graded candidate is refused. `with_diff=False` ends the task before
-    the `Diff:` block so the caller can add its own."""
+    """Everything a reviewer needs for a reported run: (run_dir, meta_path, meta, files, task, unread). The diff is the
+    run's graded change (review_input, deletions included); a run without a graded candidate is refused. `unread` names
+    the files the diff shows by name only (binary) or cuts off at the packet cap (truncated). `with_diff=False` ends the
+    task before the `Diff:` block so the caller can add its own (and `unread` is empty)."""
     run_dir = find_run(root, args.review or args.review_record, want="reported")
     meta_path = run_dir / "meta.json"
     if not meta_path.exists():
@@ -5108,7 +5190,7 @@ def review_context(args, repo, root, with_diff=True, packet=False):
         die(f"{run_dir.name} has no graded candidate to review: "
             + (f"it was rejected; clean up, then concord.py --grade {run_dir.name}" if meta.get("start_tree")
                else "it was recorded before 3.1.0 candidate grading; run the phase again"), code=2)
-    files = review_files(repo, meta, deleted=packet)
+    files = review_files(repo, meta)
     scope = " ".join(f"--{k} {getattr(args, k)}" for k in ("files", "exclude") if getattr(args, k, None))
     if scope:
         files, _ = filter_pr_files(files, args.files, args.exclude)
@@ -5116,6 +5198,7 @@ def review_context(args, repo, root, with_diff=True, packet=False):
             die(f"no changed file matches {scope}", code=2)
     if not files:
         die(f"{run_dir.name} has no reviewable files (changed files are gone or generated); nothing to review")
+    diff, binary, truncated = review_input(repo, meta, files) if with_diff else ("", [], [])
     phase_text = current_phase_text(meta, run_dir)
     ledger = load_ledger(root, ledger_key(meta))
     led_text = ledger_text(ledger)
@@ -5142,8 +5225,8 @@ def review_context(args, repo, root, with_diff=True, packet=False):
             + ledger_block(led_text)
             + ("\nFindings from earlier review rounds, already sent back to the implementer: check that each fix is "
                "right; do not repeat a finding the diff resolves:\n" + "\n".join(prior) + "\n" if prior else "")
-            + (fenced_diff(review_diff(repo, meta, files)) if with_diff else ""))
-    return run_dir, meta_path, meta, files, task
+            + (fenced_diff(diff) if with_diff else ""))
+    return run_dir, meta_path, meta, files, task, {"binary": binary, "truncated": truncated}
 
 
 def record_review(meta_path, meta, entry, fields=None):
@@ -5192,9 +5275,16 @@ def cmd_review_packet(args):
     """Write the review prompt for a Claude reviewer subagent (subscription); no model is called here."""
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
-    run_dir, meta_path, meta, files, task = review_context(args, repo, root, packet=True)
+    run_dir, meta_path, meta, files, task, unread = review_context(args, repo, root, packet=True)
     print_floor_note(repo, meta)
     packet, _sha = write_packet(run_dir, task)
+    with meta_lock(meta_path, meta) as current:     # what the packet showed: its answer covers these files, no others
+        current.setdefault("packets", {})[packet.name] = {"files": files, **unread}
+        write_meta(meta_path, current)
+    if unread["binary"] or unread["truncated"]:
+        print("note: no review covers " + "; ".join(f"{what} {', '.join(unread[what])}" for what in ("binary", "truncated")
+                                                     if unread[what])
+              + (": review those with --files" if unread["truncated"] else ""))
     print(f"PACKET {packet}\nrun {run_dir.name}, files {', '.join(files)}, "
           f"{len(packet.read_text()):,} chars\nnext: spawn the reviewer-opus55 agent, by the name the Concord rules in "
           f"CLAUDE.md give it, with prompt "
@@ -5234,9 +5324,12 @@ def pr_apply_answer(repo, root, meta, run_id, reviewer, result, entry):
     """A PR review's resolutions and hunks. An entry fixed=yes with evidence (no entry of the same answer saying
     otherwise) for a finding the packet listed (its files hold the finding's scope within the diff) is stored beside the
     finding, under the PR's ledger lock; whether it counts is the history rule (pr_finding_resolution). A hunk of a
-    delta is explained only by a finding this answer closes; a file is covered by the delta only when each of its hunks
-    is explained. Stores the closed ids and the explained files on the entry."""
+    delta is explained only by a finding this answer closes and only when the hunk's file lies in that finding's scope
+    (pr_finding_files: its file, the files of the review that raised a clause FAIL, or the whole diff for a path that
+    names no file of it); a file is covered by the delta only when each of its hunks is explained. Stores the closed
+    ids, the explained files and the base branch of the diff identity (pr_valid_entries) on the entry."""
     head, mb, key = meta.get("head"), meta.get("merge_base"), ledger_key(meta)
+    entry["base"] = meta.get("base")
     review_files, diff_files = set(meta.get("files") or []), set(meta.get("pr_files") or [])
     answers = {}
     for r in result.get("resolutions") or []:
@@ -5246,7 +5339,7 @@ def pr_apply_answer(repo, root, meta, run_id, reviewer, result, entry):
         ledger = load_ledger(root, key)
         for f in ledger["findings"]:
             rs = answers.get(f.get("id"))
-            if not rs or f.get("severity") not in ("BLOCKER", "HIGH", "CLAUSE"):
+            if not rs or f.get("severity") not in GATE_SEVERITIES:
                 continue
             if not all(r["fixed"] == "yes" and r["evidence"] for r in rs):
                 continue
@@ -5266,7 +5359,9 @@ def pr_apply_answer(repo, root, meta, run_id, reviewer, result, entry):
         for h in result.get("hunks") or []:
             listed[h["hunk"]] = listed.get(h["hunk"], 0) + 1
             if h["hunk"] in hunks and h["explained_by"] in closed:
-                explained[h["hunk"]] = h["explained_by"]
+                scope = pr_finding_files(pr_with_origin(root, closed[h["explained_by"]]), diff_files)
+                if scope is None or hunks[h["hunk"]]["file"] in scope:      # a fix of a.py explains no hunk of b.py
+                    explained[h["hunk"]] = h["explained_by"]
         for hid, count in listed.items():              # a hunk listed more than once is unexplained
             if count > 1:
                 explained.pop(hid, None)
@@ -5338,6 +5433,8 @@ def cmd_review_record(args):
             entry["tokens"] = int(args.tokens)
         if meta.get("kind") == "pr-review":
             pr_apply_answer(repo, root, meta, run_dir.name, args.reviewer, result, entry)
+        elif packet.name in (meta.get("packets") or {}):    # the files the quoted packet showed (an older packet: none)
+            entry.update({k: list(v) for k, v in meta["packets"][packet.name].items()})
         record_review(meta_path, meta, entry)
     dg = sum(result["downgraded"].values())
     print(f"{run_dir.name}: review by {args.reviewer} recorded: verdict {result['verdict']}, "
@@ -5381,8 +5478,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
                      dry_line, result_line, entry_extra=None, set_meta_review=False, diff_text=None,
                      approve_only=False, work_dir=None):
     """Run a cheap review model read-only on `task`, parse its REVIEW-JSON answer, store the dispatcher verdict on `meta`
-    and print the review. One retry when the answer does not parse (never after a timeout, rc 124): the command is
-    rebuilt from build_command with the task extended, and the retry output goes to output-retry.log (C3/C21).
+    and print the review. An answer counts only when the review process exited 0: the output of a process that failed
+    is kept in its log and never parsed into findings. One retry when the answer does not parse or the process failed
+    (never after a timeout, rc 124): the command is rebuilt from build_command with the task extended, and the retry
+    output goes to output-retry.log (C3/C21). An attempt that ends with no usable answer is recorded on the run with its
+    verdict (FAILED or UNPARSED) and the exit status `rc`, counts as no review, and returns 3 (124 or 125 after a
+    timeout or the watchdog).
     D1: a provider refusal in a failed attempt's log tail is no review: print it, write report.md, record nothing and
     return 9 (the command's exit-code docstring), with no retry.
     work_dir: the folder the model and every retry run in; a PR review passes the head's tree, a phase review the copy
@@ -5404,16 +5505,19 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     pre = snapshot(repo)
     held = contextlib.ExitStack()           # the ledger lock, from the answer that parses until its entry is recorded
 
-    def process(text):                       # the model calls stay outside the lock; the recording of one answer is inside
+    def process(text, rc):                   # the model calls stay outside the lock; the recording of one answer is inside
+        if rc != 0:                          # a failed process gave no review, whatever its output holds
+            return unusable_review([f"the review process exited {rc}"], "FAILED")
         if parse_review_json(text)[0] is not None:
             held.enter_context(ledger_lock(run_dir.parent, ledger_key(meta)))
         return process_review(text, meta, run_dir.parent, repo, reviewer, run_dir.name, diff_text, approve_only,
                               extra=pr_ledger_extra(meta, reviewer))
-    rc, secs = run_process(cmd, env, work_dir, run_dir / "output.log", timeout_s)
-    out = ANSI.sub("", (run_dir / "output.log").read_bytes().decode("utf-8", "replace"))
-    result = process(out)
+    log = run_dir / "output.log"
+    rc, secs = run_process(cmd, env, work_dir, log, timeout_s)
+    out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
+    result = process(out, rc)
     if not result["ok"]:
-        refusals = review_refusals(tail(run_dir / "output.log", 60), executor, rc)
+        refusals = review_refusals(tail(log, 60), executor, rc)
         if refusals:
             refusal_report(run_dir, result, refusals)
             return 9
@@ -5426,7 +5530,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         log = run_dir / f"output-transport{transport_retries}.log"
         rc, secs = run_process(cmd, env, work_dir, log, timeout_s)
         out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
-        result = process(out)
+        result = process(out, rc)
         if not result["ok"]:
             refusals = review_refusals(tail(log, 60), executor, rc)
             if refusals:
@@ -5440,11 +5544,12 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
         cmd, env, combined = build_command(executor, binary, retry_task, styled_review_task(), model, "readonly",
                                            wall, run_dir, conf, repo=repo, args=args)
         (run_dir / "prompt-retry.txt").write_text(combined)            # the prompt artifact of the retry
-        rc, secs = run_process(cmd, env, work_dir, run_dir / "output-retry.log", timeout_s)
-        out = ANSI.sub("", (run_dir / "output-retry.log").read_bytes().decode("utf-8", "replace"))
-        result = process(out)
+        log = run_dir / "output-retry.log"
+        rc, secs = run_process(cmd, env, work_dir, log, timeout_s)
+        out = ANSI.sub("", log.read_bytes().decode("utf-8", "replace"))
+        result = process(out, rc)
         if not result["ok"]:
-            refusals = review_refusals(tail(run_dir / "output-retry.log", 60), executor, rc)
+            refusals = review_refusals(tail(log, 60), executor, rc)
             if refusals:
                 refusal_report(run_dir, result, refusals)
                 return 9
@@ -5466,7 +5571,7 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
              "blockers": counts["blockers"], "highs": counts["highs"], "mediums": counts["mediums"],
              "clause_fails": counts["clause_fails"], "report": str(run_dir / "report.md"),
              "downgraded": result["downgraded"], "finding_ids": result.get("finding_ids", []), "retried": retried,
-             "transport_retries": transport_retries}
+             "transport_retries": transport_retries, "rc": rc}
     if usage and isinstance(usage.get("total"), int):
         entry["tokens"] = usage["total"]
     if meta.get("candidate"):
@@ -5485,6 +5590,9 @@ def run_model_review(args, repo, conf, res, executor, model, binary, task, run_d
     print(result["report"].strip())
     if usage:
         print(usage_line(usage, model))
+    if not result["ok"]:
+        print(f"NO REVIEW: {'; '.join(result['errors'])}; nothing is covered by this attempt (its output: {log})")
+        return rc if rc in (124, RESOURCE_RC) else 3
     print("note: confirm every BLOCKER and HIGH against the diff before failing the phase; a cheap reviewer can be wrong")
     return 0
 
@@ -5495,15 +5603,17 @@ def cmd_review(args, target, conf):
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
     res, executor, model, binary = resolve_review_model(args, conf, target)
-    run_dir, meta_path, meta, files, header = review_context(args, repo, root, with_diff=False)
-    raw_diff = review_diff(repo, meta, files, cap=None)
+    run_dir, meta_path, meta, files, header, _ = review_context(args, repo, root, with_diff=False)
+    raw_diff, unread, _ = review_input(repo, meta, files, cap=None)
     if files and not raw_diff.strip():
         print(f"WARNING: empty diff for {len(files)} file(s)")
     if len(raw_diff) > REVIEW_DIFF_CAP:       # over the cap: refuse, with the file groups; no model call
         parts = {f: review_diff(repo, meta, [f], cap=None) for f in files}
         pr_cap_exit(files, parts, len(raw_diff), subject=f"diff of {run_dir.name}")
+    if unread:
+        print(f"note: no review covers binary {', '.join(unread)}")
     rev_dir = new_run_dir(root, res["name"], meta.get("phase") or 0, prefix="review-")
-    diff_text = review_diff(repo, meta, files)
+    diff_text = raw_diff
     approve_only = meta.get("risk") == "low" and required_tier_rank(repo, meta) == TIER_RANK["low"]
     task = ((APPROVE_ONLY + "\n\n") if approve_only else "") + header + fenced_diff(diff_text)
     print_floor_note(repo, meta)
@@ -5515,6 +5625,7 @@ def cmd_review(args, target, conf):
         result_line=lambda d: (f"REVIEW {d['run']} of {run_dir.name}: {d['name']} -> {d['executor']} {d['model']}  "
                                f"(exit {d['rc']}, {d['secs']}s, verdict {d['verdict']}, "
                                f"blockers {d['blockers']}{', retried' if d.get('retried') else ''})"),
+        entry_extra={"files": files, "binary": unread, "truncated": []},
         set_meta_review=True, diff_text=diff_text, approve_only=approve_only,
         work_dir=candidate_copy(repo, run_dir, meta["candidate"]))
 
@@ -5824,13 +5935,12 @@ def cmd_review_pr(args, target, conf):
     if remote is None:
         die(f"PR {asked}#{n}: no remote of this repository names {asked}, and origin is {remote_slug(repo)} "
             f"(add a remote for {asked}, or run from a clone of it)", code=2)
-    fields = "baseRefName,headRefName,headRefOid,title,body"
+    fields = "baseRefName,headRefName,headRefOid,title,body,state"
     info = gh_pr_view(n, asked, fields, repo)
     base_branch = (info.get("baseRefName") or "").strip()
     head_ref = (info.get("headRefName") or "").strip()
-    gh_head = (info.get("headRefOid") or "").strip()
-    if not base_branch or not gh_head:
-        die(f"gh pr view {n} returned no baseRefName/headRefOid", code=3)
+    if not base_branch:                             # a missing head is an unverified head: settle_pr_head decides (75)
+        die(f"gh pr view {n} returned no baseRefName", code=3)
     slug = asked or remote_slug(repo)
     ref = f"refs/review/pr{n}-{os.getpid()}"
     base = f"refs/review/base{n}-{os.getpid()}"
@@ -5843,24 +5953,45 @@ def cmd_review_pr(args, target, conf):
         if why:
             die(f"PR {n} head {why}: {head_sources(n, gh_head, fetched)}; "
                 "no packet and no review written: run again in a moment", code=HEAD_UNSETTLED)
+        if pr_state(info) != "OPEN":
+            die(f"PR {n} is {pr_state(info)}: a review reads an open pull request; nothing written", code=2)
         base_branch = (info.get("baseRefName") or "").strip() or base_branch
         mb = git(repo, "merge-base", base, head, timeout=PR_TIMEOUT).strip()
         all_files = pr_files_at(repo, mb, head)
+        if not all_files:
+            die(f"PR {n} has no changed file at head {head[:8]} (nothing differs from the merge base {mb[:8]}): "
+                "nothing to review", code=2)
         ranks, runs = pr_attributable_runs(repo, root, mb, head)
         need = pr_needed_tiers(repo, all_files, ranks)
         files, excluded = filter_pr_files(all_files, args.files, args.exclude)
-        if not files:
-            die("no files left after filters (check --files/--exclude)")
         approval = " ".join((args.user_approved or "").split())    # the owner's words: they waive a file only by naming it
         # the owner's words waive an excluded file only by naming it: the path as a whole token, not inside another name
         waived = [p for p in excluded if re.search(r"(?<![A-Za-z0-9_./-])" + re.escape(p)
                                                     + r"(?![A-Za-z0-9_/-])(?!\.[A-Za-z0-9])", approval)]
+        if not files and excluded and waived == excluded:
+            # every file of this call is excluded and named by the owner's words (a binary file can only be waived):
+            # the waiver is recorded for this head, and no review runs
+            tier = TIER_NAME[max(need.get(f, TIER_RANK["medium"]) for f in excluded)]
+            if args.dry_run:
+                print(f"DRY RUN WAIVER: PR {n} head {head[:8]}: {', '.join(waived)} would be excluded by the owner's words")
+                return 0
+            run_dir = pr_run_dir(root, n, head, "waiver")
+            meta = pr_meta(n, slug, base_branch, head, [], excluded, tier, pr_files=all_files, merge_base=mb,
+                           head_ref=head_ref, waived=waived, runs=[m.get("run_id") for m in runs if m.get("run_id")])
+            meta["user_approved"], meta["run_id"] = approval, run_dir.name
+            (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+            print(f"WAIVER {run_dir.name}: PR {n} head {head[:8]}: {', '.join(waived)} excluded by the owner's words; "
+                  "no review ran")
+            return 0
+        if not files:
+            die("no files left after filters (check --files/--exclude; an excluded file is waived only when "
+                "--user-approved names it)")
         parts = pr_diff(repo, base, ref, files)
         diff = "".join(parts[f] for f in files)
         since, delta_files, hunks = None, [], {}
         entries = pr_entries(root, n, slug)
         if args.delta:
-            h0 = pr_delta_base(repo, entries, mb, head)
+            h0 = pr_delta_base(repo, entries, base_branch, mb, head)
             if not h0:
                 die(f"no reviewed ancestor head for PR {n}: run a full review", code=2)
             if run_git(["cat-file", "-e", f"{h0}^{{commit}}"], repo, timeout=PR_TIMEOUT).returncode != 0:
@@ -6149,8 +6280,8 @@ def pr_key(n, slug):
 
 
 def pr_entries(root, n, slug):
-    """Every recorded review of PR n of the repository `slug` that parsed, oldest first, each with its run's diff
-    identity and scope."""
+    """Every recorded review of PR n of the repository `slug` that counts (review_counts), oldest first, each with its
+    run's diff identity and scope."""
     out = []
     for meta_path in sorted(Path(root).glob(f"pr{n}-*/meta.json")):
         try:
@@ -6161,7 +6292,7 @@ def pr_entries(root, n, slug):
                 or str(meta.get("slug") or "").lower() != (slug or "").lower()):
             continue
         for rev in meta.get("reviews") or []:
-            if rev.get("verdict") in ("CLEAN", "FIX", "BLOCK"):
+            if review_counts(rev):
                 out.append({**rev, "meta": meta, "head": meta["head"], "merge_base": meta.get("merge_base"),
                             "run": meta.get("run_id") or meta_path.parent.name,
                             "counted": pr_counted_tier(meta, rev.get("reviewer")),
@@ -6171,49 +6302,56 @@ def pr_entries(root, n, slug):
 
 
 def pr_range_states(repo, mb, head):
-    """(written, deleted). written: {path: {SHA-256 of a version that a commit of the PR (merge base to head; a merge
-    commit adds none) wrote to the path: the set of Git modes it was written with}}; a deletion adds "missing" with no
-    mode. A symlink's version is its target text, the hash file_identity takes of a link. deleted: {path: {SHA-256 of
-    each blob a commit of the PR deleted}}."""
+    """(written, deleted, moves). written: {path: {SHA-256 of a version that a commit of the PR (merge base to head; a
+    merge commit adds none) wrote to the path: the set of Git modes it was written with}}; a deletion adds "missing" with
+    no mode. A symlink's version is its target text, the hash file_identity takes of a link. deleted: {path: {SHA-256 of
+    each blob a commit of the PR deleted}}. moves: {path: {(state before, state after)}}, the transition each such commit
+    made, a state being (SHA-256, Git mode), ("missing", None) where the path is absent and ("other", mode) for an entry
+    that is no file or link (pr_blob_state's states)."""
     res = run_git(["log", "--raw", "--no-renames", "--no-abbrev", "-z", "--format=", f"{mb}..{head}"], repo,
                   timeout=PR_TIMEOUT, text=False)
     if res.returncode != 0:
         die(f"git log {mb[:8]}..{head[:8]} failed: {res.stderr.decode('utf-8', 'replace').strip()}", code=3)
-    states, deleted, blobs = {}, {}, {}
-    tokens, i = res.stdout.split(b"\0"), 0
+    file_modes = ("100644", "100755", "120000")
+    recs, tokens, i = [], res.stdout.split(b"\0"), 0
     while i + 1 < len(tokens):                 # ":<mode> <mode> <sha> <sha> <status>", then the path
         rec = tokens[i].lstrip(b"\n")
         if not rec.startswith(b":"):
             i += 1
             continue
         old_mode, mode, old_sha, sha, status = rec[1:].decode().split()
-        path, i = tokens[i + 1].decode("utf-8", "surrogateescape"), i + 2
+        recs.append((tokens[i + 1].decode("utf-8", "surrogateescape"), old_mode, old_sha, mode, sha, status))
+        i += 2
+    states, deleted, moves = {}, {}, {}
+    shas = list(dict.fromkeys(x for _p, om, osha, m, sha, _s in recs for x, xm in ((osha, om), (sha, m)) if xm in file_modes))
+    digest = {}
+    if shas:
+        try:
+            out = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"], input="".join(f"{x}\n" for x in shas).encode(),
+                                 capture_output=True, timeout=PR_TIMEOUT).stdout
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            die(f"git cat-file --batch failed: {exc}", code=3)
+        pos = 0
+        while pos < len(out):                  # "<sha> blob <size>\n<bytes>\n" per blob
+            nl = out.index(b"\n", pos)
+            sha, _kind, size = out[pos:nl].decode().split()
+            digest[sha] = hashlib.sha256(out[nl + 1:nl + 1 + int(size)]).hexdigest()
+            pos = nl + 1 + int(size) + 1
+
+    def state(mode, sha):
+        if mode == "000000":
+            return ("missing", None)
+        return (digest[sha], mode) if mode in file_modes else ("other", mode)
+    for path, old_mode, old_sha, mode, sha, status in recs:
         if status == "D":
             states.setdefault(path, {})
             states[path]["missing"] = set()
-            if old_mode in ("100644", "100755", "120000"):
-                blobs.setdefault(old_sha, []).append((path, None))
-        elif mode in ("100644", "100755", "120000"):
-            blobs.setdefault(sha, []).append((path, mode))
-    if not blobs:
-        return states, deleted
-    try:
-        out = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"], input="".join(f"{s}\n" for s in blobs).encode(),
-                             capture_output=True, timeout=PR_TIMEOUT).stdout
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        die(f"git cat-file --batch failed: {exc}", code=3)
-    pos = 0
-    while pos < len(out):                      # "<sha> blob <size>\n<bytes>\n" per blob
-        nl = out.index(b"\n", pos)
-        sha, _kind, size = out[pos:nl].decode().split()
-        digest = hashlib.sha256(out[nl + 1:nl + 1 + int(size)]).hexdigest()
-        pos = nl + 1 + int(size) + 1
-        for path, mode in blobs[sha]:
-            if mode is None:
-                deleted.setdefault(path, set()).add(digest)
-            else:
-                states.setdefault(path, {}).setdefault(digest, set()).add(mode)
-    return states, deleted
+            if old_mode in file_modes:
+                deleted.setdefault(path, set()).add(digest[old_sha])
+        elif mode in file_modes:
+            states.setdefault(path, {}).setdefault(digest[sha], set()).add(mode)
+        moves.setdefault(path, set()).add((state(old_mode, old_sha), state(mode, sha)))
+    return states, deleted, moves
 
 
 def pr_attributable_runs(repo, root, mb, head):
@@ -6229,8 +6367,10 @@ def pr_attributable_runs(repo, root, mb, head):
     that changed such a file writes a version the run never left, so the run no longer counts for that file); a run
     whose work is not in the PR's commits gives no tier, whatever branch it ran on. A run counts for the PR when it
     counts for one of its files. A file whose counting runs are all below Risk medium keeps a tier below medium
-    only when pr_runs_cover finds runs that account for its whole change from the merge base to the head; otherwise
-    it is medium (a low run cannot lower the tier of work done before it, after it, or beside it). Returns ({path: highest Risk rank
+    only when pr_runs_cover finds a chain of the PR's own commit transitions from the merge base to the head, each one
+    made exactly by a counting run whose unforced PASS judged that candidate; otherwise it is medium (a low run cannot
+    lower the tier of work done before it, after it, or beside it, nor can a run that failed or whose PASS was forced).
+    Returns ({path: highest Risk rank
     of a run counting for it}, [meta of each run counting for a file])."""
     metas, owner = [], []                      # one entry per state a run left its files in; owner: the run's meta
     for meta_path in sorted(Path(root).glob("*/meta.json")):
@@ -6242,7 +6382,7 @@ def pr_attributable_runs(repo, root, mb, head):
             versions = run_versions(m)
             metas += versions
             owner += [m] * len(versions)
-    states, deleted = pr_range_states(repo, mb, head)
+    states, deleted, moves = pr_range_states(repo, mb, head)
     touched = [{f: (m.get("end_hashes") or {}).get(f) for key in ("changed", "created", "deleted")
                 for f in m.get(key) or []} for m in metas]
 
@@ -6276,7 +6416,8 @@ def pr_attributable_runs(repo, root, mb, head):
             for f in files:
                 ranks[f] = max(ranks.get(f, 0), TIER_RANK.get(m.get("risk"), TIER_RANK["medium"]))
     for f, rank in ranks.items():              # a tier below medium needs the runs to account for the whole change
-        if rank < TIER_RANK["medium"] and not pr_runs_cover(repo, mb, head, f, [metas[i] for i in counts[f]]):
+        if rank < TIER_RANK["medium"] and not pr_runs_cover(repo, mb, head, f, [metas[i] for i in counts[f]
+                                                                                if metas[i].get("_passed")], moves):
             ranks[f] = TIER_RANK["medium"]
     return ranks, runs
 
@@ -6284,15 +6425,20 @@ def pr_attributable_runs(repo, root, mb, head):
 def run_versions(m):
     """A run as each of its graded candidates left its files: the run itself (its end state from the files after the
     run), then one copy of it per regrade that recorded its states (--grade), whose start and end are the start tree
-    and that candidate, so the work a regrade graded counts for the run, at its Risk and with its plan."""
+    and that candidate, so the work a regrade graded counts for the run, at its Risk and with its plan. `_passed` marks
+    the version whose candidate the run's PASS judged (verdict_candidate): the first one when no regrade graded that
+    candidate, else that regrade. A run without a PASS, with a PASS bound to no candidate, or with a forced PASS
+    (`verdict_forced`: the grading did not support it) has no passed version."""
     def kind(mode):
         return "link" if mode == "120000" else "file" if mode in ("100644", "100755") else "other"
-    out = [m]
+    passed = m.get("verdict_candidate") if m.get("verdict") == "PASS" and not m.get("verdict_forced") else None
+    regraded = [g.get("candidate") for g in m.get("graded") or []]
+    out = [dict(m, _passed=bool(passed) and passed not in regraded)]
     for g in m.get("graded") or []:
         if not g.get("states"):
             continue
         v = dict(m, changed=[], created=[], deleted=[], end_hashes={}, end_kinds={}, end_exec={}, backup_hashes={},
-                 start_kinds={}, start_exec={})
+                 start_kinds={}, start_exec={}, _passed=bool(passed) and g.get("candidate") == passed)
         for f, (start, start_mode, end, end_mode) in g["states"].items():
             if start == "missing":
                 v["created"].append(f)
@@ -6326,18 +6472,21 @@ def pr_blob_state(repo, rev, f):
     return hashlib.sha256(blob.stdout).hexdigest(), mode
 
 
-def pr_runs_cover(repo, mb, head, f, metas):
-    """True when the runs that count for file f account for its whole change from the merge base to the head: some
-    sequence of them starts from the file's merge-base state, each next run starts from the end state of the previous
-    one, and the last ends in the head's state. A state is the content hash with the Git mode ("missing" with no mode
-    when the file is absent). A run's start state is its start copy hash with the mode of its start kind and
-    executable bit, or "missing" for a file it created; a run recorded without that kind and bit has no usable start
-    (it never lets a file drop below medium), and a start copy that follows a symlink never matches a link. A run's
-    end state is its end hash with the mode of its end kind and executable bit. Each complete state is visited once."""
+def pr_runs_cover(repo, mb, head, f, metas, moves):
+    """True when the runs that count for file f account for its whole change from the merge base to the head through the
+    PR's own history: a chain of transitions that commits of the PR made (`moves`, pr_range_states) leads from the
+    file's merge-base state to its head state, and each of them is exactly the transition of one of `metas` (the
+    caller passes the runs whose PASS judged that candidate): the run started from the state the commit found and
+    ended in the state the commit wrote. A state is the content hash with the Git mode ("missing" with no mode when
+    the file is absent). A run's start state is its start copy hash with the mode of its start kind and executable bit,
+    or "missing" for a file it created; a run recorded without that kind and bit has no usable start (it never lets a
+    file drop below medium), and a start copy that follows a symlink never matches a link. A run's end state is its end
+    hash with the mode of its end kind and executable bit. A change that a merge commit alone made is no transition, so
+    it keeps the file at medium. Each state is visited once."""
     def mode_of(kind, exe):
         return "120000" if kind == "link" else ("100755" if exe else "100644") if kind == "file" and exe is not None else None
     base, goal = pr_blob_state(repo, mb, f), pr_blob_state(repo, head, f)
-    edges = {}
+    made, edges = moves.get(f, set()), {}
     for m in metas:
         start = (m.get("backup_hashes") or {}).get(f)
         if start is not None:
@@ -6351,8 +6500,9 @@ def pr_runs_cover(repo, mb, head, f, metas):
             continue
         end = (m.get("end_hashes") or {}).get(f)
         if end is not None:
-            edges.setdefault(start, []).append(
-                (end, None if end == "missing" else mode_of((m.get("end_kinds") or {}).get(f), (m.get("end_exec") or {}).get(f))))
+            end = (end, None if end == "missing" else mode_of((m.get("end_kinds") or {}).get(f), (m.get("end_exec") or {}).get(f)))
+            if (start, end) in made:            # a run's transition counts only where a commit of the PR made it
+                edges.setdefault(start, set()).add(end)
     seen, todo = {base}, [base]
     while todo:
         for end in edges.get(todo.pop(), ()):
@@ -6375,19 +6525,18 @@ def pr_needed_tiers(repo, files, ranks):
     return need
 
 
-def pr_finding_listed(f, diff_files, review_files):
-    """True when a review of `review_files` covers the finding's scope. A finding with `scope_all` needs a review of
-    every file of the current diff. Otherwise every file of the scope (the finding's file; the files of the review that
-    recorded a clause FAIL) that is still in the PR diff is among the review's files; a file that left the diff is
-    covered by every review. A scope path resolves against the originating review's file list (`_origin`) first: a path
-    in it is that file; else an a/ or b/ path whose remainder is in it maps to the remainder. Without that list a path
-    in the diff is that file, an a/ or b/ path whose remainder is in the diff maps there (both are needed when the
-    literal path is in the diff too), and any other path needs the whole diff."""
-    diff, review = set(diff_files), set(review_files)
+def pr_finding_files(f, diff_files):
+    """The files of the PR diff that a finding's scope names, or None when it names no file of the diff and so stands for
+    the whole diff (`scope_all`). The scope is the finding's file, or the files of the review that recorded a clause
+    FAIL; a file that left the diff drops out. A scope path resolves against the originating review's file list
+    (`_origin`) first: a path in it is that file; else an a/ or b/ path whose remainder is in it maps to the remainder.
+    Without that list a path in the diff is that file, an a/ or b/ path whose remainder is in the diff maps there (both
+    are kept when the literal path is in the diff too), and any other path stands for the whole diff."""
+    diff = set(diff_files)
     # an entry recorded before `scope_all` stored the diff's files of its head for a path outside the diff: a path
-    # that is not in its own scope needs the whole current diff too
+    # that is not in its own scope stands for the whole current diff too
     if f.get("scope_all") or (f.get("path") and f.get("scope") and f["path"] not in f["scope"]):
-        return diff <= review
+        return None
     scope = f.get("scope") or ([f["path"]] if f.get("path") else [])
     origin, need = set(f.get("_origin") or ()), set()
     for p in scope:
@@ -6397,9 +6546,17 @@ def pr_finding_listed(f, diff_files, review_files):
         else:
             names = [q for q in (p, rest) if q is not None and q in diff] or None
         if names is None:
-            return diff <= review
+            return None
         need |= set(names) & diff
-    return need <= review
+    return need
+
+
+def pr_finding_listed(f, diff_files, review_files):
+    """True when a review of `review_files` covers the finding's scope (pr_finding_files): every file of the scope that
+    is still in the PR diff is among the review's files, and a scope that stands for the whole diff needs every file of
+    the current diff."""
+    names = pr_finding_files(f, diff_files)
+    return (set(diff_files) if names is None else names) <= set(review_files)
 
 
 def pr_finding_resolution(repo, f, head):
@@ -6439,11 +6596,21 @@ def pr_open_findings(repo, root, n, slug, head):
     for the status, the packets and the report. A finding without a head (a 2.4 ledger) takes it from its run's meta, or
     stays open as carried; each is returned with the originating file list (pr_with_origin)."""
     found = [pr_with_origin(root, f) for f in load_ledger(root, pr_key(n, slug))["findings"]
-             if f.get("severity") in ("BLOCKER", "HIGH", "CLAUSE")]
+             if f.get("severity") in GATE_SEVERITIES]
     return [f for f in found if not pr_finding_resolution(repo, f, head)]
 
 
-def pr_coverage(repo, entries, mb, head, other_only=False):
+def pr_valid_entries(repo, entries, base, mb, head):
+    """The reviews whose diff identity holds at `head`: the same base branch (the one the entry records) and merge base,
+    and a head that is `head` or an ancestor of it. A retarget (another base branch, whatever the merge base), a base
+    merge (another merge base), a force-push or a rebase (a head this history does not hold) starts the coverage over.
+    A review recorded by 3.3.0 or earlier holds no base on its entry and keeps that version's identity: merge base and
+    ancestor head."""
+    return [e for e in entries if e["merge_base"] == mb and ("base" not in e or e["base"] == base)
+            and is_ancestor(repo, e["head"], head)]
+
+
+def pr_coverage(repo, entries, base, mb, head, other_only=False):
     """{path: (tier rank, reviewer)} of the files of the PR diff at `head` that a review covers. A file is covered when
     (a) a review of that head read it, or (b) it is covered at an ancestor head and either unchanged since or read by
     a delta review of this head that explained every hunk of it (D15: a delta covers only a file that was covered at its
@@ -6451,7 +6618,7 @@ def pr_coverage(repo, entries, mb, head, other_only=False):
     the coverage of every head (`cov`), so credit never passes through a head where the file was binary. With
     other_only, only the full reviews from another model family (other_family) cover a file; a delta review still
     carries the coverage of its base, whoever ran it."""
-    valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
+    valid = pr_valid_entries(repo, entries, base, mb, head)
     memo = {}
 
     def unchanged(h0, h, path):          # a PR file name is untrusted: a name like `:(top)x` is a file, never pathspec magic
@@ -6509,11 +6676,10 @@ def pr_binary_files(repo, mb, head, files):
     return {f for f in files if is_binary_change(repo, mb, head, f)}
 
 
-def pr_delta_base(repo, entries, mb, head):
-    """The head a delta review reads from: the newest head below this one with a recorded review at this merge base
-    (a head with a full review of its own counts too), else None."""
-    cands = {e["head"] for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)
-             and (e["head"] != head or not e["since"])}
+def pr_delta_base(repo, entries, base, mb, head):
+    """The head a delta review reads from: the newest head below this one with a recorded review whose diff identity
+    holds (pr_valid_entries; a head with a full review of its own counts too), else None."""
+    cands = {e["head"] for e in pr_valid_entries(repo, entries, base, mb, head) if e["head"] != head or not e["since"]}
     return next((h for h in cands if not any(o != h and is_ancestor(repo, h, o) for o in cands)), None)
 
 
@@ -6589,20 +6755,21 @@ def graded_line(repo, root, head):
             f"(phase {newest.get('phase')}), in {differ}")
 
 
-def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
+def print_pr_state(repo, root, n, slug, head, base, mb, files, need, entries):
     """The gate text: one headline (REVIEWED at T, UNREVIEWED, FINDINGS OPEN), the open findings, one line per file of
-    the diff saying which review covers it. Returns the exit code: 0 only for REVIEWED."""
-    valid = [e for e in entries if e["merge_base"] == mb and is_ancestor(repo, e["head"], head)]
-    cover = pr_coverage(repo, entries, mb, head)
+    the diff saying which review covers it or that the owner waived it. Returns the exit code: 0 only for REVIEWED."""
+    valid = pr_valid_entries(repo, entries, base, mb, head)
+    cover = pr_coverage(repo, entries, base, mb, head)
     high = TIER_RANK["high"]
-    other = pr_coverage(repo, entries, mb, head, other_only=True) if high in need.values() else {}
+    other = pr_coverage(repo, entries, base, mb, head, other_only=True) if high in need.values() else {}
 
     def wants(f):                     # what file f still needs, or "" when its reviews cover it
         if f not in cover or cover[f][0] < need[f]:
             return TIER_NAME[need[f]]
         return "a review from another model family" if need[f] == high and f not in other else ""
 
-    waived = sorted({f for e in valid if e["head"] == head for f in (e["meta"].get("waived") or []) if f in files})
+    waived = sorted({f for m in [e["meta"] for e in valid if e["head"] == head] + pr_waiver_metas(root, n, slug, base, mb, head)
+                     for f in (m.get("waived") or []) if f in files})
     open_ = pr_open_findings(repo, root, n, slug, head)
     binary = pr_binary_files(repo, mb, head, [f for f in files if f not in waived])
     uncovered = [f for f in files if f not in waived and (f in binary or wants(f))]
@@ -6621,8 +6788,8 @@ def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
         head_line = f"REVIEWED at {tier}" + (f" WITH OWNER WAIVER: {', '.join(waived)} excluded" if waived else "")
     print(f"CURRENT HEAD {head[:8]}: {head_line}")
     if stale and not valid:
-        print(f"  {stale} earlier review(s) are at another merge base or head and are not credited (merge base "
-              f"{mb[:8]})")
+        print(f"  {stale} earlier review(s) are at another base branch, merge base or head and are not credited (base "
+              f"{base}, merge base {mb[:8]})")
     for f in open_:
         where = "" if f.get("severity") == "CLAUSE" else f" {f.get('path')}:L{f.get('line')}:"
         carried = (f"; carried: its head is not in this history (merge base {str(f.get('merge_base'))[:8]})"
@@ -6641,6 +6808,27 @@ def print_pr_state(repo, root, n, slug, head, mb, files, need, entries):
             print(f"  {f}: needs {wants(f)}")
     print(graded_line(repo, root, head))
     return 0 if not open_ and not uncovered else 1
+
+
+def pr_waiver_metas(root, n, slug, base, mb, head):
+    """The waiver-only records of PR n (cmd_review_pr records one when every file a call would review is excluded and
+    named by the owner's words) at this diff identity: base branch, merge base and head."""
+    out = []
+    for meta_path in sorted(Path(root).glob(f"pr{n}-*/meta.json")):
+        try:
+            m = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (isinstance(m, dict) and m.get("kind") == "pr-review" and m.get("pr") == n and not m.get("files")
+                and m.get("waived") and str(m.get("slug") or "").lower() == (slug or "").lower()
+                and (m.get("base"), m.get("merge_base"), m.get("head")) == (base, mb, head)):
+            out.append(m)
+    return out
+
+
+def pr_state(info):
+    """The PR's state as gh reports it (OPEN, CLOSED or MERGED); a reply without the field reads as OPEN."""
+    return str(info.get("state") or "OPEN").strip().upper()
 
 
 def cmd_pr_status(args):
@@ -6662,11 +6850,14 @@ def cmd_pr_status(args):
     remote = pr_remote(repo, slug) or "origin"
     try:
         current, why, info, gh_head, fetched = settle_pr_head(
-            repo, n, asked, "baseRefName,headRefOid", lambda _i: pr_current_head(repo, n, slug, "status"))
+            repo, n, asked, "baseRefName,headRefOid,state", lambda _i: pr_current_head(repo, n, slug, "status"))
         base_branch = (info.get("baseRefName") or "").strip()
         if why:
             print(f"HEAD {why.upper()}: {head_sources(n, gh_head, fetched)}; no head judged: run again in a moment")
             return HEAD_UNSETTLED
+        if pr_state(info) != "OPEN":
+            print(f"CURRENT HEAD {current[:8]}: NOT OPEN (the PR is {pr_state(info)}; the gate judges an open PR)")
+            return 1
         mb = ""
         if base_branch and fetch_quiet(repo, f"refs/heads/{base_branch}", base_ref, remote):
             res = run_git(["merge-base", base_ref, current], repo, timeout=PR_TIMEOUT)
@@ -6676,8 +6867,12 @@ def cmd_pr_status(args):
                   f"base branch {base_branch or '?'} is not available here)")
             return 1
         files = pr_files_at(repo, mb, current)
+        if not files:
+            print(f"CURRENT HEAD {current[:8]}: NO CHANGES (no file differs from the merge base {mb[:8]}: nothing to review)")
+            return 1
         ranks, _runs = pr_attributable_runs(repo, root, mb, current)
-        return print_pr_state(repo, root, n, slug, current, mb, files, pr_needed_tiers(repo, files, ranks), entries)
+        return print_pr_state(repo, root, n, slug, current, base_branch, mb, files, pr_needed_tiers(repo, files, ranks),
+                              entries)
     finally:
         delete_ref(repo, base_ref)
 
@@ -7415,18 +7610,7 @@ def report_overrides(repo, root, runs, plan_rel, changed):
     for run, phase, meta in last_by_phase.values():
         if meta.get("executor") in (None, ""):
             continue
-        need, graded = required_tier_rank(repo, meta), meta.get("verdict_candidate") or meta.get("candidate")
-        reviews = [r for r in meta.get("reviews") or [] if r.get("verdict") in ("CLEAN", "FIX", "BLOCK")]
-        done = max((reviewer_rank(r.get("reviewer")) for r in reviews if r.get("candidate", graded) == graded), default=0)
-        if done < need:
-            out.append(f"- phase {phase} (run {run}) "
-                       + (f"reviewed below its tier: needs {TIER_NAME[need]}, best review counts at {TIER_NAME[done]}"
-                          if done else f"not reviewed (needs {TIER_NAME[need]})")
-                       + (" (its other reviews saw an earlier candidate)" if len(reviews) > (done > 0) else ""))
-        elif need == TIER_RANK["high"] and not any(other_family(r) for r in reviews
-                                                   if r.get("candidate", graded) == graded):
-            out.append(f"- phase {phase} (run {run}) high tier: no review from another model family (a flash review "
-                       "beside reviewer-opus55)")
+        out += [f"- phase {phase} (run {run}) {_flat(gap)}" for gap in phase_review_gaps(repo, meta)]
     for meta_path in sorted(Path(root).glob("pr*-*/meta.json")):
         try:
             m = json.loads(meta_path.read_text())
@@ -7493,7 +7677,7 @@ def cmd_report(args):
             after = last.get("acceptance_after_rc") or []
             graded = last.get("verdict_candidate") or last.get("candidate")
             seen = [r for r in last.get("reviews") or []
-                    if r.get("verdict") in ("CLEAN", "FIX", "BLOCK") and graded and r.get("candidate", graded) == graded]
+                    if review_counts(r) and graded and r.get("candidate", graded) == graded]
             row = [str(number), _flat(last.get("name") or last.get("executor") or "-"), str(len(metas)),
                    "PASS (phase changed since)" if number in changed else _flat(last.get("verdict") or "-"),
                    f"{sum(1 for r in after if r == 0)}/{len(after)} pass" if after else "-",
@@ -7548,7 +7732,7 @@ def cmd_report(args):
             repo, n, s or None, "headRefOid", lambda _i: pr_current_head(repo, n, s, "report"), fatal=False)
         rnd = lambda h: heads.index(h) + 1 if h in heads else "?"
         for f in by_key[pr_key(n, s)]:
-            if str(f.get("severity") or "").upper() not in ("BLOCKER", "HIGH", "CLAUSE"):
+            if str(f.get("severity") or "").upper() not in GATE_SEVERITIES:
                 continue
             g = pr_with_origin(root, f)             # a copy: the ledger entry `f` stays the key of fixed_ids
             found = f"round {rnd(g.get('head'))}, head {str(g.get('head'))[:8]}, {_flat(f.get('reviewer'))}"
