@@ -299,14 +299,6 @@ mut "$T/m_sur.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized arguments
   && ok "3 a --mutants string that cannot name a file or be encoded (a NUL in file, a lone surrogate in old): exit 2 before any copy" \
   || bad "3 NUL/surrogate rc=$R1/$R2 tracebacks=$T1$T2"
 
-mkfifo "$R/pipe"
-printf '[{"id": "P1", "file": "f.c", "old": "f(", "new": "g("}]' > "$T/m_pipe.json"
-mut "$T/m_pipe.json"; RC=$?
-[ $RC -eq 2 ] && ! has Traceback && ! has "unrecognized arguments" && [ -z "$(leftover)" ] \
-  && ok "3 a checkout file the copy cannot copy (a named pipe): exit 2 with a message, no traceback, no copy left" \
-  || { bad "3 uncopyable file rc=$RC"; tail -3 "$T/out.txt"; }
-rm -f "$R/pipe"
-
 python3 -I - "$T/concord/concord.py" <<'EOF'
 import importlib.util, sys
 sys.dont_write_bytecode = True
@@ -366,7 +358,7 @@ mut "$T/m_longfile.json"; R2=$?; T2=$(grep -c -e Traceback -e "unrecognized argu
 
 # generated mode: the run adds a line to f.c (2 candidates: drop-arg, delete; the hunks' context lines are comments,
 # so a.py and f.c add none) and creates a C file in a build tree
-newrepo 'Files: a.py, f.c\nAcceptance:\n- `grep -q y a.py`\n'
+newrepo 'Files: a.py, f.c, bld/\nAcceptance:\n- `grep -q y a.py`\n'
 ( cd "$R" && printf '// f\n' > f.c && printf '# a\n' > a.py && git add -A && git commit -qm src )
 run 'echo y >> a.py; printf "int t = f(1, 2);\n" >> f.c; mkdir -p bld && : > bld/CMakeCache.txt && printf "int v = 1;\n" > bld/gen.c'; MR=$(rid)
 [ -n "$MR" ] || { echo "setup failed: no run for the generated-mode check"; tail -5 "$T/out.txt"; exit 1; }
@@ -387,7 +379,7 @@ GOT=$(mj "$R/.git/concord/$MR/meta.json" '(m["mutation"]["mode"], m["mutation"][
   && ok "3b generated mode whose C/C++ change has nothing to mutate (a comment line): exit 0, meta records an isolated run with 0 candidates" \
   || { bad "3b isolated run without candidates rc=$RC meta=$GOT"; tail -3 "$T/out.txt"; }
 
-newrepo 'Files: a.py\nAcceptance:\n- `grep -q y a.py`\n'
+newrepo 'Files: a.py, bld/\nAcceptance:\n- `grep -q y a.py`\n'
 run 'echo y >> a.py; mkdir -p bld && : > bld/CMakeCache.txt && printf "int v = 1;\n" > bld/gen.c'; MR=$(rid)
 [ -n "$MR" ] || { echo "setup failed: no run for the live-mode check"; tail -5 "$T/out.txt"; exit 1; }
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?

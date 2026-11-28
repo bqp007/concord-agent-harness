@@ -179,7 +179,7 @@ $DP --mutate "$RID" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; cp "$T/meta.keep" "$
 
 echo "== --mutate --build: the build runs before the unmutated copy is graded"
 newrepo 'Files: lib.py\nAcceptance:\n- `test -f built.flag && python3 -c "import lib; assert lib.clamp(5) == 5"`\n'
-run 'touch built.flag; printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
+run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
 rm -f "$R/built.flag"                                           # a clean checkout: only the build creates it
 $DP --mutate "$RID" --max 4 --build "touch built.flag" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "MUTATION $RID:" && ! has "the unmutated copy fails" \
@@ -188,7 +188,7 @@ $DP --mutate "$RID" --max 4 --build "touch built.flag" --repo "$R" > "$T/out.txt
 
 echo "== --mutate --build: a build that cannot succeed on a clean copy is refused before grading"
 newrepo 'Files: lib.py\nAcceptance:\n- `echo configure >> "$T/alog"; touch config.flag; test -f built.flag`\n'
-run 'touch built.flag; printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
+run 'printf "def clamp(x):\n    if x < 0:\n        return 0\n    return x\n" > lib.py'; RID=$(rid)
 rm -f "$R/built.flag" "$R/config.flag" "$T/alog"
 $DP --mutate "$RID" --max 4 --build "test -f config.flag && touch built.flag" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 2 ] && has "test -f config.flag && touch built.flag" && has "clean copy" && [ ! -e "$T/alog" ] && ! has "MUTATION $RID:" \
