@@ -8270,7 +8270,8 @@ def restore_run(args):
     the run's end state (type, executable bit and content SHA-256 that the run records when it finishes; a symlink
     counts by its target text and is never written through) and the backup still matches its start hash. Any
     other file is listed as not restored and left as it is, so later work is never overwritten; a file that already
-    holds its start state needs nothing. A backup path that resolves outside the repository is refused. Exit 0 when
+    holds its start state needs nothing. A backup path that leaves the repository (absolute, with a `..` part, or
+    resolving outside it) is refused. Exit 0 when
     every path the run touched holds its start state afterwards; exit 1 (partial) when a backed-up file is not
     restored, a change has no backup, a created path is left in place or a deleted file is still missing."""
     repo = repo_root(args.repo or os.getcwd())
@@ -8298,8 +8299,8 @@ def restore_run(args):
     partial = False
     for f in meta.get("backed_up", []):
         dst = repo / f
-        if not (top / f).resolve().is_relative_to(top):
-            print(f"{f}: not restored (its path resolves outside the repository)")
+        if leaves_checkout(f) or not (top / f).resolve().is_relative_to(top):   # a hand-edited record included
+            print(f"{f}: not restored (its path leaves the repository)")
             partial = True
             continue
         if f not in ends or f not in starts or f not in kinds or f not in execs:

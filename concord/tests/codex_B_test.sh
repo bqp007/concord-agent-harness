@@ -239,7 +239,7 @@ printf '# BAD\n' >> "$R/a.py"; $DP --grade "$J1" --repo "$R" > "$T/out.txt" 2>&1
 conf
 fi
 
-if sel K; then echo "== K. --restore: a link is backed up as a link; a partial restore exits non-zero"
+if sel K; then echo "== K. --restore: a link is backed up as a link; a partial restore exits non-zero; a recorded path never leaves the checkout"
 newrepo k1 "$(printf '## Phase 1 - p\nExecutor: deepseek-flash\nRisk: low\nFiles: link.txt\nAcceptance:\n- `test -f link.txt`\n')"
 ( cd "$R" && printf 'outside bytes\n' > target.txt && ln -s target.txt link.txt && git add target.txt link.txt && git commit -qm link ) \
   || { echo "setup failed: link"; exit 1; }
@@ -257,6 +257,19 @@ $DP --restore "$K2" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
   && has "PARTIAL RESTORE of $K2" \
   && ok "K a refused file and a created dangling link left in place: --restore names both and exits 1" \
   || { bad "K partial restore: rc=$RC"; cat "$T/out.txt"; }
+newrepo k3 "$(printf '## Phase 1 - p\nExecutor: deepseek-flash\nRisk: low\nFiles: a.py\nAcceptance:\n- `grep -q 2 a.py`\n')"
+begin 1; K3=$(bid); printf 'x = 2\n' > "$R/a.py"; $DP --end "$K3" --repo "$R" > /dev/null 2>&1
+# a hand-edited record: ../k3/a.py resolves back to a.py, and its "backup" is a planted file outside backup/
+mkdir -p "$RUNS/$K3/k3"; printf 'planted\n' > "$RUNS/$K3/k3/a.py"
+python3 -I -c 'import hashlib, json, sys
+p, planted, f = sys.argv[1], sys.argv[2], "../k3/a.py"; m = json.load(open(p))
+for k in ("end_hashes", "end_kinds", "end_exec", "start_kinds", "start_exec"): m[k][f] = m[k]["a.py"]
+m["backup_hashes"][f] = hashlib.sha256(open(planted, "rb").read()).hexdigest(); m["backed_up"] = [f] + m["backed_up"]
+json.dump(m, open(p, "w"))' "$RUNS/$K3/meta.json" "$RUNS/$K3/k3/a.py"
+$DP --restore "$K3" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
+[ $RC -eq 1 ] && [ "$(cat "$R/a.py")" = "x = 1" ] && has "../k3/a.py: not restored (its path leaves the repository)" \
+  && ok "K a recorded backup path with a .. part is refused even where it resolves inside the checkout (exit 1)" \
+  || { bad "K .. path restored: rc=$RC a.py=$(cat "$R/a.py")"; cat "$T/out.txt"; }
 fi
 
 if sel L; then echo "== L. skipped and forced red runs are Overrides; counts follow the expected result"
