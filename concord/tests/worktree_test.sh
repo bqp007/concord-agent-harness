@@ -98,7 +98,7 @@ touch "$T/release2"; wait $PF; F1=$?
 [ $F5 -eq 2 ] && grep -qF "both list docs/**" "$T/f5.txt" \
   && ok "a run whose Follow-through overlaps the live run's Follow-through is refused, naming the shared pattern (exit 2)" \
   || { bad "follow-through lock rc=$F5"; tail -3 "$T/f5.txt"; }
-[ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 2 lines (+2 -0)" "$T/f1.txt" \
+[ $F1 -eq 0 ] && ! grep -E "^(OUT OF SCOPE|DELETED)" "$T/f1.txt" | grep -qE "b.py|z.py" && grep -q "^diff size: 1 lines (+1 -0)" "$T/f1.txt" \
   && ! grep -q "^REJECTED" "$T/f1.txt" \
   && ok "the long run leaves the concurrent run's b.py, c.py and deleted z.py out of OUT OF SCOPE, DELETED, its diff size and its rejection" \
   || { bad "concurrent scope rc=$F1"; grep -iE "scope|deleted|acceptance|diff size" "$T/f1.txt"; }

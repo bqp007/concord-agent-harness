@@ -828,18 +828,6 @@ def parse_word(phase_text, name, choices, default):
     return word if word in choices else default
 
 
-def count_lines(path):
-    try:
-        if path.is_dir() or path.stat().st_size > 5_000_000:
-            return None
-        data = path.read_bytes()
-        if b"\0" in data[:8192]:
-            return None
-        return data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
-    except OSError:
-        return None
-
-
 def path_matches(path, patterns):
     """Case-insensitive glob match against the full path or its basename."""
     full = path.lower()
@@ -859,15 +847,17 @@ def is_generated(path, globs):
     return any(fnmatch.fnmatch(part, g.lower()) for part in parts for g in globs)
 
 
-def split_out_of_scope(paths, post, globs=GENERATED_GLOBS):
+def split_out_of_scope(paths, post, globs=GENERATED_GLOBS, pre=None):
     """Split out-of-scope paths into (source, generated). Generated = untracked or gitignored AND named like build or
-    cache output (`globs`), or gitignored below a BUILD_GLOBS folder. Tracked files, secrets and credentials always
-    count as source."""
+    cache output (`globs`), or gitignored below a BUILD_GLOBS folder, in each snapshot that lists the path: `post` and,
+    when given, `pre`, so a cache file the run deleted is classed like one it created or rewrote. Tracked files,
+    secrets and credentials always count as source."""
     source, generated = [], []
+    named = lambda status: globs + BUILD_GLOBS if status == "!!" else globs
     for p in paths:
-        status = post.get(p, ["", None])[0]
-        named = globs + BUILD_GLOBS if status == "!!" else globs
-        gen = status in ("!!", "??") and is_generated(p, named) and not path_matches(p, PROTECTED_GLOBS)
+        sides = [snap[p][0] for snap in (pre or {}, post) if p in snap] or [""]
+        gen = not path_matches(p, PROTECTED_GLOBS) and all(
+            status in ("!!", "??") and is_generated(p, named(status)) for status in sides)
         (generated if gen else source).append(p)
     return sorted(source), sorted(generated)
 
@@ -890,6 +880,13 @@ def in_scope(path, files):
         if path == f or path.startswith(f + "/") or fnmatch.fnmatch(path, f):
             return True
     return False
+
+
+def leaves_checkout(path):
+    """Whether a path that a plan declares or a run record holds, read relative to the checkout, would leave it: an
+    absolute path, or one with a `..` part. Such a path is refused where it enters, before a file operation joins it
+    to the checkout, the backup, the pinned grading inputs or a grading copy."""
+    return os.path.isabs(path) or ".." in Path(path).parts
 
 
 def expand_scope(repo, files):
@@ -1220,6 +1217,29 @@ def staged(repo):
     return sorted(p.decode("utf-8", "surrogateescape") for p in res.stdout.split(b"\0") if p)
 
 
+def index_entries(repo):
+    """{path: "<mode> <blob> <stage>"} of every index entry as `git ls-files -s` lists it (the entries of a path in a
+    merge conflict joined by "; "): the index a run's start and end compare entry by entry."""
+    res = run_git(["ls-files", "-s", "-z"], repo, text=False)
+    out = {}
+    for rec in res.stdout.split(b"\0"):
+        entry, tab, name = rec.partition(b"\t")
+        if tab:
+            path = name.decode("utf-8", "surrogateescape")
+            out[path] = f"{out[path]}; {entry.decode()}" if path in out else entry.decode()
+    return out
+
+
+def index_changes(repo, st):
+    """The paths whose index entries (mode, blob, stage) differ from a run's start (`st`, its state or meta), sorted: a
+    path staged, restaged, unstaged or removed from the index, and both ends of a rename, whatever was staged before
+    the run. A state recorded by 3.3.0 or earlier kept only the paths with staged changes, and is compared by those."""
+    if "index_before" not in st:
+        return sorted(set(staged(repo)) - set(st.get("staged_before") or []))
+    before, now = st["index_before"], index_entries(repo)
+    return sorted(p for p in set(before) | set(now) if before.get(p) != now.get(p))
+
+
 def git_internals(repo):
     """sha256 of the git metadata an executor must never touch: config, info/exclude, info/attributes and
     every hook, in the repository's git dir and (for worktrees) the common dir."""
@@ -1249,8 +1269,9 @@ def capture_tree(repo, globs=GENERATED_GLOBS, keep=frozenset()):
     cache output: an untracked path named like it (`globs`, the rule that keeps such output out of OUT OF SCOPE) that is
     no protected file and not in `keep` (a run's own and grading files). So `.gitignore` and the `generated` setting
     declare the writable build output. The tree is built in a temporary index seeded from the real one, without its
-    assume-unchanged bits, which would hide a changed file: the real index and every ref stay as they are, and build
-    output is never read. Raises TreeError when git fails."""
+    assume-unchanged bits and without the skip-worktree bits of files the checkout holds, which would hide a changed
+    file (a skip-worktree path the checkout lacks, as in a sparse checkout, keeps its index entry): the real index and
+    every ref stay as they are, and build output is never read. Raises TreeError when git fails."""
     index = git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index").strip()
     with tempfile.TemporaryDirectory(prefix="concord-tree-") as tmp:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
@@ -1264,9 +1285,13 @@ def capture_tree(repo, globs=GENERATED_GLOBS, keep=frozenset()):
                 raise TreeError(res.stderr.strip() or f"git exited {res.returncode}")
             return res.stdout
 
-        unwatched = [e[2:] for e in run("ls-files", "-v", "-z").split("\0") if e[:1].islower()]
+        listed = run("ls-files", "-v", "-z").split("\0")
+        unwatched = [e[2:] for e in listed if e[:1].islower()]
         if unwatched:
             run("update-index", "--no-assume-unchanged", "-z", "--stdin", stdin="\0".join(unwatched))
+        skipped = [e[2:] for e in listed if e[:1] in "Ss" and os.path.lexists(os.path.join(repo, e[2:]))]
+        if skipped:
+            run("update-index", "--no-skip-worktree", "-z", "--stdin", stdin="\0".join(skipped))
         run("add", "-u", "--", ".", ":(exclude,glob)PLAN_*.md")
         new = [p for p in run("ls-files", "--others", "--exclude-standard", "-z").split("\0")
                if p and not ("/" not in p and fnmatch.fnmatch(p, "PLAN_*.md"))
@@ -1379,7 +1404,7 @@ def grading_links(repo):
                 names += value.split()
     names += [rel for rel, _target in linked_targets(repo)]
     return [(rel, (Path(repo) / rel).resolve()) for rel in dict.fromkeys(n.strip("/") for n in names if n.strip("/"))
-            if (Path(repo) / rel).is_dir()]
+            if not leaves_checkout(rel) and (Path(repo) / rel).is_dir()]
 
 
 def pin_identity(path):
@@ -1430,8 +1455,9 @@ def pins_moved(top, rec):
 def grading_copy(repo, tree, run_dir=None, pins=()):
     """A temporary worktree of the repository that grading commands run in: detached at the checkout's HEAD with
     HEAD's index (a checkout whose work is unstaged), its files `tree`, the folders grading_links names linked in, and
-    the grading inputs the run pinned (`pins`, read from <run_dir>/grading-inputs/) written over their paths. Hooks
-    stay off. What a command writes stays in the copy, which is removed afterwards. Raises TreeError when git fails."""
+    the grading inputs the run pinned (`pins`, read from <run_dir>/grading-inputs/) written over their paths, also
+    inside a linked folder. Hooks stay off. What a command writes stays in the copy, which is removed afterwards.
+    Raises TreeError when git fails or a pinned path leaves the checkout."""
     base, parent = Path(tempfile.gettempdir()).resolve(), None
     if run_dir is not None:              # one path per run, so paths in command output match across its copies
         with contextlib.suppress(OSError):
@@ -1454,10 +1480,22 @@ def grading_copy(repo, tree, run_dir=None, pins=()):
                 (work / rel).parent.mkdir(parents=True, exist_ok=True)
                 os.symlink(target, work / rel)
                 made.append(work / rel)
+        top = work.resolve()
         for f in pins:
+            if leaves_checkout(f):
+                raise TreeError(f"a pinned grading input leaves the checkout: {f}")
             dst = work / f
-            if not dst.parent.resolve().is_relative_to(work.resolve()):
-                continue                 # inside a linked folder: the copy reads the checkout's file, never writes it
+            # Inside a linked folder: each linked folder on the way becomes a folder of the copy whose entries link to
+            # the linked folder's, so the copy holds the pinned bytes and never writes into the linked folder.
+            for k in range(1, len(Path(f).parts)):
+                hop = work.joinpath(*Path(f).parts[:k])
+                if hop.is_symlink() and not hop.resolve().is_relative_to(top):
+                    target = hop.resolve()
+                    hop.unlink()
+                    hop.mkdir()
+                    for entry in sorted(target.iterdir()) if target.is_dir() else []:
+                        os.symlink(entry, hop / entry.name)
+                        made.append(hop / entry.name)
             if dst.is_symlink() or dst.is_file():
                 dst.unlink()
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1508,11 +1546,11 @@ def changed_keys(before, after):
 
 def state_changes(repo, st):
     """What differs from a run's start state besides the checkout's files, each a change that rejects a run: HEAD,
-    the branch, paths staged since the start, git internals, and Concord's and the agent config's files."""
+    the branch, index entries changed since the start, git internals, and Concord's and the agent config's files."""
     head, branch = git(repo, "rev-parse", "HEAD").strip(), branch_of(repo)
     return (([f"HEAD moved {st['head_before'][:10]} -> {head[:10]}"] if head != st["head_before"] else [])
             + ([f"branch changed {st['branch_before']} -> {branch}"] if branch != st["branch_before"] else [])
-            + [f"{p} (staged)" for p in sorted(set(staged(repo)) - set(st.get("staged_before") or []))]
+            + [f"{p} (staged)" for p in index_changes(repo, st)]
             + [f"{x} (git internals)" for x in changed_keys(st.get("git_internals") or {}, git_internals(repo))]
             + [f"{x} (outside the checkout)" for x in
                (changed_keys(st["outside"], outside_files(repo)) if "outside" in st else [])])
@@ -1526,6 +1564,50 @@ def in_write_scope(rec, path):
     if rec.get("executor") == "planner":
         return in_scope(path, [*rec["files"], rec["plan"], *rec["grading_files"]])
     return in_scope(path, rec["files"]) and path not in rec["grading_files"] and path != rec["plan"]
+
+
+def scope_ignored(st, snap):
+    """{path: snapshot entry} of the gitignored files a snapshot (`snap`) holds in a run's write scope (`st`, its state)
+    that are not build or cache output: part of the run's change that no tree holds."""
+    ignored = [p for p, entry in snap.items() if entry[0] == "!!" and in_write_scope(st, p)]
+    globs = tuple(st.get("generated_globs") or GENERATED_GLOBS)
+    return {p: snap[p] for p in split_out_of_scope(ignored, snap, globs, st["pre"])[0]}
+
+
+def graded_state(repo, st, snap):
+    """What a verdict holds the checkout of a run to besides its tree and its plan (state_problems): the permission bits
+    of the tracked files and the gitignored files that are not build or cache output (`snap`, a snapshot taken now) in
+    the run's write scope (`st`, its state), as they are when the run is graded."""
+    return {"modes_after": {p: mode for p, mode in tracked_modes(repo).items() if in_write_scope(st, p)},
+            "ignored_after": scope_ignored(st, snap)}
+
+
+def state_problems(repo, st, meta, graded=False):
+    """What differs from the state a run is graded in besides its tree, by the rules that reject a run at its end
+    (finish_run), against its start (`st`, its state): HEAD, the branch, the index, git internals and the files outside
+    the checkout (state_changes), the plan of a run that may not write it, and the permission bits of the tracked files
+    outside its write scope. With `graded` (a verdict), also against the grade (`meta`, its meta): the plan, and in the
+    write scope the permission bits of the tracked files and the gitignored files that are not build or cache output,
+    which no tree holds (a meta recorded by 3.3.0 or earlier has no such record, so these are not compared). A file of
+    a run that held the lock beside this one is that run's. Not compared: a gitignored file outside the write scope
+    that changed after the run (no grading copy reads it, and the session's own tools write such files), and the
+    linked folders (every checkout that shares one writes there)."""
+    skip, plan = beside(meta), Path(repo) / st["plan"]
+    out = state_changes(repo, st)
+    if graded and file_hash(plan) != meta["plan_hash_after"]:
+        out.append(f"{st['plan']} (the plan changed since the run was graded)")
+    elif not graded and not in_write_scope(st, st["plan"]) and file_hash(plan) != st["plan_hash"]:
+        out.append(f"{st['plan']} (the plan changed since the run started)")
+    if st.get("modes_before") is not None:
+        ref = {p: mode for p, mode in st["modes_before"].items() if not in_write_scope(st, p)}
+        ref.update((meta.get("modes_after") or {}) if graded else {})
+        out += [f"{p} (permission bits changed)" for p in mode_changes(repo, ref) if not skip(p)]
+    after = meta.get("ignored_after") if graded else None
+    if after is not None:
+        now = snapshot(repo, st["track_ignored"])
+        out += [f"{p} (gitignored file changed)" for p in sorted(set(scope_ignored(st, now)) | set(after))
+                if after.get(p) != now.get(p) and not skip(p)]
+    return out
 
 
 def outside_files(repo):
@@ -1633,17 +1715,19 @@ def changed_since(root, since, globs=LINK_NOISE_GLOBS, cap=200_000):
     return out + [f"... (scan capped at {cap} entries)"] if capped else out
 
 
-def numstat(repo, paths):
-    """Line counts against HEAD, so staged edits (`git add`) are counted like unstaged ones."""
-    if not paths:
-        return {}
-    res = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs", "diff", "HEAD", "--numstat", "--", *paths],
-                         capture_output=True, text=True)
+def tree_numstat(repo, old, new):
+    """{path: (added, removed)} for each file that differs between two trees, (None, None) for a binary file: read
+    NUL-delimited with renames off, so a created file counts its lines as added and a deleted one as removed. Raises
+    TreeError when git fails."""
+    res = run_git(["diff-tree", "-r", "--numstat", "-z", "--no-renames", old, new], repo, text=False)
+    if res.returncode != 0:
+        raise TreeError(res.stderr.decode(errors="replace").strip() or f"git diff-tree exited {res.returncode}")
     stats = {}
-    for line in res.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3:
-            stats[parts[2]] = "binary" if parts[0] == "-" else f"+{parts[0]} -{parts[1]}"
+    for rec in res.stdout.split(b"\0"):
+        cols = rec.split(b"\t", 2)
+        if len(cols) == 3:
+            stats[cols[2].decode("utf-8", "surrogateescape")] = \
+                (None, None) if cols[0] == b"-" else (int(cols[0]), int(cols[1]))
     return stats
 
 
@@ -2265,12 +2349,16 @@ def acceptance_list(repo, plan_text, files):
 
 def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, track_ignored, notes,
                 executor="", model="", name="", conf=None, do_baseline=True, *, revision):
-    """Back up in-scope files, record plan hash, branch and HEAD, take the start tree and pin the grading files, run
-    the baseline (red run), characterization and static checks on a grading copy of the start tree, then take the
-    pre-run snapshot last."""
+    """Refuse a declared path that leaves the checkout, back up in-scope files, record plan hash, take the start tree,
+    pin the grading files and take the start state (the snapshot, permission bits, index, HEAD, branch, git internals
+    and outside files), then run the baseline (red run), characterization and static checks on a grading copy of the
+    start tree, so what they change in the checkout counts as the run's change."""
     conf = conf or {}
     own, follow = parse_scope(phase_text)
     files = own + follow
+    grading = acceptance_list(repo, plan_text(plan), own)
+    if outside := [p for p in files + grading if leaves_checkout(p)]:
+        die("a path the plan declares must stay inside the checkout (relative, with no `..` part): " + ", ".join(outside))
     acceptance = parse_acceptance(phase_text)
     risk = parse_word(phase_text, "Risk", ("low", "medium", "high"), "medium")
     baseline_mode = parse_word(phase_text, "Baseline", ("fail", "pass", "skip"), "fail")
@@ -2293,15 +2381,18 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         backup_hashes[f] = file_hash(dst)
     (run_dir / "plan.snapshot.md").write_text(revision["text"] + "\n")     # the verified approved text (plan_gates)
     (run_dir / "phase.md").write_text(phase_text + "\n")
-    # The start tree is taken and the grading files are pinned first; the red run, the characterization and the static
-    # checks then run on a grading copy of that tree, so nothing they write reaches the checkout or the tree.
-    grading = acceptance_list(repo, plan_text(plan), own)
+    # The start tree, the pinned grading files and the start state are taken first; the red run, the characterization
+    # and the static checks then run on a grading copy of that tree, and a change they make in the checkout (a command
+    # that writes through an absolute path or the shared git metadata) is a change of the run.
     keep = sorted(set(to_back_up) | set(grading))           # in-scope files and graders stay in the tree, build-named or not
     try:
         start_tree = capture_tree(repo, tuple(generated_globs(conf)), frozenset(keep))
     except TreeError as exc:
         die(f"cannot capture the checkout's tree before the run: {exc}")
     pins, pin_execs = pin_grading_inputs(repo, run_dir, grading, start_tree)
+    start = {"head_before": git(repo, "rev-parse", "HEAD").strip(), "branch_before": branch_of(repo),
+             "index_before": index_entries(repo), "git_internals": git_internals(repo), "outside": outside_files(repo),
+             "pre": snapshot(repo, track_ignored), "modes_before": tracked_modes(repo)}
     static_on = conf_flag(conf, "static_checks", True)
     runner = static_runner(repo, to_back_up, conf) if static_on else None
     red_run = bool(do_baseline and baseline_mode != "skip" and acceptance and conf_flag(conf, "baseline", True))
@@ -2353,13 +2444,10 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
         "characterize": char_cmds, "check_timeout": timeout_s,
-        "pid": os.getpid(), "track_ignored": track_ignored, "head_before": git(repo, "rev-parse", "HEAD").strip(),
-        "branch_before": branch_of(repo), "origin_branch": origin_branch, "origin_head": origin_head,
-        "staged_before": staged(repo), "git_internals": git_internals(repo),
+        "pid": os.getpid(), "track_ignored": track_ignored, **start,
+        "origin_branch": origin_branch, "origin_head": origin_head,
         "generated_globs": list(generated_globs(conf)), "static_on": static_on, "static_pre": static_pre,
-        "started": time.time(), "outside": outside_files(repo), "start_tree": start_tree, "tree_keep": keep,
-        "pre": snapshot(repo, track_ignored),
-        "modes_before": tracked_modes(repo),
+        "started": time.time(), "start_tree": start_tree, "tree_keep": keep,
     }
     write_state(run_dir, state)
     return state
@@ -2620,11 +2708,16 @@ def finish_run(run_dir, rc, secs=None, st=None):
     # grading files, the tests that grade the phase): a change outside it, like the other changes listed below, rejects
     # the run.
     touched = changed + created
-    stats = numstat(repo, [p for p in changed if post.get(p, ["??"])[0] not in ("??", "!!")])
     scope_in = [p for p in touched if in_write_scope(st, p)]
     scope_out = [p for p in touched if not in_write_scope(st, p)]
-    source_oos, generated = split_out_of_scope(scope_out, post, tuple(st.get("generated_globs") or GENERATED_GLOBS))
-    staged_new = sorted(set(staged(repo)) - set(st.get("staged_before") or []))
+    # Build and cache output by one rule on both sides of the run (the snapshot before and after it): a cache file the
+    # run deleted counts no more than one it created or rewrote, so it leaves DELETED for the generated line.
+    globs = tuple(st.get("generated_globs") or GENERATED_GLOBS)
+    source_oos, generated = split_out_of_scope(scope_out, post, globs, pre)
+    gone_oos, gone_generated = split_out_of_scope([p for p in deleted if not in_write_scope(st, p)], post, globs, pre)
+    deleted = [p for p in deleted if p not in gone_generated]
+    generated = sorted(generated + gone_generated)
+    staged_new = index_changes(repo, st)
     internals_changed = changed_keys(st.get("git_internals") or {}, git_internals(repo))
     # Changes outside the checkout the snapshot sees: Concord, the Claude/OpenCode config, the main checkout's
     # rule files and the folders wt.py linked into this worktree (which writes go straight through). A state
@@ -2640,21 +2733,13 @@ def finish_run(run_dir, rc, secs=None, st=None):
         if capped:
             outside_changed.append(f"{rel}/ (linked folder: scan capped, rest not checked)")
 
-    # Diff size: tracked changes via numstat plus the line count of new text files.
-    added = removed = 0
-    for p in changed:
-        m = re.fullmatch(r"\+(\d+) -(\d+)", stats.get(p, ""))
-        if m:
-            added, removed = added + int(m.group(1)), removed + int(m.group(2))
-    for p in created:
-        if p not in generated:        # build/cache output is not the executor's diff
-            added += count_lines(repo / p) or 0
-    diff_lines = added + removed
-    dirty_before = [p for p in changed if p in pre]
     # Rejection: a run that changed anything outside its write scope is not graded. No post-run command runs for it
-    # and it has no candidate, so PASS is impossible until the planner restores or cleans up and runs --grade.
+    # and it has no candidate, so PASS is impossible until the planner restores or cleans up and runs --grade. The
+    # plan counts even where no snapshot sees it (an ignored plan with ignored files untracked).
     rejected = ([f"{p} (out of scope)" for p in source_oos]
-                + [f"{p} (deleted)" for p in deleted if not in_write_scope(st, p)]
+                + [f"{p} (deleted)" for p in gone_oos]
+                + ([f"{st['plan']} (plan modified)"] if plan_modified and not in_write_scope(st, st["plan"])
+                   and st["plan"] not in source_oos else [])
                 + [f"{p} (staged)" for p in staged_new]
                 + [f"{x} (git internals)" for x in internals_changed]
                 + [f"{x} (outside the checkout)" for x in outside_changed]
@@ -2663,16 +2748,25 @@ def finish_run(run_dir, rc, secs=None, st=None):
     # The candidate: the checkout as the executor left it. Every post-run command is watched; a command that
     # changes the tree refuses PASS, because the acceptance results would not describe the candidate.
     rule = {**st, "tree_keep": sorted(set(st["tree_keep"]) | set(scope_in)), "concurrent_files": concurrent}
-    candidate = None
-    if not rejected:
-        try:
-            candidate = graded_tree(repo, rule)
-        except TreeError as exc:
+    candidate, end_tree = None, None
+    try:                # a rejected run's tree too: it measures the run's size
+        end_tree = graded_tree(repo, rule)
+    except TreeError as exc:
+        if not rejected:
             rejected.append(f"the tree could not be captured ({exc})")
-    if candidate:       # the trees also see a change that git status misses (an assume-unchanged file)
-        rejected += [f"{p} (out of scope)" for p in tree_paths(repo, st["start_tree"], candidate)
+    if end_tree and not rejected:       # the trees also see a change that git status misses (an assume-unchanged file)
+        rejected += [f"{p} (out of scope)" for p in tree_paths(repo, st["start_tree"], end_tree)
                      if not in_write_scope(st, p) and (in_scope(p, files) or not in_scope(p, concurrent))]
-        candidate = None if rejected else candidate
+        candidate = None if rejected else end_tree
+    # Diff size: the run's change from the start tree to the tree it left (its candidate), the added and removed lines
+    # of each text file it changed, created or deleted, a concurrent run's files aside as in the lists above; no tree
+    # holds an ignored file or build output, so neither counts.
+    numbers = {p: n for p, n in tree_numstat(repo, st["start_tree"], end_tree).items()
+               if in_scope(p, files) or not in_scope(p, concurrent)} if end_tree else {}
+    stats = {p: "binary" if a is None else f"+{a} -{r}" for p, (a, r) in numbers.items()}
+    added, removed = sum(a or 0 for a, _r in numbers.values()), sum(r or 0 for _a, r in numbers.values())
+    diff_lines = added + removed if end_tree else None
+    graded = graded_state(repo, st, post)        # what a verdict holds the checkout to besides the tree and the plan
     static_line, static_new, char_line, acceptance_after_rc, acceptance_after_line, grading_changed = \
         post_run_checks(run_dir, st, rule, candidate, touched, generated, rc) if candidate else ("", {}, "", [], "", [])
     # Tokens and cost: exact from OpenCode's store or pi's session files, else a heuristic read of the harness output.
@@ -2741,10 +2835,8 @@ def finish_run(run_dir, rc, secs=None, st=None):
         lines.append(f"HEAD MOVED: {st['head_before'][:10]} -> {head_after[:10]} (executor committed or reset)")
     if branch_after != st["branch_before"]:
         lines.append(f"BRANCH CHANGED: {st['branch_before']} -> {branch_after}")
-    size = f"diff size: {diff_lines} lines (+{added} -{removed})"
-    if dirty_before:
-        size += f"; includes earlier uncommitted changes in {len(dirty_before)} file(s)"
-    lines.append(size)
+    lines.append(f"diff size: {diff_lines} lines (+{added} -{removed})" if end_tree else
+                 "diff size: not measured (the tree could not be captured)")
     if char_line:
         lines.append(char_line)
     if static_line:
@@ -2853,7 +2945,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "user_approved": [n for n in st.get("notes") or [] if str(n).startswith("user approved")],
         "characterization": char_line or None, "staged": staged_new, "git_internals_changed": internals_changed,
         "sandbox": sandbox_state,
-        "plan_hash_after": file_hash(plan), "executor_tokens": exec_tokens,
+        "plan_hash_after": file_hash(plan), **graded, "executor_tokens": exec_tokens,
         "ticket": st.get("ticket"), "revision": st.get("revision"), "revision_hash": st.get("revision_hash"),
         "executor_cache_read": usage["cache_read"] if usage else None, "static_new": static_new,
         "executor_cost": usage["cost_usd"] if usage else None, "usage": usage,
@@ -3066,16 +3158,24 @@ def revision_text(revision, live):
 
 
 def drift_measure(repo, base, plan_rel):
-    """{path: inserted lines} since `base`: tracked changes and untracked files (not ignored ones), the plan excluded."""
+    """{path: [inserted lines, content]} since `base`: tracked changes and untracked files (not ignored ones), the plan
+    excluded. The content is the file's SHA-256 (its size and mtime above 1 MB, "missing" for a deleted file), so a
+    file whose text changed at the same line count differs from an earlier measure."""
+    def content(path):
+        try:
+            st = path.stat()
+        except OSError:
+            return "missing"
+        return file_hash(path) if st.st_size < 1_000_000 else f"{st.st_size} {st.st_mtime_ns}"
     out = {}
     for rec in run_git(["diff", "--numstat", "-z", "--no-renames", base], repo).stdout.split("\0"):   # -z: raw paths
         cols = rec.split("\t")
         if len(cols) == 3:
-            out[cols[2]] = int(cols[0]) if cols[0].isdigit() else 0
+            out[cols[2]] = [int(cols[0]) if cols[0].isdigit() else 0, content(Path(repo) / cols[2])]
     for name in filter(None, run_git(["ls-files", "-z", "--others", "--exclude-standard"], repo).stdout.split("\0")):
         path = Path(repo) / name
         with contextlib.suppress(OSError):
-            out[name] = path.read_bytes().count(b"\n") if path.stat().st_size < 1_000_000 else 0
+            out[name] = [path.read_bytes().count(b"\n") if path.stat().st_size < 1_000_000 else 0, content(path)]
     out.pop(plan_rel, None)
     return out
 
@@ -3140,7 +3240,11 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         entry["last"] = now
         pre = entry.get("pre") or {}
         measure = drift_measure(checkout, drift_base(checkout, entry["base"]), plan_rel)
-        changed = {n: max(v - pre.get(n, 0), 0) for n, v in measure.items() if n not in pre or v != pre[n]}
+        # A file changed since the clock started when its content differs (a clock started by 3.3.0 or earlier kept
+        # inserted lines alone, and compares those); it adds the lines inserted beyond the clock's start.
+        was = lambda n: pre[n] if isinstance(pre[n], list) else [pre[n], None]
+        changed = {n: max(v[0] - was(n)[0], 0) if n in pre else v[0] for n, v in measure.items()
+                   if n not in pre or (v != pre[n] if isinstance(pre[n], list) else v[0] != pre[n])}
         files = [f for h in PHASE_HEAD.finditer(basis) if phase_key(h.group(2)) is not None   # every heading level
                  for f in parse_files(extract_phase(basis, h.group(2)))]
         outside = sorted(n for n in changed if not in_scope(n, files))
@@ -6582,10 +6686,13 @@ def cmd_abort(args):
     return 0
 
 
-def candidate_problems(repo, meta):
+def candidate_problems(repo, meta, run_dir):
     """What keeps a run with a start tree from PASS: it was rejected or has no candidate, a post-run command changed the
     tree, the checkout's tree is no longer the candidate (a file of a run that held the lock beside this one aside),
-    or a grading file no longer holds the content or the executable bit the run pinned when it started."""
+    a grading file no longer holds the content or the executable bit the run pinned when it started, or the checkout
+    the run was made in differs from the state the run was graded in besides its tree (state_problems, against its
+    state in `run_dir`; the checkout that holds the change of a fork that wt.py join removed is measured by its tree
+    and the pinned grading files alone)."""
     out = []
     if meta.get("rejected"):
         out.append("the run was rejected and not graded (" + "; ".join(meta["rejected"]) + ")")
@@ -6613,6 +6720,10 @@ def candidate_problems(repo, meta):
         out.append("grading files no longer hold the content or the executable bit the run was graded with ("
                    + ", ".join(moved) + "): a run is graded by the tests it started with; after changing them, run "
                    "the phase again")
+    made_here = str(meta.get("repo") or "") == str(repo)      # a fork wt.py join removed: its start state is not here
+    if made_here and (moved := state_problems(repo, json.loads((run_dir / "state.json").read_text()), meta, True)):
+        out.append("the checkout differs from the state the run was graded in besides its tree (" + "; ".join(moved)
+                   + "): restore that state, or grade the current checkout")
     return out
 
 
@@ -6640,7 +6751,7 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
             problems = acceptance_problems(meta, meta.get("acceptance_after_rc") or [])
             expect = meta.get("acceptance_expect") or []
             needs_note = "red" in expect[:len(meta.get("acceptance") or [])] and not (note or "").strip()
-            problems += (candidate_problems(repo, meta) if meta.get("start_tree") else
+            problems += (candidate_problems(repo, meta, run_dir) if meta.get("start_tree") else
                          ["the run was recorded before 3.1.0 candidate grading: run the phase again (concord.py PHASE "
                           "--plan PLAN, or --begin and --end for a session run)"])
         forced = bool(problems or needs_note) and verdict == "PASS"
@@ -6881,9 +6992,11 @@ def cmd_fork_graded(args):
 def cmd_grade(args):
     """Grade the current checkout for a reported run that has a start tree: refuse when the run wrote through a linked
     folder, the tree differs from the start tree outside the run's write scope, the checkout differs from the run's
-    start state in a way that rejects a run (state_changes), or an ignored file that rejected the run (no tree holds
-    it) differs from the start, else take it as the new candidate and run the run's recorded acceptance
-    commands on it, watching the tree after each one. The earlier acceptance.after.txt is kept as
+    start state in a way that rejects a run (state_problems: HEAD, the branch, the index, git internals, the files
+    outside the checkout, the plan of a run that may not write it, permission bits outside the write scope), or an
+    ignored file that rejected the run (no tree holds it) differs from the start, else take it as the new candidate,
+    record the plan and the state in the write scope that a verdict holds it to (graded_state), and run the run's
+    recorded acceptance commands on it, watching the tree after each one. The earlier acceptance.after.txt is kept as
     acceptance.after-<k>.txt. A recorded verdict stays, with the candidate it was given for."""
     repo = repo_root(args.repo or os.getcwd())
     run_dir = find_run(runs_root(repo), args.grade, want="reported")
@@ -6911,10 +7024,11 @@ def cmd_grade(args):
             + ", ".join(source) + "; restore or clean up, then grade again"
             + (f" ({', '.join(graders)}: a run is graded by the tests it started with; after changing them, run the "
                "phase again)" if graders else ""), code=7)
-    if moved := state_changes(repo, st):
+    if moved := state_problems(repo, st, meta):
         die("the checkout differs from the run's start besides its files: " + "; ".join(moved)
             + "; restore that state, then grade again", code=7)
     pre, post = st["pre"], snapshot(repo, st["track_ignored"])
+    plan_now, graded = file_hash(repo / st["plan"]), graded_state(repo, st, post)
     stray = meta.get("out_of_scope", []) + [d for d in meta.get("deleted", []) if not in_write_scope(meta, d)]
     ignored = [p for p in stray if "!!" in (pre.get(p, [""])[0], post.get(p, [""])[0]) and pre.get(p) != post.get(p)]
     if ignored:
@@ -6935,7 +7049,8 @@ def cmd_grade(args):
             after.rename(run_dir / f"acceptance.after-{len(list(run_dir.glob('acceptance.after-*.txt'))) + 1}.txt")
         after.write_text(acceptance_text(results))
         meta.update(candidate=current, acceptance_after_rc=[r for _, r, _ in results], grading_changed=changed,
-                    rejected=[], **({"characterization": char_line} if char_line else {}))
+                    rejected=[], plan_hash_after=plan_now, plan_modified=plan_now != st["plan_hash"], **graded,
+                    **({"characterization": char_line} if char_line else {}))
         meta.setdefault("graded", []).append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                               "candidate": current, "states": states})
         write_meta(meta_path, meta)
