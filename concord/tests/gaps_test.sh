@@ -47,9 +47,9 @@ flash(){ $DP --review "$1" --via qwen --model fake/m --repo "$R" > "$T/rev.txt" 
 phase(){ printf '## Phase %s - p%s\nExecutor: deepseek-flash\n%bFiles: a.py\nAcceptance:\n- `grep -q NEVER a.py`\n\n' "$1" "$1" "${2:-Risk: low\n}"; }
 # local epoch seconds of "YYYY-MM-DD HH:MM"
 ts(){ python3 -I -c 'import sys; from datetime import datetime; print(datetime.strptime(sys.argv[1], "%Y-%m-%d %H:%M").timestamp())' "$1"; }
-# mkmeta DIR-ID PHASE EXECUTOR VERDICT CAUSE STARTED: a fabricated run meta of plan PLAN_S.md in $RUNS (an empty
-# PHASE, VERDICT or CAUSE is stored as null)
-mkmeta(){ mkdir -p "$RUNS/$1"; python3 -I - "$RUNS/$1/meta.json" "$R" "$@" <<'PY'
+# mkmeta DIR-ID PHASE EXECUTOR VERDICT CAUSE STARTED: a fabricated reported run (meta and a report) of plan PLAN_S.md
+# in $RUNS (an empty PHASE, VERDICT or CAUSE is stored as null)
+mkmeta(){ mkdir -p "$RUNS/$1"; printf 'DELEGATE RESULT %s\n' "$1" > "$RUNS/$1/report.md"; python3 -I - "$RUNS/$1/meta.json" "$R" "$@" <<'PY'
 import json, sys
 out, repo, run_id, phase, executor, verdict, cause, started = sys.argv[1:9]
 rec = {"run_id": run_id, "repo": repo, "plan": "PLAN_S.md", "kind": "run", "executor": executor, "model": "m",
