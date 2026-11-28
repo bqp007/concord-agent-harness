@@ -141,6 +141,7 @@ GUARDS_NOTE = ("guards: the contract and bash deny rules are advisory; the write
 # Git metadata an executor must never touch (hooks run as the user on the next commit).
 GIT_INTERNAL_FILES = ("config", "info/exclude", "info/attributes")
 CHECK_TIMEOUT_S = 300          # per baseline / characterization command (executors.conf: check_timeout)
+CHECK_DRAIN_S = 5              # after a check times out and its group is killed: the wait for its output, then for its exit
 MEM_CAP_MIB = 8192             # run watchdog: memory of the run's process tree and free disk on its volume
 DISK_FLOOR_GIB = 5             # (executors.conf: mem_cap_mib, disk_floor_gib; 0 turns a check off)
 RESOURCE_RC = 125              # run_process: the watchdog stopped the run, or free disk was too low to start it
@@ -274,7 +275,6 @@ PR_HEAD_TRIES = 2         # times gh's head and the fetched pull ref are compare
 PR_HEAD_WAIT_S = 2        # seconds between those tries
 HEAD_UNSETTLED = 75       # exit code: gh's head and the pull ref still differ or one is missing (EX_TEMPFAIL: run again in a moment)
 PR_TEXT_CAP = 4_000       # chars kept of a PR title and of a PR body in the review prompt
-TEST_PATH = re.compile(r"(^|/)(tests?|spec)(/|_)|(^|/)test_|_test\.|\.test\.", re.I)
 TEST_PATH = re.compile(r"(^|/)(tests?|spec)/|(^|/)test_|_test\.|\.test\.", re.I)
 REVIEW_JSON_START = "REVIEW-JSON"
 REVIEW_JSON_END = "END-REVIEW-JSON"
@@ -498,7 +498,7 @@ def runs_root(repo):
     if not common.is_absolute():
         common = (repo / common).resolve()
     root = common / "concord"
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)    # owner only: prompts, logs and copied inputs live below
     return root
 
 
@@ -1481,23 +1481,50 @@ def graded_copy(repo, run_dir, rec, tree):
         yield work, TreeWatch(work, graded_tree(work, rec), lambda: graded_tree(work, rec), beside(rec), pins)
 
 
-def acceptance_problems(rec, after):
-    """The acceptance results (`after`: exit codes in command order) that are not the expected ones for the run
-    (`rec`, its state or meta): exit 0 for a green command; for a command marked `(fails until`, a non-zero exit other
-    than a timeout (124) or a command that cannot run (126, 127)."""
+def failing_test(rc):
+    """Whether a non-zero exit code is a failing test (a red result): not a timeout (124), a command that cannot run
+    (126, 127) or one a signal ended (a negative code, or 128 + N, the status a shell gives a child signal N ended).
+    Commands run under /bin/sh -c without pipefail: a pipeline's status is its last command's."""
+    return rc > 0 and rc not in (124, 126, 127) and not 128 < rc <= 128 + 64
+
+
+def acceptance_expect(rec):
+    """The expected result of each acceptance command of a run (`rec`, its state or meta): green, or red for a command
+    marked `(fails until`."""
     cmds = rec.get("acceptance") or []
     expect = list(rec.get("acceptance_expect") or [])
-    expect += ["green"] * (len(cmds) - len(expect))
+    return expect + ["green"] * (len(cmds) - len(expect))
+
+
+def acceptance_problems(rec, after):
+    """The acceptance results (`after`: exit codes in command order) that are not the expected ones for the run
+    (`rec`, its state or meta): exit 0 for a green command; for a command marked `(fails until`, a failing test
+    (failing_test)."""
+    cmds, expect = rec.get("acceptance") or [], acceptance_expect(rec)
     out = []
     for k, cmd in enumerate(cmds):
         if k >= len(after):
             out.append(f"no result from after the run: {cmd}")
         elif expect[k] == "green" and after[k] != 0:
             out.append(f"exit {after[k]}, expected green: {cmd}")
-        elif expect[k] == "red" and (after[k] == 0 or after[k] in (124, 126, 127)):
-            out.append(f"exit {after[k]}, not red as expected (a timeout or a command that cannot run is not a "
-                       f"failing test): {cmd}")
+        elif expect[k] == "red" and not failing_test(after[k]):
+            out.append(f"exit {after[k]}, not red as expected (a timeout, a command that cannot run or one a signal "
+                       f"ended is not a failing test): {cmd}")
     return out
+
+
+def baseline_failing(st):
+    """How many red-run commands failed before the change: failing tests under `Baseline: fail` (a timeout, a command
+    that cannot run or a signal is no red result), any non-zero exit under `Baseline: pass`."""
+    return sum(failing_test(b["rc"]) if st.get("baseline_mode") == "fail" else b["rc"] != 0 for b in st.get("baseline") or [])
+
+
+def acceptance_tally(rec, after):
+    """(n, text): how many acceptance results `after` are the expected ones, `n/m pass`, or `n/m as expected` when the
+    run has an expected-red command (a red result counts, not exit 0)."""
+    expect = acceptance_expect(rec)
+    n = sum(1 for k, rc in enumerate(after) if (failing_test(rc) if k < len(expect) and expect[k] == "red" else rc == 0))
+    return n, f"{n}/{len(after)} " + ("as expected" if "red" in expect[:len(after)] else "pass")
 
 
 def changed_keys(before, after):
@@ -1870,40 +1897,63 @@ def run_process(cmd, env, cwd, log_path, timeout_s, on_start=None):
     if why:
         Path(log_path).write_text(f"RESOURCE LIMIT: {why}; the run did not start (free disk, re-run; not an attempt)\n")
         return RESOURCE_RC, 0.0
+
+    def on_term(signum, frame):
+        raise KeyboardInterrupt                   # SIGTERM (what --abort sends) and SIGHUP unwind through the finally below
+
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, start_new_session=True)
-        if on_start:
-            on_start(proc.pid)
-        rc, tree = None, {}
-        while rc is None:
-            try:
-                rc = proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                tree = run_tree(proc.pid) if cap else {}
-                if tree is None:
-                    log.write(b"\nconcord: memory watchdog off for this run: ps cannot list processes here\n")
-                    cap, tree = 0, {}
-                mib = sum(rss for _, rss in tree.values()) / 1024
-                why = f"memory {mib:,.0f} MiB is above the cap of {cap:,.0f} MiB" if cap and mib > cap else low_disk()
-                if why or time.time() - start > timeout_s:
-                    for sig in (signal.SIGTERM, signal.SIGKILL):     # every group of the tree; 30 s to exit on TERM
-                        for group in ({proc.pid} | {g for g, _ in tree.values()}) - {0, 1, os.getpgrp()}:
-                            with contextlib.suppress(ProcessLookupError, PermissionError):
-                                os.killpg(group, sig)
-                        with contextlib.suppress(subprocess.TimeoutExpired):
-                            proc.wait(timeout=30)
-                    rc = RESOURCE_RC if why else 124
-        for group in ({proc.pid} | {g for g, _ in tree.values()}) - {0, 1, os.getpgrp()}:   # what it left behind dies now
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(group, signal.SIGKILL)
+        rc, tree, proc = None, {}, None
+        old = {sig: signal.signal(sig, on_term) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=log, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+            if on_start:
+                on_start(proc.pid)
+            while rc is None:
+                try:
+                    rc = proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    tree = run_tree(proc.pid) if cap else {}
+                    if tree is None:
+                        log.write(b"\nconcord: memory watchdog off for this run: ps cannot list processes here\n")
+                        cap, tree = 0, {}
+                    mib = sum(rss for _, rss in tree.values()) / 1024
+                    why = f"memory {mib:,.0f} MiB is above the cap of {cap:,.0f} MiB" if cap and mib > cap else low_disk()
+                    if why or time.time() - start > timeout_s:
+                        for sig in (signal.SIGTERM, signal.SIGKILL):     # every group of the tree; 30 s to exit on TERM
+                            for group in ({proc.pid} | {g for g, _ in tree.values()}) - {0, 1, os.getpgrp()}:
+                                with contextlib.suppress(ProcessLookupError, PermissionError):
+                                    os.killpg(group, sig)
+                            with contextlib.suppress(subprocess.TimeoutExpired):
+                                proc.wait(timeout=30)
+                        rc = RESOURCE_RC if why else 124
+        finally:
+            # Every way out (the end, the wall limit, the watchdog, an exception, an interrupt or --abort): the executor's
+            # groups and what they left behind die and the child is reaped before the caller releases the run's lock.
+            for sig in old:
+                signal.signal(sig, signal.SIG_IGN)
+            if proc is not None:
+                for group in ({proc.pid} | {g for g, _ in tree.values()}) - {0, 1, os.getpgrp()}:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(group, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=30)
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
         if why:
             log.write(f"\nRESOURCE LIMIT: {why}; the run was stopped (FAIL EXECUTOR, or PLAN_GAP if it needs more)\n".encode())
     return rc, time.time() - start
 
 
+TAIL_BYTES = 256 * 1024        # read from the end of a log for its tail: a long line can shorten the tail, never the read
+
+
 def tail(path, n=60):
-    text = ANSI.sub("", path.read_bytes().decode("utf-8", "replace"))
+    """The last `n` lines of a log, read from its last TAIL_BYTES only (a log can be far larger than memory needs)."""
+    with open(path, "rb") as fh:
+        fh.seek(max(0, os.fstat(fh.fileno()).st_size - TAIL_BYTES))
+        data = fh.read(TAIL_BYTES)
+    text = ANSI.sub("", data.decode("utf-8", "replace"))
     return "\n".join(line.rstrip() for line in text.splitlines()[-n:])
 
 
@@ -1924,7 +1974,13 @@ def run_check(cmd, cwd, timeout_s):
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         _kill_group(proc)
-        out, _ = proc.communicate()
+        try:
+            out, _ = proc.communicate(timeout=CHECK_DRAIN_S)
+        except subprocess.TimeoutExpired as exc:   # a process outside the group still holds the pipe: keep what came
+            out = exc.output
+            proc.stdout.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=CHECK_DRAIN_S)
         rc = 124
     except BaseException:
         # An interrupted acceptance command must not keep running after the caller restores the files.
@@ -2001,13 +2057,17 @@ def pid_alive(pid, group=False):
 
 def lock_holders(lock):
     """The holders of <git-dir>/concord.lock. A file written before 2026-11-15 holds one holder and reads as one
-    holder with no files (so that run can still be finished or aborted); acquire_lock refuses to start beside it."""
+    holder with no files (so that run can still be finished or aborted); acquire_lock refuses to start beside it. No
+    file is no holder; a file that cannot be read as a lock exits 2, so a damaged lock never reads as free."""
     try:
         data = json.loads(lock.read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError) as exc:
+        die(f"{lock} cannot be read as a lock ({exc.__class__.__name__}): it may hold live runs, so nothing starts or "
+            "ends beside it; delete it once no run of this checkout is active")
     if not isinstance(data, dict):
-        return []
+        die(f"{lock} cannot be read as a lock (not a JSON object): delete it once no run of this checkout is active")
     if isinstance(data.get("holders"), list):
         return [h for h in data["holders"] if isinstance(h, dict)]
     if not data.get("run"):
@@ -2029,9 +2089,18 @@ def lock_guard(lock):
 
 
 def write_holders(lock, holders):
-    """Store the holders (the caller holds the mutex); the file is deleted when the last holder leaves."""
+    """Store the holders (the caller holds the mutex); the file is deleted when the last holder leaves. The file is
+    replaced whole (a temp file and os.replace), so an interrupted write never leaves a lock that reads as free."""
     if holders:
-        lock.write_text(json.dumps({"holders": holders}))
+        fd, tmp = tempfile.mkstemp(dir=str(lock.parent), prefix=lock.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps({"holders": holders}))
+            os.replace(tmp, str(lock))
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     else:
         lock.unlink(missing_ok=True)
 
@@ -2162,6 +2231,62 @@ def lock_shared(root, run_id):
     return []
 
 
+ABORT_WAIT_S = 45              # --abort: how long the dispatcher of a live run gets to stop its executor and exit
+
+
+def stop_executor(root, run_id):
+    """Before --abort releases a live executor run's holder: SIGTERM to its dispatcher (the holder's pid), which stops
+    and reaps its executor and releases its holder (run_process), then the executor's process group (the holder's
+    child) is killed if it still runs, as it does when its dispatcher is gone. Exits 2, keeping the lock, when the
+    executor outlives both. A session (--begin) holder or a dead holder needs nothing stopped."""
+    lock = lock_file(root)
+    if not lock.exists():
+        return
+    with lock_guard(lock) as holders:
+        h = next((h for h in holders if h.get("run") == run_id), None)
+    if not h or h.get("manual") or not lock_alive(h):
+        return
+    valid = lambda x: isinstance(x, int) and not isinstance(x, bool) and x > 1 and x != os.getpid()
+    pid, child = h.get("pid"), h.get("child")
+
+    def wait(alive, seconds):
+        end = time.monotonic() + seconds
+        while alive() and time.monotonic() < end:
+            time.sleep(0.2)
+        return not alive()
+
+    if valid(pid) and pid_alive(pid):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGTERM)
+        wait(lambda: pid_alive(pid), ABORT_WAIT_S)
+    if valid(child):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if not pid_alive(child, group=True):
+                break
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(child, sig)
+            wait(lambda: pid_alive(child, group=True), 10)
+        if pid_alive(child, group=True):
+            die(f"the executor of {run_id} (process group {child}) still runs after SIGKILL; the lock is kept: stop it, "
+                f"then --abort {run_id} again")
+
+
+@contextlib.contextmanager
+def checkout_reserved(root, what):
+    """This checkout's whole lock, held for `what` (`--grade RUN`, `--restore RUN`) while it captures the checkout and
+    writes: a holder with no Files, so no run starts beside it; it starts only when no live run holds the lock."""
+    with lock_guard(lock_file(root)) as holders:
+        busy = [h.get("run") for h in holders if lock_alive(h)]
+    if busy:
+        die(f"{what} needs this checkout to itself while it reads and writes it, and run {busy[0]} holds its lock: "
+            f"let it finish (--end or --abort a session run), then run {what} again")
+    acquire_lock(root, what)
+    try:
+        yield
+    finally:
+        release_lock(root, what)
+
+
 def release_lock(root, run_id=None):
     """Release this run's holder (run_id), or every holder whose pid is this process (None). The other holders
     keep their `shared` list."""
@@ -2213,14 +2338,17 @@ def load_plan_phase(args, phase):
 
 
 def new_run_dir(root, label, phase, prefix=""):
+    """A new run folder, owner only. mkdir is the exclusive create: a name a concurrent run took first moves on to
+    the next suffix."""
     base_id = f"{datetime.now():%Y%m%d-%H%M%S}-{prefix}{norm(label)[:24] or 'run'}-p{phase}"
     run_id, n = base_id, 1
-    while (root / run_id).exists():
-        n += 1
-        run_id = f"{base_id}-{n}"
-    run_dir = root / run_id
-    run_dir.mkdir(parents=True)
-    return run_dir
+    while True:
+        try:
+            (root / run_id).mkdir(mode=0o700)
+            return root / run_id
+        except FileExistsError:
+            n += 1
+            run_id = f"{base_id}-{n}"
 
 
 def test_plan_files(plan_text):
@@ -2288,9 +2416,9 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         dst = backup / f
         dst.parent.mkdir(parents=True, exist_ok=True)
         if (repo / f).is_symlink():
-            backup_links[f] = os.readlink(repo / f)      # the copy below holds the target's bytes; --restore needs the link
-        shutil.copy2(repo / f, dst)
-        backup_hashes[f] = file_hash(dst)
+            backup_links[f] = os.readlink(repo / f)      # --restore writes the link again from this text
+        shutil.copy2(repo / f, dst, follow_symlinks=False)  # a link is backed up as the link, never its target's bytes
+        backup_hashes[f] = file_identity(dst)[2]         # a file's content hash, a link's target-text hash
     (run_dir / "plan.snapshot.md").write_text(revision["text"] + "\n")     # the verified approved text (plan_gates)
     (run_dir / "phase.md").write_text(phase_text + "\n")
     # The start tree is taken and the grading files are pinned first; the red run, the characterization and the static
@@ -2305,6 +2433,9 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
     static_on = conf_flag(conf, "static_checks", True)
     runner = static_runner(repo, to_back_up, conf) if static_on else None
     red_run = bool(do_baseline and baseline_mode != "skip" and acceptance and conf_flag(conf, "baseline", True))
+    red_skipped = "" if red_run or not acceptance else ("--no-baseline" if not do_baseline else
+                                                        "Baseline: skip" if baseline_mode == "skip" else
+                                                        "baseline = no (executors.conf)")
     baseline, static_pre = [], {}
     if red_run or char_cmds or runner:                    # a copy only when something runs in it
         try:
@@ -2326,9 +2457,10 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
             "\n\n".join(f"$ {b['cmd']}\n[exit {b['rc']}]\n{b['tail']}" for b in baseline) + "\n")
     # Per-command red run (D1): an unmarked acceptance command that already passes before an implementing change
     # makes the dispatcher refuse (done in cmd_run, exit 6); a marked command that fails before the change is only
-    # noted. `Baseline: pass` and `skip` are unchanged.
+    # noted. An unmarked command that times out, cannot run or ends by a signal is no red result (failing_test): the
+    # report and the start line say so. `Baseline: pass` and `skip` are unchanged.
     marks = [marked for _, marked in parse_acceptance_marked(phase_text)]
-    green_unmarked, char_failed = [], []
+    green_unmarked, char_failed, not_red = [], [], []
     if baseline_mode == "fail":
         for i, b in enumerate(baseline):
             marked = marks[i] if i < len(marks) else False
@@ -2336,6 +2468,8 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
                 green_unmarked.append(b["cmd"])
             elif b["rc"] != 0 and marked:
                 char_failed.append(b["cmd"])
+            elif not marked and not failing_test(b["rc"]):
+                not_red.append(f"{b['cmd']} (exit {b['rc']})")
     if char_failed:
         notes.append("characterization command failed before the change: " + "; ".join(char_failed))
     expect = ["red" if FAILS_UNTIL.search(tail) else "green" for _cmd, tail in acceptance_tails(phase_text)]
@@ -2352,6 +2486,7 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
         "backed_up": to_back_up, "notes": notes,
         "risk": risk, "baseline_mode": baseline_mode, "baseline": baseline,
         "baseline_green_unmarked": green_unmarked,
+        "baseline_not_red": not_red, "red_run_skipped": red_skipped,
         "characterize": char_cmds, "check_timeout": timeout_s,
         "pid": os.getpid(), "track_ignored": track_ignored, "head_before": git(repo, "rev-parse", "HEAD").strip(),
         "branch_before": branch_of(repo), "origin_branch": origin_branch, "origin_head": origin_head,
@@ -2529,6 +2664,43 @@ def run_acceptance(cwd, commands, timeout_s, watch):
     return results
 
 
+def static_check(work, st, checked, runner, timeout_s, watch):
+    """(static line, new findings): the static checks on the files `checked` in the grading copy `work`; a finding the
+    start tree already held (the run's static_pre) is not new. The copy's tree is watched after them."""
+    static_line, static_new = "", {}
+    try:
+        post_found = static_findings(work, checked, runner, timeout_s)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        post_found, static_line = {}, f"static checks skipped after the run ({exc.__class__.__name__})"
+    from collections import Counter
+    pre_found = st.get("static_pre") or {}
+    for tool, found in post_found.items():
+        new = Counter(tuple(x) for x in found) - Counter(tuple(x) for x in pre_found.get(tool, []))
+        static_new[tool] = sorted(list(k) for k in new.elements())
+    total_new = sum(len(v) for v in static_new.values())
+    if post_found and total_new:
+        shown = [f"{p} {c} {m}" for tool in static_new for p, c, m in static_new[tool]]
+        static_line = (f"STATIC NEW ({', '.join(t for t in static_new if static_new[t])}): {total_new} "
+                       "new: " + "; ".join(shown[:8]) + ("; ..." if len(shown) > 8 else "")
+                       + " (defects = FAIL, style = feedback; see /concord:run, Check)")
+    elif post_found:
+        kept = sum(len(v) for v in post_found.values())
+        static_line = (f"static checks ({', '.join(post_found)}): no new findings"
+                       + (f" ({kept} already present in the checked files)" if kept else ""))
+    watch.after("static checks")
+    return static_line, static_new
+
+
+def checker_hint(static_line, checked):
+    """The static line, with the changed file types no checker covers named."""
+    missing = sorted({NO_CHECKER_HINT[Path(p).suffix.lower()] for p in checked
+                      if Path(p).suffix.lower() in NO_CHECKER_HINT})
+    if missing and not static_line.startswith("static checks skipped"):
+        static_line = (static_line + "; " if static_line else "") + \
+            "no checker installed for some changed files (" + ", ".join(missing) + ")"
+    return static_line
+
+
 def post_run_checks(run_dir, st, rule, candidate, touched, generated, rc):
     """The checks after a run, on a grading copy of its candidate under the run's rule (watched, so a command that
     changes the copy's tree is recorded): static checks on the touched files (only findings absent before the run are
@@ -2545,50 +2717,39 @@ def post_run_checks(run_dir, st, rule, candidate, touched, generated, rc):
         try:
             with graded_copy(repo, run_dir, rule, candidate) as (work, watch):
                 if runner:
-                    try:
-                        post_found = static_findings(work, checked, runner, timeout_s)
-                    except (subprocess.TimeoutExpired, OSError) as exc:
-                        post_found, static_line = {}, f"static checks skipped after the run ({exc.__class__.__name__})"
-                    from collections import Counter
-                    pre_found = st.get("static_pre") or {}
-                    for tool, found in post_found.items():
-                        new = Counter(tuple(x) for x in found) - Counter(tuple(x) for x in pre_found.get(tool, []))
-                        static_new[tool] = sorted(list(k) for k in new.elements())
-                    total_new = sum(len(v) for v in static_new.values())
-                    if post_found and total_new:
-                        shown = [f"{p} {c} {m}" for tool in static_new for p, c, m in static_new[tool]]
-                        static_line = (f"STATIC NEW ({', '.join(t for t in static_new if static_new[t])}): {total_new} "
-                                       "new: " + "; ".join(shown[:8]) + ("; ..." if len(shown) > 8 else "")
-                                       + " (defects = FAIL, style = feedback; see /concord:run, Check)")
-                    elif post_found:
-                        kept = sum(len(v) for v in post_found.values())
-                        static_line = (f"static checks ({', '.join(post_found)}): no new findings"
-                                       + (f" ({kept} already present in the checked files)" if kept else ""))
-                    watch.after("static checks")
+                    static_line, static_new = static_check(work, st, checked, runner, timeout_s, watch)
                 if st.get("characterize"):
                     char_line = characterization_line(run_dir, st, work, watch)
                 if accept:
                     results = run_acceptance(work, st["acceptance"], timeout_s, watch)
                     after_rc = [r for _, r, _ in results]
                     (run_dir / "acceptance.after.txt").write_text(acceptance_text(results))
-                    passed = sum(1 for r in after_rc if r == 0)
-                    after_line = (f"acceptance after run: {passed}/{len(after_rc)} pass" if passed
-                                  else f"ACCEPTANCE AFTER RUN: 0/{len(after_rc)} pass")
+                    passed, tally = acceptance_tally(st, after_rc)
+                    after_line = f"acceptance after run: {tally}" if passed else f"ACCEPTANCE AFTER RUN: {tally}"
                 changed = watch.changed
         except TreeError as exc:
             changed = [{"path": f"(the grading copy could not be made: {exc})", "command": "grading copy"}]
-    missing = sorted({NO_CHECKER_HINT[Path(p).suffix.lower()] for p in checked
-                      if Path(p).suffix.lower() in NO_CHECKER_HINT})
-    if missing and not static_line.startswith("static checks skipped"):
-        static_line = (static_line + "; " if static_line else "") + \
-            "no checker installed for some changed files (" + ", ".join(missing) + ")"
-    return static_line, static_new, char_line, after_rc, after_line, changed
+    return checker_hint(static_line, checked), static_new, char_line, after_rc, after_line, changed
 
 
 def acceptance_text(results):
     """acceptance.after.txt: each command, its exit code and the tail of its output."""
     return "\n\n".join(f"$ {c}\n[exit {r}]\n" + "\n".join(out.strip().splitlines()[-12:])
                         for c, r, out in results) + "\n"
+
+
+def write_text_atomic(path, text):
+    """`path` replaced whole with `text` (a temp file beside it and os.replace): a reader sees the old file or the new."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def finish_run(run_dir, rc, secs=None, st=None):
@@ -2779,11 +2940,16 @@ def finish_run(run_dir, rc, secs=None, st=None):
         elif not failed:
             lines.append("baseline: every acceptance command passed before the change and is marked "
                          "(characterization)")
-        elif passed:
-            lines.append("BASELINE: these acceptance commands already passed before the change: " + "; ".join(passed))
         else:
-            lines.append("baseline: all acceptance commands failed before the change, as expected "
-                         f"(check they failed for the intended reason: {run_dir / 'baseline.txt'})")
+            not_red = st.get("baseline_not_red") or []
+            if passed:
+                lines.append("BASELINE: these acceptance commands already passed before the change: " + "; ".join(passed))
+            if not_red:
+                lines.append("BASELINE WARNING: no failing test before the change (a timeout, a command that cannot run "
+                             f"or one a signal ended is no red run): {'; '.join(not_red)}; output: {run_dir / 'baseline.txt'}")
+            if not passed and not not_red:
+                lines.append("baseline: all acceptance commands failed before the change, as expected "
+                             f"(check they failed for the intended reason: {run_dir / 'baseline.txt'})")
     backup = run_dir / "backup"
     lines += [
         "acceptance (captured before the run; re-run these, not the plan on disk): "
@@ -2807,7 +2973,7 @@ def finish_run(run_dir, rc, secs=None, st=None):
             lines.insert(1, tail(log_path, 1))
     # Only a failed run can be a provider refusal, and the refusal ends the log: read its tail, not the source
     # text the executor printed earlier.
-    failed = rc != 0 or any(r != 0 for r in acceptance_after_rc)
+    failed = rc != 0 or bool(acceptance_after_rc and acceptance_problems(st, acceptance_after_rc))
     refusals = provider_refusals(tail(log_path, 60)) if failed and log_path.exists() else []
     for label, advice in refusals:
         lines.insert(1, f"{label}: {advice} (record a FAIL with --cause PROVIDER; not an executor attempt)")
@@ -2815,7 +2981,6 @@ def finish_run(run_dir, rc, secs=None, st=None):
         # Short tail on success (the planner only needs the report block); longer on failure.
         lines += ["--- executor output (tail) ---", tail(run_dir / "output.log", 20 if rc == 0 else 60)]
     report = "\n".join(lines)
-    (run_dir / "report.md").write_text(report + "\n")
     ends = {f: file_identity(repo / f) for f in [*st["backed_up"], *changed, *created, *deleted]}
     meta = {
         "run_id": st["run_id"], "repo": st["repo"], "who": st["who"], "executor": st.get("executor", ""),
@@ -2840,6 +3005,8 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "risk": st.get("risk"), "baseline_mode": st.get("baseline_mode"),
         "baseline_rc": [b["rc"] for b in st.get("baseline") or []],
         "diff_lines": diff_lines, "no_baseline": st.get("no_baseline"), "backup_hashes": st.get("backup_hashes") or {},
+        "red_run_skipped": st.get("red_run_skipped"), "baseline_not_red": st.get("baseline_not_red") or [],
+        "baseline_forced": st.get("baseline_forced") or [],
         "start_kinds": st.get("start_kinds") or {}, "start_exec": st.get("start_exec") or {},
         "backup_links": st.get("backup_links") or {},
         # The end state of every file the run backed up, changed, created or deleted: content hash (a link's target
@@ -2859,7 +3026,10 @@ def finish_run(run_dir, rc, secs=None, st=None):
         "executor_cost": usage["cost_usd"] if usage else None, "usage": usage,
         "outside_changed": outside_changed,
     }
-    (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+    # meta.json first, then report.md, each replaced whole: a run is "reported" (report.md) only once its meta.json is
+    # complete, and one interrupted before its report stays open, so --end finishes it again.
+    write_meta(run_dir / "meta.json", meta)
+    write_text_atomic(run_dir / "report.md", report + "\n")
     index_append({k: meta[k] for k in ("run_id", "repo", "executor", "model", "name", "mode", "rc",
                                        "seconds", "plan", "phase", "plan_modified", "started", "verdict",
                                        "executor_tokens", "executor_cost", "sandbox", "diff_lines")}
@@ -3716,14 +3886,19 @@ def cmd_run(args, target, phase, conf):
             return 6
         if green:
             st["notes"].append("forced: acceptance already green before the change: " + "; ".join(green))
+            st["baseline_forced"] = green                       # the report lists it under Overrides
             write_state(run_dir, st)
-        bl_note = (f"; baseline: {sum(b['rc'] != 0 for b in bl)}/{len(bl)} acceptance commands fail before the change"
+        bl_note = (f"; baseline: {baseline_failing(st)}/{len(bl)} acceptance commands fail before the change"
                    if bl else "")
         print(f"delegate: started {run_dir.name}: {who}, wall {wall_text}{bl_note}; "
               f"log: {run_dir / 'output.log'}", flush=True)
         rc, secs = run_process(cmd, env, repo, run_dir / "output.log", wall_s + 60,
                                on_start=lambda pid: record_child(root, run_dir.name, pid))
         report = finish_run(run_dir, rc, secs, json.loads(json.dumps(st)))
+    except KeyboardInterrupt:                # an interrupt, or --abort's SIGTERM (run_process): the executor is stopped
+        unregister_run(run_dir)
+        print(f"delegate: {run_dir.name} interrupted; the executor was stopped and its lock is released", file=sys.stderr)
+        return 130
     except BaseException:
         unregister_run(run_dir)
         raise
@@ -6541,9 +6716,12 @@ def cmd_begin(args, phase, conf):
         bl_line = ("BASELINE WARNING: every acceptance command already passes before the change; the tests do not "
                    "test this phase. Fix them first (or set `Baseline: pass`), then --abort and --begin again")
     else:
-        bl_line = (f"baseline: {sum(b['rc'] != 0 for b in bl)}/{len(bl)} acceptance commands fail before the change "
-                   f"(expected: {'all fail' if st['baseline_mode'] == 'fail' else 'all pass'}); "
+        bl_line = (f"baseline: {baseline_failing(st)}/{len(bl)} acceptance commands fail before the "
+                   f"change (expected: {'all fail' if st['baseline_mode'] == 'fail' else 'all pass'}); "
                    f"reasons in {run_dir / 'baseline.txt'}")
+        if st.get("baseline_not_red"):
+            bl_line += ("\nBASELINE WARNING: no failing test before the change (a timeout, a command that cannot run "
+                        "or one a signal ended): " + "; ".join(st["baseline_not_red"]))
     print(f"BEGIN {run_dir.name}\nexecutor: {who}\nrisk: {st['risk']}\nfiles in scope: {st['files'] or '-'}\n"
           f"acceptance: {st['acceptance'] or '-'}\n{bl_line}\nbacked up: {len(st['backed_up'])} file(s)\n"
           + "".join(f"note: {n}\n" for n in st["notes"])
@@ -6552,20 +6730,25 @@ def cmd_begin(args, phase, conf):
 
 
 def cmd_end(args, conf):
+    """Finish a session run: it must be open (find_run, endable), a session run (--begin), begun in this checkout and
+    hold this checkout's lock as a session holder; each is checked before any file changes."""
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
     run_dir = find_run(root, args.end, want="endable")
-    if not (run_dir / "state.json").exists():
-        die(f"{run_dir.name} has no state.json; was it started with --begin?")
-    if (run_dir / "aborted").exists():
-        die(f"{run_dir.name} was aborted; an aborted run cannot be ended")
-    if run_registering(run_dir):
-        die(f"{run_dir.name} is still starting (its start state is not written yet); end it once it has started")
-    if (run_dir / "report.md").exists():
-        die(f"{run_dir.name} already has a report; use --show {run_dir.name}")
-    if "start_tree" not in json.loads((run_dir / "state.json").read_text()):
+    st = json.loads((run_dir / "state.json").read_text())
+    if "start_tree" not in st:
         die(f"{run_dir.name} was begun before 3.1.0 candidate grading: concord.py --abort {run_dir.name}, then run the "
             "phase again")
+    if st.get("mode") != "session":
+        die(f"{run_dir.name} is an executor run, not a session run (--begin): its dispatcher writes its report; one "
+            f"that stopped without a report is closed with --abort {run_dir.name}")
+    if str(st.get("repo") or "") != str(repo):
+        die(f"{run_dir.name} was begun in {st.get('repo') or 'an unknown checkout'}, not in {repo}; run --end there")
+    with lock_guard(lock_file(root)) as holders:
+        held = any(h.get("run") == run_dir.name and h.get("manual") for h in holders)
+    if not held:
+        die(f"{run_dir.name} holds no session lock in this checkout, so --end cannot release it: "
+            f"concord.py --abort {run_dir.name}, then run the phase again")
     report = finish_run(run_dir, None)
     release_lock(root, run_dir.name)
     print(report)
@@ -6573,10 +6756,22 @@ def cmd_end(args, conf):
 
 
 def cmd_abort(args):
+    """Close an open run without a report: a session run's lock is released; a live executor run is stopped first
+    (stop_executor), so its writer never outlives its lock. A run begun in another checkout that still exists is
+    aborted there."""
     repo = repo_root(args.repo or os.getcwd())
     root = runs_root(repo)
     run_dir = find_run(root, args.abort, want="open")
-    release_lock(root, run_dir.name)
+    with contextlib.suppress(OSError, ValueError):         # an unreadable start state is what --abort clears
+        made_in = Path(str(json.loads((run_dir / "state.json").read_text()).get("repo") or ""))
+        if str(made_in) not in ("", ".") and made_in.is_dir() and made_in.resolve() != repo.resolve():
+            die(f"{run_dir.name} was begun in {made_in}, not in {repo}; run --abort there")
+    stop_executor(root, run_dir.name)
+    lock = lock_file(root)
+    if lock.exists():
+        with lock_guard(lock) as holders:                   # the dispatcher of a stopped run released its own holder
+            if any(h.get("run") == run_dir.name for h in holders):
+                write_holders(lock, [h for h in holders if h.get("run") != run_dir.name])
     (run_dir / "aborted").write_text(f"{time.time()}\n")     # the report no longer waits for this run
     print(f"aborted {run_dir.name}; lock released. Backup (if any): {run_dir / 'backup'}")
     return 0
@@ -6654,13 +6849,29 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
         meta["verdict"] = verdict
         meta["cause"] = cause
         note = note or ""
+        # A verdict replaces every field of the one before it: what a forced PASS failed, the candidate a PASS names and
+        # what a PASS stood without. It keeps the acceptance results of the grade it judged (a later --grade replaces
+        # acceptance_after_rc, not these).
+        for key in ("verdict_forced", "verdict_candidate", "verdict_unchecked"):
+            meta.pop(key, None)
         if forced:
             # What failed and the owner's reason are kept apart: the note stays the owner's words (empty when none).
             meta["verdict_forced"] = problems + (["expected-red command without a --note"] if needs_note else [])
         meta["verdict_note"] = note
         meta["verdict_at"] = time.time()
+        meta["verdict_after_rc"] = list(meta.get("acceptance_after_rc") or [])
         if verdict == "PASS" and meta.get("start_tree"):
             meta["verdict_candidate"] = meta.get("candidate")
+        # A PASS no acceptance command checked, or a session PASS whose candidate is its start tree (nothing changed),
+        # is recorded and listed under the report's Overrides.
+        unchecked = []
+        if verdict == "PASS" and not meta.get("acceptance"):
+            unchecked.append("no acceptance command")
+        if verdict == "PASS" and meta.get("mode") == "session" and meta.get("start_tree") \
+                and meta.get("candidate") == meta["start_tree"]:
+            unchecked.append("no change (the graded candidate is the start tree)")
+        if unchecked:
+            meta["verdict_unchecked"] = unchecked
         if tokens is not None:
             if tokens.strip().lower() == "auto":
                 since = last_verdict_time(runs_root(repo), meta) or meta.get("started") or 0
@@ -6685,18 +6896,21 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
                  | {"out_of_scope_n": len(meta.get("out_of_scope", [])), "generated_n": len(meta.get("generated", [])),
                     "deleted_n": len(meta.get("deleted", [])), "staged_n": len(meta.get("staged", [])),
                     "git_internals_n": len(meta.get("git_internals_changed", [])),
-                    "verdict_note": meta["verdict_note"]})
+                    "verdict_note": meta["verdict_note"], "forced": forced})
     print(f"{run_dir.name}: verdict {verdict}{' (forced)' if forced else ''}" + (f" [{cause}]" if meta["cause"] else "")
           + (f" ({note})" if note else "")
           + (f"  frontier tokens: {meta['frontier_tokens']} ({meta['frontier_tokens_mode']})"
              if meta.get("frontier_tokens") is not None else ""))
+    if unchecked:
+        print(f"note: PASS with {'; '.join(unchecked)}: the test report lists it under Overrides")
     if verdict == "FAIL" and not cause:
         print("note: add --cause EXECUTOR|PLAN_GAP|TEST_DEFECT|FLAKY|PROVIDER|BLOCKED: only EXECUTOR counts as an "
               "attempt")
         after = meta.get("acceptance_after_rc") or []
-        if after and all(rc == 0 for rc in after):
-            print("note: all acceptance commands passed after the run but you failed it: the tests did not enforce "
-                  "the requirement, so the cause is usually TEST_DEFECT (or PLAN_GAP), not EXECUTOR")
+        if after and not acceptance_problems(meta, after):
+            print("note: all acceptance commands passed after the run (one marked `(fails until` as a failing test) but "
+                  "you failed it: the tests did not enforce the requirement, so the cause is usually TEST_DEFECT (or "
+                  "PLAN_GAP), not EXECUTOR")
     return 0
 
 
@@ -6879,6 +7093,13 @@ def cmd_fork_graded(args):
 
 
 def cmd_grade(args):
+    """--grade under this checkout's whole lock (checkout_reserved): no run writes while grade_checkout captures the
+    checkout and records the grade, and two grades never interleave."""
+    with checkout_reserved(runs_root(repo_root(args.repo or os.getcwd())), f"--grade {args.grade}"):
+        return grade_checkout(args)
+
+
+def grade_checkout(args):
     """Grade the current checkout for a reported run that has a start tree: refuse when the run wrote through a linked
     folder, the tree differs from the start tree outside the run's write scope, the checkout differs from the run's
     start state in a way that rejects a run (state_changes), or an ignored file that rejected the run (no tree holds
@@ -6920,29 +7141,39 @@ def cmd_grade(args):
     if ignored:
         die("ignored files the run changed outside its write scope differ from the start: " + ", ".join(ignored)
             + "; delete the ones the run created; one it changed or deleted means running the phase again", code=7)
+    # The static checks finish runs: on the files the candidate changed against the start tree, findings new against
+    # the start tree's (static_pre).
+    checked = [p for p in tree_paths(repo, meta["start_tree"], current) if (repo / p).is_file()] \
+        if st.get("static_on") else []
+    runner = static_runner(repo, checked, load_conf()) if checked else None
+    static_line, static_new, timeout_s = "", {}, st.get("check_timeout", CHECK_TIMEOUT_S)
     try:
         with graded_copy(repo, run_dir, meta, current) as (work, watch):
+            if runner:
+                static_line, static_new = static_check(work, st, checked, runner, timeout_s, watch)
             char_line = characterization_line(run_dir, st, work, watch) if st.get("characterize") else None
-            results = run_acceptance(work, meta.get("acceptance") or [], st.get("check_timeout", CHECK_TIMEOUT_S),
-                                     watch)
+            results = run_acceptance(work, meta.get("acceptance") or [], timeout_s, watch)
             changed = watch.changed
         states = tree_states(repo, meta["start_tree"], current)      # the PR gate attributes this candidate to the run
     except TreeError as exc:
         die(f"cannot grade a copy of the checkout's tree: {exc}", code=7)
+    static_line = checker_hint(static_line, checked)
     with meta_lock(meta_path, meta):        # the results file and meta.json change together, as one grade
+        meta.update(candidate=current, acceptance_after_rc=[r for _, r, _ in results], grading_changed=changed,
+                    rejected=[], static_new=static_new, **({"characterization": char_line} if char_line else {}))
+        meta.setdefault("graded", []).append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                              "candidate": current, "states": states})
+        write_meta(meta_path, meta)         # the record first; the readable results file follows it
         after = run_dir / "acceptance.after.txt"
         if after.exists():
             after.rename(run_dir / f"acceptance.after-{len(list(run_dir.glob('acceptance.after-*.txt'))) + 1}.txt")
-        after.write_text(acceptance_text(results))
-        meta.update(candidate=current, acceptance_after_rc=[r for _, r, _ in results], grading_changed=changed,
-                    rejected=[], **({"characterization": char_line} if char_line else {}))
-        meta.setdefault("graded", []).append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                                              "candidate": current, "states": states})
-        write_meta(meta_path, meta)
+        write_text_atomic(after, acceptance_text(results))
     print(f"GRADED {run_dir.name}: candidate {current[:12]}; acceptance after run: "
-          f"{sum(1 for _, r, _ in results if r == 0)}/{len(results)} pass")
+          f"{acceptance_tally(meta, [r for _, r, _ in results])[1]}")
     for c, r, _out in results:
         print(f"  exit {r}: {c}")
+    if static_line:
+        print(static_line)
     if char_line:
         print(char_line)
     if changed:
@@ -7141,9 +7372,10 @@ def cmd_phases(args):
 
 def report_overrides(repo, root, runs, plan_rel, changed):
     """The places where the gate was passed on someone's word: each forced PASS with its failed commands beside its
-    reason, each --user-approved text and what it was used for, each exclusion waiver, each --no-baseline, each
-    unsandboxed executor run, each PASS over out-of-scope changes, each phase whose PASS a later revision changed
-    (`changed`: {phase: detail}), and each phase reviewed below its Risk: or not reviewed."""
+    reason, each PASS with no acceptance command or (a session run) no change, each --user-approved text and what it
+    was used for, each exclusion waiver, each red run skipped (--no-baseline, `Baseline: skip`, `baseline = no`) or
+    forced over (--force), each unsandboxed executor run, each PASS over out-of-scope changes, each phase whose PASS a
+    later revision changed (`changed`: {phase: detail}), and each phase reviewed below its Risk: or not reviewed."""
     out = []
     last_by_phase = {}
     plan_runs = {meta.get("run_id") or state.get("run_id") for state, meta in runs}
@@ -7152,14 +7384,22 @@ def report_overrides(repo, root, runs, plan_rel, changed):
         phase = meta.get("phase", state.get("phase"))
         if counted_run(root, state, meta):
             last_by_phase[phase] = (run, phase, meta)
-        forced = meta.get("verdict_forced")
+        forced = meta.get("verdict_forced") if meta.get("verdict") == "PASS" else None
         if forced:
             out.append(f"- forced PASS, run {run} (phase {phase}): failed or missing: {_flat('; '.join(forced))}; "
                        f"reason: {_flat(meta.get('verdict_note')) if (meta.get('verdict_note') or '').strip() else 'not recorded'}")
+        for why in (meta.get("verdict_unchecked") or []) if meta.get("verdict") == "PASS" else []:
+            out.append(f"- PASS with {_flat(why)}: run {run} (phase {phase})")
         for note in meta.get("user_approved") or []:
             out.append(f"- {_flat(note)} (run {run}: it lifted a DRIFT BLOCK, if one stood)")
-        if meta.get("no_baseline"):
-            out.append(f"- --no-baseline: run {run} (phase {phase}) skipped the red run")
+        skipped = meta.get("red_run_skipped")         # absent before it was recorded: only --no-baseline is known
+        if skipped is None:
+            skipped = "--no-baseline" if meta.get("no_baseline") else ""
+        if skipped:
+            out.append(f"- {_flat(skipped)}: run {run} (phase {phase}) skipped the red run")
+        if meta.get("baseline_forced"):
+            out.append(f"- --force over a green red run: run {run} (phase {phase}) started although these acceptance "
+                       f"commands passed before the change: {_flat('; '.join(meta['baseline_forced']))}")
         if str(meta.get("sandbox") or "").startswith("off"):
             out.append(f"- unsandboxed executor run {run} (phase {phase}): {_flat(meta.get('sandbox'))}")
         if meta.get("verdict") == "PASS" and meta.get("out_of_scope"):
@@ -7245,13 +7485,15 @@ def cmd_report(args):
         metas = by_phase.get(number) or []
         if metas:
             last = metas[-1]
-            after = last.get("acceptance_after_rc") or []
+            # a verdict's row shows the acceptance results it judged (a later --grade does not replace them)
+            after = (last["verdict_after_rc"] if last.get("verdict") and "verdict_after_rc" in last
+                     else last.get("acceptance_after_rc")) or []
             graded = last.get("verdict_candidate") or last.get("candidate")
             seen = [r for r in last.get("reviews") or []
                     if r.get("verdict") in ("CLEAN", "FIX", "BLOCK") and graded and r.get("candidate", graded) == graded]
             row = [str(number), _flat(last.get("name") or last.get("executor") or "-"), str(len(metas)),
                    "PASS (phase changed since)" if number in changed else _flat(last.get("verdict") or "-"),
-                   f"{sum(1 for r in after if r == 0)}/{len(after)} pass" if after else "-",
+                   acceptance_tally(last, after)[1] if after else "-",
                    _flat(last.get("revision") or "-"), (graded or "-")[:12],
                    _flat(f"{seen[-1]['verdict']} ({seen[-1].get('reviewer') or '?'})") if seen else "none"]
         else:
@@ -7476,18 +7718,33 @@ def run_registering(p):
         return False
 
 
+def run_unfit(p, want):
+    """Why the run folder `p` does not fit `want`, or "" when it fits: open (state, no report), endable (open, not
+    aborted and started: what --end may finish), reported (has report, or is a PR review record, which has none),
+    started (has state), any. An explicit run id and "last" pass the same rules."""
+    if want == "any":
+        return ""
+    if want == "reported":
+        if (p / "report.md").exists():
+            return ""
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            if json.loads((p / "meta.json").read_text()).get("kind") == "pr-review":
+                return ""
+        return f"{p.name} has no report yet (open session run? finish it with --end {p.name})"
+    if not (p / "state.json").exists():
+        return f"{p.name} has no state.json; was it started with --begin?"
+    if want == "endable" and (p / "aborted").exists():
+        return f"{p.name} was aborted; an aborted run cannot be ended"
+    if want == "endable" and run_registering(p):
+        return f"{p.name} is still starting (its start state is not written yet); end it once it has started"
+    if want in ("open", "endable") and (p / "report.md").exists():
+        return f"{p.name} already has a report; use --show {p.name}"
+    return ""
+
+
 def latest_run(root, want="any"):
-    """Newest run dir (by creation time) that fits `want`, or None:
-    open (state, no report), endable (open and not aborted: what --end may finish), reported (has report), started
-    (has state), any."""
-    fits = {
-        "open": lambda p: (p / "state.json").exists() and not (p / "report.md").exists(),
-        "endable": lambda p: (p / "state.json").exists() and not (p / "report.md").exists() and not (p / "aborted").exists()
-                             and not run_registering(p),
-        "reported": lambda p: (p / "report.md").exists(),
-        "started": lambda p: (p / "state.json").exists(),
-        "any": lambda p: True,
-    }[want]
+    """Newest run dir (by creation time) that fits `want` (run_unfit), or None."""
+    fits = lambda p: not run_unfit(p, want)
     skip = ("dry-", "lint-", "review-")
 
     def this_checkout(p):
@@ -7516,6 +7773,8 @@ def find_run(root, run_id, want="any"):
         run_dir = root / run_id
         if not os.path.isdir(run_dir):
             die(f"no such run: {run_id}")
+        if why := run_unfit(run_dir, want):
+            die(why)
         return run_dir
     run_dir = latest_run(root, want)
     if run_dir is None:
@@ -7562,11 +7821,20 @@ def tracked_link(repo, head, f):
 
 
 def cmd_restore(args):
+    """--restore under this checkout's whole lock (checkout_reserved), so no run writes between a file's check and its
+    restore. Exit 1 when the restore is partial (restore_run)."""
+    with checkout_reserved(runs_root(repo_root(args.repo or os.getcwd())), f"--restore {args.restore}"):
+        return restore_run(args)
+
+
+def restore_run(args):
     """Put the run's backed-up files back, in the checkout the run was recorded in, and only where the file still holds
     the run's end state (type, executable bit and content SHA-256 that the run records when it finishes; a symlink
     counts by its target text and is never written through) and the backup still matches its start hash. Any
-    other file is listed as not restored and left as it is, so later work is never overwritten and a second --restore
-    changes nothing. A backup path that resolves outside the repository is refused."""
+    other file is listed as not restored and left as it is, so later work is never overwritten; a file that already
+    holds its start state needs nothing. A backup path that resolves outside the repository is refused. Exit 0 when
+    every path the run touched holds its start state afterwards; exit 1 (partial) when a backed-up file is not
+    restored, a change has no backup, a created path is left in place or a deleted file is still missing."""
     repo = repo_root(args.repo or os.getcwd())
     run_dir = find_run(runs_root(repo), args.restore, want="started")
     meta_path = run_dir / "meta.json"
@@ -7577,6 +7845,7 @@ def cmd_restore(args):
             "there", code=2)
     ends, starts = meta.get("end_hashes") or {}, meta.get("backup_hashes") or {}
     kinds, execs = meta.get("end_kinds") or {}, meta.get("end_exec") or {}
+    start_kinds, start_exec = meta.get("start_kinds") or {}, meta.get("start_exec") or {}
     links = meta.get("backup_links") or {}        # a link's text at the run's start; absent in a run recorded before it existed
     modes = meta.get("end_modes") or {}          # absent in a run recorded before it existed: the old check stands
     top = repo.resolve()
@@ -7588,32 +7857,43 @@ def cmd_restore(args):
         except OSError:
             continue
     target = max(time.time(), newest + 1)
+    partial = False
     for f in meta.get("backed_up", []):
         dst = repo / f
         if not (top / f).resolve().is_relative_to(top):
             print(f"{f}: not restored (its path resolves outside the repository)")
+            partial = True
             continue
         if f not in ends or f not in starts or f not in kinds or f not in execs:
             print(f"{f}: not restored (the run's end state is not recorded (the run did not finish, or a version before 3.0 ran it))")
+            partial = True
             continue
         now = file_identity(dst)
         if now != (kinds[f], execs[f], ends[f]):
+            if f in start_kinds and f in start_exec and now == (start_kinds[f], start_exec[f], starts[f]):
+                print(f"{f}: already holds its start state")
+                continue
             what = ("its type, executable bit or content" if now[0] != kinds[f] or now[1] != execs[f] else "its content")
             print(f"{f}: not restored ({what} changed after the run ended; the file is left as it is)")
+            partial = True
             continue
         if f in modes and file_mode(dst) != modes[f]:
             print(f"{f}: not restored (its permission mode changed after the run ended; the file is left as it is)")
+            partial = True
             continue
         if kinds[f] not in ("file", "missing"):      # a file the run deleted and nobody made again is restored
             print(f"{f}: not restored (it is a {kinds[f]}, not a regular file; a restore never writes through a symlink)")
+            partial = True
             continue
-        if file_hash(run_dir / "backup" / f) != starts[f]:
+        if file_identity(run_dir / "backup" / f)[2] != starts[f]:     # a backed-up link is compared as the link
             print(f"{f}: not restored (the backup no longer matches the hash recorded at the run's start)")
+            partial = True
             continue
         # a run recorded before backup_links existed: a path committed as a link at the run's start may have been one
         was_link = f in links or ("backup_links" not in meta and tracked_link(repo, meta.get("head_before"), f))
         if was_link and f not in links:
             print(f"{f}: not restored (it was a symlink and this run did not record its target; a restore never turns a link into a regular file)")
+            partial = True
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -7631,7 +7911,8 @@ def cmd_restore(args):
                 print(f"note: mtime of {f} not updated: {exc.strerror or exc}")
         except OSError as exc:
             print(f"{f}: not restored ({exc.strerror or exc})")
-    created = [p for p in meta.get("created", []) if (repo / p).exists()]
+            partial = True
+    created = [p for p in meta.get("created", []) if os.path.lexists(repo / p)]     # a dangling link is a path left too
     if created:
         print("files created by the run (not removed; delete them yourself if unwanted): " + ", ".join(created))
     not_restored = [p for p in meta.get("out_of_scope", []) if p not in created] + \
@@ -7643,6 +7924,10 @@ def cmd_restore(args):
                 "ALL uncommitted changes in them, including yours")
     if meta.get("deleted"):
         print("deleted by the run (not restored unless listed above): " + ", ".join(meta["deleted"]))
+    missing = [p for p in meta.get("deleted") or [] if not os.path.lexists(repo / p)]
+    if partial or created or not_restored or missing:
+        print(f"PARTIAL RESTORE of {run_dir.name}: not every path the run touched holds its start state (see above)")
+        return 1
     return 0
 
 
@@ -8114,10 +8399,17 @@ def release_lines():
 
 
 def cmd_check(conf):
+    """Each harness, git and the release lines. Exit 3 when a required tool is missing: git, which every command
+    needs, or a harness whose binary executors.conf names (`<name>.bin`); any other harness is optional (a missing
+    one is listed and the exit stays 0)."""
+    missing = [] if shutil.which("git") else ["git"]
+    print(f"{'git':9s} {'found' if not missing else 'NOT FOUND (required)'}")
     for name in EXECUTORS:
         binary = resolve_bin(name, conf)
         if not binary:
-            print(f"{name:9s} NOT FOUND")
+            required = bool((conf.get(f"{name}.bin") or "").strip())
+            print(f"{name:9s} NOT FOUND" + (f" (required: {name}.bin = {conf[f'{name}.bin'].strip()})" if required else ""))
+            missing += [name] if required else []
             continue
         try:
             res = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=60,
@@ -8129,7 +8421,9 @@ def cmd_check(conf):
             print(f"{name:9s} timeout")
     for line in release_lines():
         print(line)
-    return 0
+    if missing:
+        print(f"MISSING required tool(s): {', '.join(missing)}")
+    return 3 if missing else 0
 
 
 def main():
@@ -8166,8 +8460,12 @@ def main():
                         "disk has no recorded APPROVE")
     parser.add_argument("--report", action="store_true", help="write the test report for the owner's acceptance test "
                         "(REPORT_<ticket>-<id>.md in the runs root) and stop the drift clock")
-    parser.add_argument("--abort", metavar="RUN_ID", help="release a session run's lock without a report")
-    parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the phase's outcome")
+    parser.add_argument("--abort", metavar="RUN_ID", help="close an open run without a report: release a session run's "
+                        "lock; a live executor run is stopped first")
+    parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the phase's outcome; PASS "
+                        "needs each acceptance command's expected result: exit 0, or for one marked `(fails until`, a "
+                        "failing test (not a timeout 124, a command that cannot run 126 or 127, or a signal). Acceptance "
+                        "commands run under /bin/sh -c without pipefail: a pipeline's exit is its last command's")
     parser.add_argument("--fork-graded", action="store_true", help="wt.py join: whether the fork (--repo) has no open "
                         "run and is the candidate of its newest PASS run")
     parser.add_argument("--dest", metavar="DIR", help="with --fork-graded: the checkout the fork joins; the fork's "
@@ -8200,7 +8498,8 @@ def main():
                         help="with --review-pr: review tier (default: the highest needed tier of the files in scope; a "
                              "value below a file's needed tier is refused)")
     parser.add_argument("--no-baseline", action="store_true",
-                        help="skip the pre-run acceptance check (red run) and characterization baseline")
+                        help="skip the pre-run acceptance check (red run); the Characterize: commands still run "
+                             "before the change, and the report lists the skip under Overrides")
     parser.add_argument("--force", action="store_true",
                         help="run the executor even when acceptance already passes before the change; with "
                              "--verdict PASS, record the PASS anyway as PASS (forced) over any refusal: an acceptance "

@@ -79,7 +79,7 @@ window.CONCORD_MAP = {
       ],
       [
        "--abort RUN_ID",
-       "release a session run's lock without a report"
+       "close an open run without a report: release a session run's lock; a live executor run is stopped first"
       ]
      ],
      "flags"
@@ -119,7 +119,7 @@ window.CONCORD_MAP = {
      [
       [
        "--verdict RUN_ID PASS|FAIL",
-       "record the phase's outcome"
+       "record the phase's outcome; PASS needs each acceptance command's expected result: exit 0, or for one marked `(fails until`, a failing test (not a timeout 124, a command that cannot run 126 or 127, or a signal). Acceptance commands run under /bin/sh -c without pipefail: a pipeline's exit is its last command's"
       ],
       [
        "--cause {EXECUTOR,PLAN_GAP,TEST_DEFECT,FLAKY,PROVIDER,BLOCKED}",
@@ -806,7 +806,7 @@ window.CONCORD_MAP = {
      [
       [
        "--no-baseline",
-       "skip the pre-run acceptance check (red run) and characterization baseline"
+       "skip the pre-run acceptance check (red run); the Characterize: commands still run before the change, and the report lists the skip under Overrides"
       ],
       [
        "--force",
