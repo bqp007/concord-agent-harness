@@ -34,8 +34,8 @@ Usage:
   concord.py --list | --check
   concord.py --show RUN_ID|last [--repo DIR]
   concord.py --restore RUN_ID|last [--repo DIR]
-  concord.py --mutate RUN_ID|last [--max 10] [--repo DIR]      # opt-in: mutants of the run's own lines,
-                                              # in an isolated copy; a mutant's first failing check stops it
+  concord.py --mutate RUN_ID|last [--max 10] [--repo DIR]      # opt-in: mutants of the run's own lines, in a
+                                              # copy of its candidate; a check off its expected result stops it
 
 MODEL is a name from models.conf ("deepseek pro", "kimi-k3", "glm 5.3"), a raw provider/model ID,
 or an executor name (qwen, opencode, pi, dsh, kimi). Without MODEL, the phase's `Executor:` line
@@ -44,8 +44,9 @@ decides, then `default` in models.conf.
 Billing rule: Claude models (sonnet, haiku, opus) never run here. They run as Claude Code's
 implementer subagent on the Claude subscription; `planner` phases are done by the planning
 session itself. Wrap both with --begin / --end so they get the same backup, scope report and
-plan-integrity check. This script refuses to send any Claude model to another harness, and
-refuses to start a harness without an explicit non-Claude model.
+plan-integrity check. The billing guard is a filter on the model's name: it refuses a model id that
+holds a Claude family word (claude, anthropic, sonnet, opus, haiku) on another harness, and a harness
+started without an explicit model. It cannot see which provider or account a harness routes an id to.
 
 The script does not verify the work. It snapshots the working tree (including gitignored paths),
 hashes the plan, runs the CLI in the repo root, and reports in-scope changes, changes outside the
@@ -430,6 +431,7 @@ def resolve_target(target, entries):
 
 
 def guard(executor, model):
+    """The billing guard (exit 5): a filter on the model id's text (CLAUDE_MODEL), not on the route a harness takes."""
     if executor not in SESSION_EXECUTORS and model and CLAUDE_MODEL.search(model):
         die(f"refusing to run Claude model '{model}' on {executor}: Claude models run only as the "
             "implementer subagent on the Claude subscription", code=5)
@@ -632,17 +634,36 @@ def phase_arg(text):
     return key
 
 
-def phase_spans(plan_text):
-    """(key, start, end) of each phase's text: from its heading to the next heading of the same or a higher level, or
-    to the next phase heading, whichever comes first."""
-    heads = [h for h in PHASE_HEAD.finditer(plan_text) if phase_key(h.group(2)) is not None]
+def heading_spans(plan_text, fenced=frozenset()):
+    """(key, start, end) of each phase heading whose line does not start at an offset in `fenced`: its text runs to the
+    next heading of the same or a higher level, or to the next phase heading, whichever comes first; a heading on a
+    line in `fenced` neither starts nor ends one. approval_text calls it with no fenced lines (the hash of a plan
+    read stays what it was); every other reader goes through phase_spans."""
+    heads = [h for h in PHASE_HEAD.finditer(plan_text) if phase_key(h.group(2)) is not None and h.start() not in fenced]
     spans = []
     for head in heads:
-        nxt = re.compile(r"^#{1,%d}\s" % len(head.group(1)), re.M).search(plan_text, head.end())
+        level = re.compile(r"^#{1,%d}\s" % len(head.group(1)), re.M)
+        nxt = next((m.start() for m in level.finditer(plan_text, head.end()) if m.start() not in fenced), None)
         later = next((h for h in heads if h.start() > head.end()), None)
-        stops = [p for p in (nxt.start() if nxt else None, later.start() if later else None) if p]
+        stops = [p for p in (nxt, later.start() if later else None) if p]
         spans.append((phase_key(head.group(2)), head.start(), min(stops) if stops else len(plan_text)))
     return spans
+
+
+def fenced_starts(text):
+    """Offsets of the lines (split at newlines, as `^` in a re.M pattern sees them) inside a closed code fence."""
+    lines, starts, pos = text.split("\n"), [], 0
+    for line in lines:
+        starts.append(pos)
+        pos += len(line) + 1
+    return frozenset(starts[i] for i in fenced_lines(lines))
+
+
+def phase_spans(plan_text):
+    """(key, start, end) of each phase's text (heading_spans): a heading inside a closed code fence, such as an example
+    of a phase, neither starts nor ends a phase. Two spans with one key are a duplicate phase: readers take the first
+    and --lint names it."""
+    return heading_spans(plan_text, fenced_starts(plan_text))
 
 
 def extract_phase(plan_text, number):
@@ -655,15 +676,29 @@ def extract_phase(plan_text, number):
     die(f"phase {number} not found in plan (phases found: {found})")
 
 
-def field_block(phase_text, name):
-    """Return (inline_value, following_lines) for a `Name:` field."""
+def field_names(phase_text):
+    """The field names of a phase as written, one per line that names a field outside a closed code fence."""
     lines = phase_text.splitlines()
+    fenced = fenced_lines(lines)
+    return [m.group(1) for i, line in enumerate(lines) if i not in fenced and (m := FIELD.match(line))]
+
+
+def field_block(phase_text, name):
+    """Return (inline_value, following_lines) for a `Name:` field: the first line outside a closed code fence that names
+    it, and the lines after it up to the next field, a heading or a blank line after content. A line inside a closed
+    code fence is neither a field, a boundary nor a following line, so an example in a fence is never read as the
+    phase's own field."""
+    lines = phase_text.splitlines()
+    fenced = fenced_lines(lines)
     for i, line in enumerate(lines):
-        m = FIELD.match(line)
+        m = None if i in fenced else FIELD.match(line)
         if m and m.group(1).lower() == name.lower():
             inline = line[m.end():].strip()
             body = []
-            for nxt in lines[i + 1:]:
+            for j in range(i + 1, len(lines)):
+                nxt = lines[j]
+                if j in fenced:
+                    continue
                 if FIELD.match(nxt) or nxt.lstrip().startswith("#"):
                     break
                 if not nxt.strip():
@@ -704,15 +739,26 @@ def parse_scope(phase_text):
 
 def parse_paths(phase_text, name):
     inline, body = field_block(phase_text, name)
+    spans = []
+
+    def hide(s):
+        """A backticked span is one path, its spaces, commas and parentheses included: it is set aside as a
+        placeholder before notes are dropped and the entry is split, and put back after."""
+        def keep(m):
+            spans.append(m.group(1))
+            return f"\0{len(spans) - 1}\0"
+        return re.sub(r"`([^`\n]*)`", keep, s)
+
+    show = lambda t: re.sub(r"\0(\d+)\0", lambda m: spans[int(m.group(1))], t)
     strip_notes = lambda s: re.sub(r"\([^)]*\)", " ", s)
-    inline = strip_notes(inline).strip()
+    inline = strip_notes(hide(inline)).strip()
     # Comma-separated when commas are present (paths may contain spaces), else whitespace-separated.
     toks = re.split(r"\s*,\s*", inline) if "," in inline else inline.split()
     for line in body:
-        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", strip_notes(line))      # a list marker, never a glob's `*`
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", strip_notes(hide(line)))   # a list marker, never a glob's `*`
         toks.append(re.split(r"\s+[-:]", line.strip(), maxsplit=1)[0])
     out = []
-    for t in (clean_entry(t) for t in toks):
+    for t in (clean_entry(show(t)) for t in toks):
         if t and t.lower() != "none" and re.search(r"[A-Za-z0-9]", t):
             out.append(t)
     return out
@@ -729,7 +775,7 @@ def clean_entry(token):
 
 
 def parse_acceptance(phase_text):
-    return parse_backticked(phase_text, "Acceptance")
+    return [cmd for cmd, _tail in acceptance_tails(phase_text)]
 
 
 def parse_backticked(phase_text, name):
@@ -750,28 +796,44 @@ def text_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def acceptance_tails(phase_text):
-    """[(command, tail)] in parse_acceptance order: `tail` is the text after the command's closing backtick, up to
-    the next backtick or the line end. A body line that is not a bullet and holds no backtick is a continuation: its
-    stripped text is appended, after one space, to the tail of the last command produced so far."""
+ACC_ITEM = re.compile(r"(?:[-*]|\d+\.)")
+
+
+def acceptance_lines(phase_text):
+    """[(line, item)] of the `Acceptance:` field: its inline value (an item), then each following line, an item when it
+    starts with a list marker (`-`, `*`, `1.`). Any other line continues the item before it: it is prose."""
     inline, body = field_block(phase_text, "Acceptance")
+    return ([(inline, True)] if inline else []) + [(line, bool(ACC_ITEM.match(line.strip()))) for line in body]
+
+
+def command_spans(line):
+    """(commands, notes): the matches of the backticked spans of one item line. A span after a `(` that no `)` has
+    closed yet (parentheses counted outside the spans) sits in a parenthesised note, such as `(fails until `f()`
+    exists)`: it is the note's inline code, not a command."""
+    cmds, notes, depth, pos = [], [], 0, 0
+    for m in re.finditer(r"`([^`]+)`", line):
+        for ch in line[pos:m.start()]:
+            depth = depth + 1 if ch == "(" else max(depth - 1, 0) if ch == ")" else depth
+        (notes if depth else cmds).append(m)
+        pos = m.end()
+    return cmds, notes
+
+
+def acceptance_tails(phase_text):
+    """[(command, tail)]: the acceptance commands, in order, are the backticked spans of the inline value and of each
+    item line, minus the spans inside a parenthesised note (command_spans). `tail` is the text after the command's
+    closing backtick up to the next command on its line or the line end, notes included. A continuation line is
+    prose: its stripped text is appended, after one space, to the tail of the last command produced so far."""
     out = []
-
-    def add(line):
-        for m in re.finditer(r"`([^`]+)`", line):
-            tail = line[m.end():]
-            nxt = tail.find("`")
-            out.append((m.group(1), tail if nxt < 0 else tail[:nxt]))
-
-    if inline:
-        add(inline)
-    for line in body:
-        if not re.match(r"(?:[-*]|\d+\.)", line.strip()) and "`" not in line:
+    for line, item in acceptance_lines(phase_text):
+        if not item:
             if out:
                 cmd, tail = out[-1]
                 out[-1] = (cmd, tail + " " + line.strip())
             continue
-        add(line)
+        cmds, _notes = command_spans(line)
+        for m, nxt in zip(cmds, cmds[1:] + [None]):
+            out.append((m.group(1), line[m.end():nxt.start() if nxt else len(line)]))
     return out
 
 
@@ -788,16 +850,25 @@ LINT_SUFFIXES = (".sh", ".py", ".md", ".json", ".conf", ".txt", ".yaml", ".yml")
 
 def acceptance_lint(repo, phase_text, files):
     """Acceptance-command defects, zero model tokens: `reason: command or line` (advisory, no exit change)."""
-    out, seen, (inline, body) = [], set(), field_block(phase_text, "Acceptance")
-    for line in ([f"- {inline}"] if "`" in inline else []) + body:      # an inline `Acceptance: `cmd`` runs too
-        m = re.match(r"(?:[-*]|\d+\.)\s+", line.strip())
-        bullet = line.strip()[m.end():].strip() if m else ""
-        if not bullet:
-            continue
-        cmds = re.findall(r"`([^`]+)`", bullet)
-        if not cmds:
-            out.append(f"not run (no backticks): {bullet}")
-        for cmd in cmds:
+    out, seen, (inline, _body) = [], set(), field_block(phase_text, "Acceptance")
+    for i, (line, item) in enumerate(acceptance_lines(phase_text)):
+        text, spans, not_run = line.strip(), [], []          # not_run: (why, what) of text meant to run that does not
+        if not item:
+            if "`" in text:
+                not_run.append(("inline code on a continuation line is prose; a command goes on a list line", text))
+        else:
+            if inline and i == 0:                                       # an inline `Acceptance: `cmd`` runs too
+                bullet = text if "`" in text else ""
+            else:
+                m = re.match(r"(?:[-*]|\d+\.)\s+", text)
+                bullet = text[m.end():].strip() if m else ""
+            spans, notes = command_spans(bullet)
+            if bullet and not spans and not notes:
+                not_run.append(("no backticks", bullet))
+            not_run += [("inline code in a parenthesised note", n.group(1)) for n in notes]
+        for why, what in not_run:
+            out.append(f"not run ({why}): {what}")
+        for cmd in (m.group(1) for m in spans):
             if LINT_VACUOUS.search(cmd):
                 out.append(f"vacuous on empty input: {cmd}")
             if LINT_WC_CMP.search(cmd):
@@ -864,11 +935,13 @@ def split_out_of_scope(paths, post, globs=GENERATED_GLOBS, pre=None):
 
 def edit_patterns(repo, files):
     """OpenCode `permission.edit` allow-patterns for the phase's Files: entries, in relative and absolute
-    form (directories cover their contents). Everything else is denied for the edit/write/patch tools."""
+    form. A directory covers its contents: an entry that ends with `/` gets its child patterns whether or not it
+    exists yet, as does an entry that is a directory on disk. Everything else is denied for the edit/write/patch
+    tools."""
     pats = []
-    for f in files:
-        f = f.rstrip("/")
-        forms = [f, f + "/*", f + "/**"] if (repo / f).is_dir() else [f]
+    for entry in files:
+        f = entry.rstrip("/")
+        forms = [f, f + "/*", f + "/**"] if entry.endswith("/") or (repo / f).is_dir() else [f]
         for form in forms:
             pats += [form, str(repo / form)]
     return pats
@@ -906,6 +979,10 @@ def expand_scope(repo, files):
                 if rel.startswith("..") or not os.path.isfile(m):
                     continue
                 cands.append(rel)
+            # in_scope's `*` crosses `/` (a/*.py scopes a/sub/b.py) where glob's does not: the tracked and untracked
+            # files it scopes are backed up too.
+            listed = run_git(["ls-files", "-z", "-co", "--exclude-standard"], repo).stdout.split("\0")
+            cands += sorted(n for n in listed if n and n not in cands and in_scope(n, [f]) and (repo / n).is_file())
         else:
             cands = []
         for c in cands:
@@ -935,8 +1012,8 @@ def repo_notes(repo):
 def repo_cases(repo):
     """The automation test-case file the repo notes name (`Cases: <path>`), repo-relative, or None. Only the session
     changes it (the KB step): start_state hashes it with the acceptance files, so an executor edit blocks PASS."""
-    m = re.search(r"^\s*(?:[-*]\s+)?Cases:\s*`?([^`\s]+)`?", repo_notes(repo), re.M)
-    return m.group(1) if m else None
+    m = re.search(r"^\s*(?:[-*]\s+)?Cases:\s*(?:`([^`\n]+)`|([^`\s]+))", repo_notes(repo), re.M)
+    return (m.group(1) or m.group(2)).strip() if m else None
 
 
 def notes_path(repo, plan_rel):
@@ -1758,10 +1835,12 @@ HARNESS_ENV = {"opencode": ("OPENCODE_*",), "pi": ("PI_*", "OPENCODE_API_KEY"), 
 
 
 def executor_env(executor, conf):
-    """The environment an executor starts with: the base names, the harness's names and what `<harness>.env` adds."""
+    """The environment an executor starts with: the base names, the harness's names and what `<harness>.env` adds,
+    minus the hard-denied names (SCRUB_PREFIXES, SCRUB_EXACT), which go even when `<harness>.env` lists them."""
     allowed = list(BASE_ENV) + list(HARNESS_ENV.get(executor, ())) + (conf.get(f"{executor}.env") or "").replace(",", " ").split()
     return {k: v for k, v in os.environ.items()
-            if any(k == a or (a.endswith("*") and k.startswith(a[:-1])) for a in allowed)}
+            if any(k == a or (a.endswith("*") and k.startswith(a[:-1])) for a in allowed)
+            and not k.startswith(SCRUB_PREFIXES) and k not in SCRUB_EXACT}
 
 
 # ---------- OpenCode seatbelt sandbox ----------
@@ -1851,9 +1930,10 @@ def sandbox_cmd(cmd, repo, run_dir, conf, args):
 
 
 def build_command(executor, binary, task, contract, model, mode, wall_text, run_dir, conf, allow_edit=None,
-                  repo=None, args=None):
+                  repo=None, args=None, deny_edit=()):
     """mode: full (edits + shell), readonly (lint: no edits, no shell).
-    allow_edit: OpenCode edit allow-patterns (from edit_patterns); everything else is denied to the edit tools."""
+    allow_edit: OpenCode edit allow-patterns (from edit_patterns), [] for none; everything else is denied to the edit
+    tools. deny_edit: paths denied after them (the plan and the grading files)."""
     env = executor_env(executor, conf)
     combined = f"{contract}\n\n---\n\n{task}"
     if executor == "qwen":
@@ -1867,9 +1947,11 @@ def build_command(executor, binary, task, contract, model, mode, wall_text, run_
         else:
             bash_rules = {"*": "allow", **{p: "deny" for p in OPENCODE_BASH_DENY}}
             perm = {"bash": bash_rules, "webfetch": "deny", "external_directory": "deny"}
-            if allow_edit:
-                # Last matching rule wins: catch-all deny first, then the phase's Files: entries.
-                perm["edit"] = {"*": "deny", **{p: "allow" for p in allow_edit}}
+            if allow_edit is not None:
+                # Last matching rule wins: catch-all deny first, then the phase's write scope, then the plan and the
+                # grading files, which an executor never writes even where its scope covers them (in_write_scope).
+                perm["edit"] = {"*": "deny", **{p: "allow" for p in allow_edit if p not in deny_edit},
+                                **{p: "deny" for p in deny_edit}}
         perm.update(OPENCODE_ALWAYS_DENY)
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": perm})
         # Tool set stays the verified version; a repo's own opencode.json/.opencode plugins never load.
@@ -2292,7 +2374,7 @@ def plan_text(plan):
 def load_plan_phase(args, phase):
     repo = repo_root(args.repo or os.getcwd())
     plan, plan_rel, text = read_plan(repo, args.plan)
-    phase_text = extract_phase(text, phase)
+    phase_text = extract_phase(approval_text(text), phase)       # the reading the approval and the run use
     return repo, plan, plan_rel, phase_text
 
 
@@ -2340,7 +2422,7 @@ def acceptance_list(repo, plan_text, files):
     """The acceptance files of a run: the plan's Test plan Home paths minus the paths the phase's Files: lists (a
     file the phase may change does not grade it), plus the repository notes' `Cases:` file, which stays even when
     Files: lists it (only the session changes it, the KB step)."""
-    out = [p for p in test_plan_files(plan_text) if not any(files_overlap(p, f) for f in files)]
+    out = [p for p in test_plan_files(plan_text) if not in_scope(p, files)]   # membership; lock overlap is wider
     cases = repo_cases(repo)
     if cases and cases not in out:
         out.append(cases)
@@ -3034,14 +3116,15 @@ def approval_text(text):
     ignoring case and spacing, so `## Handoff contract` is read. A heading inside a closed code fence never starts a
     skipped section, and every heading ends one, fenced or not: a fence never hides a heading, because a fence that
     pairs with the wrong closing line could otherwise hide a whole section from the approval. A phase's own text, as
-    extract_phase cuts it, is always read: a skip heading inside a phase hides nothing, because what makes a phase pass
-    must not change without a new approval."""
+    heading_spans cuts it with every heading counted, is always read: a skip heading inside a phase hides nothing,
+    because what makes a phase pass must not change without a new approval. That cut reaches at least as far as the
+    fence-aware one (phase_spans) that every reader of a phase applies to this text, so a phase is read whole."""
     lines = text.splitlines()
     starts, pos = [], 0
     for raw in text.splitlines(keepends=True):
         starts.append(pos)
         pos += len(raw)
-    spans = [(start, end) for _, start, end in phase_spans(text)]
+    spans = [(start, end) for _, start, end in heading_spans(text)]
     fenced = fenced_lines(lines)
     keep, skip = [], False
     for i, line in enumerate(lines):
@@ -3066,7 +3149,10 @@ def write_plan_read(root, text):
     h = verified_hash(text)
     path = root / "plan-reads" / f"{h}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes((approval_text(text) + "\n").encode())
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{h}.")      # a reader never sees a half-written read
+    with os.fdopen(fd, "wb") as f:
+        f.write((approval_text(text) + "\n").encode())
+    os.replace(tmp, path)
     return path, h
 
 
@@ -3147,14 +3233,15 @@ def current_revision(root, entry, text):
 
 
 def revision_text(revision, live):
-    """The text a revision approved: its plan read, else (the read is gone) the approval text of the plan on disk.
-    Without a revision (a plan nobody approved yet), the plan on disk."""
+    """The text a revision approved: its plan read, else (the read is gone) the approval text of the plan on disk when
+    that text is the revision's (same hash), else "": the text of another revision never stands in for it. Without a
+    revision (a plan nobody approved yet), the plan on disk."""
     if revision is None:
         return live
     try:
         return revision["path"].read_text()
     except OSError:
-        return approval_text(live)
+        return approval_text(live) if live and verified_hash(live) == revision["hash"] else ""
 
 
 def drift_measure(repo, base, plan_rel):
@@ -3245,8 +3332,8 @@ def drift_check(repo, plan_rel, text, approval="", register=False):
         was = lambda n: pre[n] if isinstance(pre[n], list) else [pre[n], None]
         changed = {n: max(v[0] - was(n)[0], 0) if n in pre else v[0] for n, v in measure.items()
                    if n not in pre or (v != pre[n] if isinstance(pre[n], list) else v[0] != pre[n])}
-        files = [f for h in PHASE_HEAD.finditer(basis) if phase_key(h.group(2)) is not None   # every heading level
-                 for f in parse_files(extract_phase(basis, h.group(2)))]
+        files = [f for n in dict.fromkeys(key for key, _, _ in phase_spans(basis))     # every heading level
+                 for f in parse_files(extract_phase(basis, n))]
         outside = sorted(n for n in changed if not in_scope(n, files))
         have = {"time": entry["elapsed"] / 60, "size": sum(changed.values())}
         want = {"time": entry.get("estimate") or plan_number(text, "ETA"), "size": plan_number(basis, "Size")}
@@ -3364,9 +3451,11 @@ def plan_gates(repo, plan_rel, text, approval):
     approved = approval_text(text)
     try:
         stored = rev["path"].read_bytes()
-    except FileNotFoundError:
-        stored = None
-    if stored is not None and stored != (approved + "\n").encode():
+    except OSError:
+        return 11, (f"REFUSED: the plan read {rev['path']} (PLAN-HASH {h}) of the approved revision is gone or "
+                    "unreadable: the run, its review and its report read the approved text from it. Run --lint to "
+                    "write it again from the plan, then dispatch again"), None
+    if stored != (approved + "\n").encode():
         return 11, (f"REFUSED: the plan read {rev['path']} (PLAN-HASH {h}) no longer holds the text its approval "
                     "recorded: it was changed after the APPROVE. Run --lint to write it again from the plan, then "
                     "dispatch again"), None
@@ -3420,16 +3509,24 @@ def cmd_plan_verdict(args):
         answer = Path(args.plan_verdict).read_text(errors="replace")
     except OSError as exc:
         die(f"cannot read {args.plan_verdict}: {exc}")
-    m = re.search(r"^\W*VERDICT:\W*(APPROVE|REVISE)\b", answer, re.M)
-    if not m:
+    # Exactly one VERDICT line and one PLAN-HASH line: a second one (a quote of an earlier answer, a second block)
+    # leaves the answer ambiguous, so nothing is recorded.
+    verdicts = re.findall(r"^\W*VERDICT:\W*(APPROVE|REVISE)\b", answer, re.M)
+    if not verdicts:
         die(f"no `VERDICT: APPROVE` or `VERDICT: REVISE` line in {args.plan_verdict}")
-    if m.group(1) == "REVISE":
+    if len(verdicts) > 1:
+        die(f"{args.plan_verdict} holds {len(verdicts)} VERDICT lines; the answer must hold exactly one: nothing "
+            "recorded")
+    if verdicts[0] == "REVISE":
         die(f"plan verdict REVISE for {plan_rel}: nothing recorded; revise the plan and ask the verifier again", code=1)
-    hm = re.search(r"^\W*PLAN-HASH:\s*([0-9a-f]{16})\b", answer, re.M)
-    if not hm:
+    hashes = re.findall(r"^\W*PLAN-HASH:\s*([0-9a-f]{16})\b", answer, re.M)
+    if not hashes:
         die(f"no `PLAN-HASH: <hash>` line in {args.plan_verdict}: the answer must quote the plan read it judged "
             "(--lint prints it)")
-    h, root = hm.group(1), runs_root(repo)
+    if len(hashes) > 1:
+        die(f"{args.plan_verdict} holds {len(hashes)} PLAN-HASH lines; the answer must quote exactly one plan read: "
+            "nothing recorded")
+    h, root = hashes[0], runs_root(repo)
     read = root / "plan-reads" / f"{h}.md"
     if not read.is_file():
         die(f"no plan read for {h} in {read.parent}: run --lint on the plan and ask the verifier to judge "
@@ -3560,11 +3657,9 @@ def cmd_estimate(args):
     _plan, plan_rel, text = read_plan(repo, args.plan)
     print(f"ESTIMATE {plan_rel}")
     index, lints, phases, no_ledger = est_index(), [], [], []
-    for head in PHASE_HEAD.finditer(text):
-        n = phase_key(head.group(2))
-        if n is None:
-            continue
-        phase_text = extract_phase(text, n)
+    approved = approval_text(text)                                     # the reading the approval and the run use
+    for n in dict.fromkeys(key for key, _, _ in phase_spans(approved)):
+        phase_text = extract_phase(approved, n)
         name = parse_executor(phase_text) or "planner"
         key = "planner" if name in ("planner", "session", "implementer") else name   # the session's own phases
         median, p75, med_lines, runs, has_ledger = est_stats(key, index)
@@ -3595,6 +3690,26 @@ def cmd_estimate(args):
     lints += [f"no ledger reference for {key}: EST_DEFAULT_S and EST_REF_LINES assumed" for key in no_ledger]
     lints += [f"Phase {p['n']} waits for Phase {w} with no reason" for p in phases for w, why in p["waits"] if not why]
     by_num = {p["n"]: p for p in phases}
+    lints += [f"Phase {p['n']} After: Phase {w} is not a phase of this plan; that wait is ignored"
+              for p in phases for w, _ in p["waits"] if w not in by_num]
+    lints += [f"Phase {p['n']} After: waits for itself; that wait is ignored"
+              for p in phases if any(w == p["n"] for w, _ in p["waits"])]
+    cycles, seen = [], {}
+
+    def walk(n, path):                           # depth first over the known waits; a wait on an open phase: a cycle
+        seen[n] = "open"
+        for w, _ in by_num[n]["waits"]:
+            if w in by_num and w != n and seen.get(w) == "open":
+                cycles.append(path[path.index(w):] + [w])
+            elif w in by_num and w not in seen:
+                walk(w, path + [w])
+        seen[n] = "done"
+
+    for p in phases:
+        if p["n"] not in seen:
+            walk(p["n"], [p["n"]])
+    lints += [f"Phases {' → '.join(str(n) for n in c)} wait on each other in a cycle; the estimate ignores the "
+              "wait that closes it" for c in cycles]
 
     def finish(p, stack=()):                     # start = the latest finish of its waits; a cycle counts as 0
         if p["finish"] is None:
@@ -3764,9 +3879,11 @@ def cmd_run(args, target, phase, conf):
     run_dir = new_run_dir(root, name or executor, phase, prefix="dry-" if args.dry_run else "")
     task = build_task(repo, plan_rel, phase, phase_text, args.extra, revision,
                       snapshot=None if args.dry_run else run_dir / "plan.snapshot.md")
-    allow_edit = edit_patterns(repo, files) if executor == "opencode" and files else None
-    cmd, env, combined = build_command(executor, binary, task, contract, model, "full",
-                                       wall_text, run_dir, conf, allow_edit=allow_edit, repo=repo, args=args)
+    allow_edit = edit_patterns(repo, files) if executor == "opencode" else None      # [] with no Files: deny all
+    grading = acceptance_list(repo, plan_text(plan), parse_scope(phase_text)[0])      # as start_state pins them
+    deny_edit = [form for p in [plan_rel, *grading] for form in (p, str(repo / p))]
+    cmd, env, combined = build_command(executor, binary, task, contract, model, "full", wall_text, run_dir, conf,
+                                       allow_edit=allow_edit, repo=repo, args=args, deny_edit=deny_edit)
     (run_dir / "prompt.txt").write_text(combined)
     shown = redact_cmd(cmd, contract, combined, task)
     (run_dir / "cmd.json").write_text(json.dumps(shown, indent=1))
@@ -3774,8 +3891,11 @@ def cmd_run(args, target, phase, conf):
     if approval_note:
         notes.append(approval_note)
     if allow_edit:
-        notes.append(f"edit scope enforced: OpenCode may edit only the {len(files)} Files: and Follow-through: entries "
-                     "(edit/write/patch tools; shell redirection is not covered)")
+        notes.append(f"edit scope enforced: OpenCode may edit only the {len(files)} Files: and Follow-through: entries, "
+                     "never the plan or a grading file (edit/write/patch tools; shell redirection is not covered)")
+    elif allow_edit is not None:
+        notes.append("edit scope enforced: no Files: entries, so OpenCode's edit tools may edit nothing (shell "
+                     "redirection is not covered)")
     elif files:
         notes.append(f"edit scope is advisory on {executor} (contract only)")
 
@@ -6570,7 +6690,18 @@ def cmd_lint(args, phase, target, conf):
     for f in acceptance_lint(repo, phase_text, files):
         print(f"ACCEPTANCE LINT: {f}")
     text = plan_text(plan)
-    head = PHASE_HEAD.split(text, 1)[0]                                    # title, Done when, Ship
+    approved = approval_text(text)
+    spans = phase_spans(approved)
+    head = approved[:spans[0][1]] if spans else approved                   # title, Done when, Ship
+    keys = [key for key, _, _ in spans]
+    for key in dict.fromkeys(k for k in keys if keys.count(k) > 1):
+        print(f"PLAN LINT: phase {key} has {keys.count(key)} headings; every command reads the first")
+    fields = {}
+    for name in field_names(phase_text):
+        fields.setdefault(name.lower(), [name, 0])[1] += 1
+    for name, count in fields.values():
+        if count > 1:
+            print(f"PLAN LINT: phase {phase} has {count} `{name}:` fields; only the first counts")
     if re.search(r"\b((port|mirror)(s|ed|ing)?|parity)\b", head, re.I) and "mismatch" not in text.lower():
         print("ACCEPTANCE LINT: port with no differential oracle (a first phase printing mismatches: 0 vs the reference)")
     for label in ("Size", "ETA"):
@@ -7350,8 +7481,7 @@ def cmd_report(args):
 
     lines += ["## Phases", "", "| Phase | Executor | Runs | Last verdict | Acceptance re-run | Revision | Candidate | Phase review |",
               "|---|---|---|---|---|---|---|---|"]
-    numbers = list(dict.fromkeys(phase_key(h.group(2)) for h in PHASE_HEAD.finditer(approved)
-                                 if phase_key(h.group(2)) is not None))
+    numbers = list(dict.fromkeys(key for key, _, _ in phase_spans(approved)))
     by_phase = {}
     for state, meta in runs:
         if counted_run(root, state, meta):
@@ -7856,27 +7986,24 @@ def _write_meta_mutation(meta_path, run_dir, mutation, fallback_meta):
         write_meta(meta_path, current)
 
 
-def own_ranges(repo, run_dir, f, base):
-    """New-side line ranges of the run's own change to f: the copy taken when the run started against the current
-    text, so uncommitted edits made before the run are not mutated. A file without that copy (new, or outside
-    Files:) falls back to its diff against `base`."""
-    before = Path(run_dir) / "backup" / f
-    if not before.is_file():
-        return diff_hunks(change_diff(repo, [f], cap=None, base=base)).get(f, [])
-    try:
-        old, new = before.read_text(errors="replace"), (Path(repo) / f).read_text(errors="replace")
-    except OSError:
-        return []
-    diff = "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), fromfile=f"a/{f}", tofile=f"b/{f}",
-                                          lineterm="", n=0))
-    return diff_hunks(diff).get(f, [])
+def mutant_outcome(rc, expect):
+    """A mutant's result from one check's exit code under the grading rules (acceptance_problems), or None when the
+    code is the check's expected result (`expect`: green, exit 0; red, a failing test). A command that cannot run
+    (126, 127) or ends by a signal (a negative code, or above 128 from the shell) is invalid: it tells nothing about
+    the mutant. 124 is a timeout, counted as killed; any other unexpected code kills the mutant."""
+    if rc in (126, 127) or rc < 0 or rc > 128:
+        return "invalid"
+    if rc == 124:
+        return "timeout"
+    return None if (rc == 0) == (expect == "green") else "killed"
 
 
 def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout):
-    """Grade mutants in a throwaway copy of the checkout: the live files and the run lock are untouched, so other
-    work goes on meanwhile. --mutants grades planner-listed mutants; otherwise C/C++ text operators and Python AST
-    mutants on the run's own changed lines, sampled with seed 0. Each mutant runs `acceptance` in order and stops
-    at the first command that fails."""
+    """Grade mutants in a grading copy of the run's recorded candidate (grading_copy, with the run's pinned grading
+    inputs): the live files and the run lock are untouched, so other work goes on meanwhile. --mutants grades
+    planner-listed mutants; otherwise C/C++ text operators and Python AST mutants on the lines the run changed from its
+    start tree to its candidate, sampled with seed 0. `acceptance` is [(command, expected result)]: each mutant runs
+    the commands in order and stops at the first whose exit code is not its expected result (mutant_outcome)."""
     if (repo / "CMakeCache.txt").exists():
         die("--mutate cannot isolate an in-source CMake build (CMakeCache.txt at the repository root); configure "
             "it out of source (cmake -B build)", code=2)
@@ -7889,8 +8016,8 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
         candidates = None
     else:
         candidates = []
-        mutate_base = run_diff_base(repo, meta)
-        for f in review_files(repo, meta, live=True):
+        start_tree, cand = stored_trees(repo, meta)
+        for f in review_files(repo, meta):
             ext = os.path.splitext(f)[1].lower()
             is_cpp = ext in C_SOURCE_EXTS
             is_py = f.endswith(".py")
@@ -7898,11 +8025,16 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
                 continue
             if _mutant_left_out(repo, f):
                 continue
+            blob = run_git(["cat-file", "blob", f"{cand}:{f}"], repo, text=False)
             try:
-                text = (repo / f).read_bytes().decode("utf-8")
-            except (OSError, UnicodeDecodeError):
+                text = blob.stdout.decode("utf-8") if blob.returncode == 0 else None
+            except UnicodeDecodeError:
+                text = None
+            if text is None:
                 continue
-            ranges = own_ranges(repo, run_dir, f, mutate_base)
+            diff = run_git(["--literal-pathspecs", "diff", "-U0", *OPAQUE_DIFF, start_tree, cand, "--", f], repo,
+                           text=False)
+            ranges = diff_hunks(diff.stdout.decode("utf-8", errors="backslashreplace")).get(f, [])
             gen = c_mutation_candidates(text, ranges) if is_cpp else mutation_candidates(text, ranges)
             for c in gen:
                 c["path"] = f
@@ -7917,15 +8049,6 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
         k = min(args.max, total)
         candidates = [candidates[i] for i in sorted(random.Random(0).sample(range(total), k))]
 
-    def ignore(d, names):
-        skip = set()
-        for n in names:
-            if n in (".git", ".claude"):
-                skip.add(n)
-            elif os.path.isdir(os.path.join(d, n)) and os.path.exists(os.path.join(d, n, "CMakeCache.txt")):
-                skip.add(n)
-        return skip
-
     def bump(p):
         t = time.time() + 2
         try:
@@ -7936,13 +8059,10 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
     def on_term(signum, frame):
         raise KeyboardInterrupt
 
-    tmp_parent = tempfile.mkdtemp(prefix="concord-mutate-")
-    work = Path(tmp_parent) / "checkout"
-    realwork = None
-    print(f"note: mutating an isolated copy of the checkout ({work}); the live files are not touched")
+    work = realwork = None
     old_term = signal.signal(signal.SIGTERM, on_term)
     old_hup = signal.signal(signal.SIGHUP, on_term)
-    killed = survived = stillborn = 0
+    killed = survived = stillborn = invalid = 0
     results, skipped = [], []
     clock = {"last_end": time.time()}
 
@@ -7957,144 +8077,152 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
         while int(time.time()) <= int(clock["last_end"]):
             time.sleep(0.05)
 
-    def grade(check_cmds):
-        """stillborn (build fails), else killed / timeout at the first failing check command, else survived."""
+    def grade(checks):
+        """stillborn (build fails), else the outcome of the first check whose exit code is not its expected result
+        (invalid, timeout or killed), else survived."""
         if build_cmd and checked(build_cmd) != 0:
             return "stillborn"
-        for c in check_cmds:
-            rc = checked(c)
-            if rc != 0:
-                return "timeout" if rc == 124 else "killed"
+        for c, expect in checks:
+            result = mutant_outcome(checked(c), expect)
+            if result:
+                return result
         return "survived"
 
     def tally(result):
-        nonlocal killed, survived, stillborn
+        nonlocal killed, survived, stillborn, invalid
         if result == "survived":
             survived += 1
         elif result == "stillborn":
             stillborn += 1
+        elif result == "invalid":
+            invalid += 1
         else:
             killed += 1
 
     try:
-        try:
-            shutil.copytree(str(repo), str(work), symlinks=True, ignore=ignore)
-        except shutil.Error as exc:
-            errs = exc.args[0] if exc.args else []
-            first = errs[0] if errs else exc
-            die(f"cannot copy the checkout for isolation: {first}", code=2)
-        except OSError as exc:
-            die(f"cannot copy the checkout for isolation: {exc}", code=2)
-        realwork = os.path.realpath(str(work))
-        clock["last_end"] = time.time()
+        with grading_copy(repo, meta["candidate"], run_dir, meta.get("grading_inputs") or {}) as work:
+            realwork = os.path.realpath(str(work))
+            print(f"note: mutating an isolated copy of the checkout ({work}); the live files are not touched")
+            print(f"note: the copy holds the run's graded candidate {meta['candidate'][:12]} and its pinned grading "
+                  "inputs, not the checkout's later edits")
+            clock["last_end"] = time.time()
 
-        # Setup on the unmutated copy: the baseline must be green here or grading is meaningless.
-        # The build goes first: the acceptance may need the build's output, which a clean checkout lacks. The build
-        # command owns configuration and build, so it must succeed on a clean copy before any acceptance runs.
-        if build_cmd:
-            build_rc = checked(build_cmd)
-            if build_rc != 0:
-                die(f"the build command fails on the unmutated copy (exit {build_rc}): {build_cmd}; it must "
-                    "configure and build from a clean copy", code=2)
-        setup_cmds = list(acceptance)
-        if listed:
-            seen = set()
-            for m in mutants:
-                c = m.get("check")
-                if c and c not in seen:
-                    seen.add(c)
-                    setup_cmds.append(c)
-        for cmd in setup_cmds:
-            rc = checked(cmd)
-            if rc != 0:
-                die(f"the unmutated copy fails {cmd} (exit {rc})", code=2)
+            # Setup on the unmutated copy: each check must give its expected result here or grading is meaningless.
+            # The build goes first: the acceptance may need the build's output, which a clean copy lacks. The build
+            # command owns configuration and build, so it must succeed on a clean copy before any acceptance runs.
+            if build_cmd:
+                build_rc = checked(build_cmd)
+                if build_rc != 0:
+                    die(f"the build command fails on the unmutated copy (exit {build_rc}): {build_cmd}; it must "
+                        "configure and build from a clean copy", code=2)
+            setup = list(acceptance)
+            if listed:
+                seen = set()
+                for m in mutants:
+                    c = m.get("check")
+                    if c and c not in seen:
+                        seen.add(c)
+                        setup.append((c, "green"))
+            for cmd, expect in setup:
+                rc = checked(cmd)
+                if mutant_outcome(rc, expect) is None:
+                    continue
+                if expect == "green":
+                    die(f"the unmutated copy fails {cmd} (exit {rc})", code=2)
+                die(f"the unmutated copy does not give the expected red result for {cmd} (exit {rc}): a command marked "
+                    "(fails until must fail as a test does, not exit 0, 124, 126 or 127, or end by a signal", code=2)
 
-        originals = {}
+            originals = {}
 
-        def apply_and_grade(f, mutated_bytes, check_cmds):
-            """Write the mutant to the copy, grade, then restore the original bytes and hash-check (exit 3)."""
-            target = work / f
-            if os.path.realpath(str(target)) != os.path.join(realwork, *Path(f).parts):
-                die(f"--mutate: {f} resolves outside the isolated copy", code=2)
-            if f not in originals:
-                originals[f] = target.read_bytes()
-            orig_sha = hashlib.sha256(originals[f]).hexdigest()
-            wait_next_second()
-            try:
-                target.write_bytes(mutated_bytes)
-                bump(target)
-                return grade(check_cmds)
-            finally:
-                try:
-                    target.write_bytes(originals[f])
-                    bump(target)
-                except OSError:
-                    pass
-                if file_hash(target) != orig_sha:
-                    die(f"{f} in the isolated copy was not restored to its original bytes", code=3)
-
-        if listed:
-            for m in mutants:
-                f = m["file"]
+            def apply_and_grade(f, mutated_bytes, check_cmds):
+                """Write the mutant to the copy, grade, then restore the original bytes and hash-check (exit 3)."""
+                target = work / f
+                if os.path.realpath(str(target)) != os.path.join(realwork, *Path(f).parts):
+                    die(f"--mutate: {f} resolves outside the isolated copy", code=2)
                 if f not in originals:
-                    originals[f] = (work / f).read_bytes()
-                orig_bytes = originals[f]
-                old_b, new_b = m["old"].encode("utf-8"), m["new"].encode("utf-8")
-                positions, start = [], 0
-                while True:
-                    idx = orig_bytes.find(old_b, start)
-                    if idx < 0:
-                        break
-                    positions.append(idx)
-                    start = idx + len(old_b)
-                n, occ = len(positions), m.get("occ")
-                if n == 0:
-                    skipped.append({"id": m["id"], "reason": "old text not found"})
-                    continue
-                if occ is None and n > 1:
-                    skipped.append({"id": m["id"], "reason": f"old text occurs {n} times (give occ)"})
-                    continue
-                if occ is not None and n < occ:
-                    skipped.append({"id": m["id"], "reason": f"occ {occ} but the text occurs {n} times"})
-                    continue
-                at = positions[(occ or 1) - 1]
-                line = orig_bytes[:at].count(b"\n") + 1
-                mutated_bytes = orig_bytes[:at] + new_b + orig_bytes[at + len(old_b):]
-                check_cmds = [m["check"]] if m.get("check") else acceptance
-                result = apply_and_grade(f, mutated_bytes, check_cmds)
-                tally(result)
-                results.append({"id": m["id"], "path": f, "line": line,
-                                "what": m.get("what", ""), "result": result})
-        else:
-            for cand in candidates:
-                result = apply_and_grade(cand["path"], cand["source"].encode("utf-8"), acceptance)
-                tally(result)
-                results.append({"path": cand["path"], "line": cand["line"], "operator": cand["operator"],
-                                "original": cand["original"], "mutated": cand["mutated"], "result": result})
+                    originals[f] = target.read_bytes()
+                orig_sha = hashlib.sha256(originals[f]).hexdigest()
+                wait_next_second()
+                try:
+                    target.write_bytes(mutated_bytes)
+                    bump(target)
+                    return grade(check_cmds)
+                finally:
+                    try:
+                        target.write_bytes(originals[f])
+                        bump(target)
+                    except OSError:
+                        pass
+                    if file_hash(target) != orig_sha:
+                        die(f"{f} in the isolated copy was not restored to its original bytes", code=3)
+
+            if listed:
+                for m in mutants:
+                    f = m["file"]
+                    if f not in originals and not (work / f).is_file():
+                        skipped.append({"id": m["id"], "reason": "the file is not in the run's graded candidate"})
+                        continue
+                    if f not in originals:
+                        originals[f] = (work / f).read_bytes()
+                    orig_bytes = originals[f]
+                    old_b, new_b = m["old"].encode("utf-8"), m["new"].encode("utf-8")
+                    positions, start = [], 0
+                    while True:
+                        idx = orig_bytes.find(old_b, start)
+                        if idx < 0:
+                            break
+                        positions.append(idx)
+                        start = idx + len(old_b)
+                    n, occ = len(positions), m.get("occ")
+                    if n == 0:
+                        skipped.append({"id": m["id"], "reason": "old text not found"})
+                        continue
+                    if occ is None and n > 1:
+                        skipped.append({"id": m["id"], "reason": f"old text occurs {n} times (give occ)"})
+                        continue
+                    if occ is not None and n < occ:
+                        skipped.append({"id": m["id"], "reason": f"occ {occ} but the text occurs {n} times"})
+                        continue
+                    at = positions[(occ or 1) - 1]
+                    line = orig_bytes[:at].count(b"\n") + 1
+                    mutated_bytes = orig_bytes[:at] + new_b + orig_bytes[at + len(old_b):]
+                    check_cmds = [(m["check"], "green")] if m.get("check") else acceptance
+                    result = apply_and_grade(f, mutated_bytes, check_cmds)
+                    tally(result)
+                    results.append({"id": m["id"], "path": f, "line": line,
+                                    "what": m.get("what", ""), "result": result})
+            else:
+                for cand in candidates:
+                    result = apply_and_grade(cand["path"], cand["source"].encode("utf-8"), acceptance)
+                    tally(result)
+                    results.append({"path": cand["path"], "line": cand["line"], "operator": cand["operator"],
+                                    "original": cand["original"], "mutated": cand["mutated"], "result": result})
     except KeyboardInterrupt:
         print(f"MUTATION {run_id}: interrupted; the isolated copy was removed")
         return 130
+    except TreeError as exc:
+        die(f"cannot make a grading copy of the run's candidate: {exc}", code=2)
     finally:
-        shutil.rmtree(tmp_parent, ignore_errors=True)
         signal.signal(signal.SIGTERM, old_term)
         signal.signal(signal.SIGHUP, old_hup)
 
+    counts = f"killed {killed}, survived {survived}, stillborn {stillborn}" + (f", invalid {invalid}" if invalid else "")
     if listed:
-        run_count = killed + survived + stillborn
-        header = (f"MUTATION {run_id}: {run_count} mutants (listed in {args.mutants}), "
-                  f"killed {killed}, survived {survived}, stillborn {stillborn}")
+        run_count = killed + survived + stillborn + invalid
+        header = f"MUTATION {run_id}: {run_count} mutants (listed in {args.mutants}), {counts}"
         if skipped:
             header += f", skipped {len(skipped)}"
         print(header)
     else:
-        print(f"MUTATION {run_id}: {len(candidates)} mutants (sampled from {total}, seed 0), "
-              f"killed {killed}, survived {survived}, stillborn {stillborn}")
+        print(f"MUTATION {run_id}: {len(candidates)} mutants (sampled from {total}, seed 0), {counts}")
     if not build_cmd:
         print("note: without --build a mutant that does not compile counts as killed, not stillborn")
+    if invalid:
+        print("note: an invalid mutant's check could not run (exit 126 or 127) or ended by a signal; it tells nothing")
     for r in results:
-        if r["result"] not in ("survived", "stillborn"):
+        if r["result"] not in ("survived", "stillborn", "invalid"):
             continue
-        tag = "SURVIVED" if r["result"] == "survived" else "STILLBORN"
+        tag = r["result"].upper()
         if listed:
             print(f"{tag} {r['path']}:L{r['line']}: {r['id']}: {r['what']}")
         else:
@@ -8102,9 +8230,9 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
     for s in skipped:
         print(f"SKIP {s['id']}: {s['reason']}")
 
-    mutation = {"seed": 0, "max": args.max, "mode": "isolated", "killed": killed,
-                "survived": survived, "stillborn": stillborn, "skipped": skipped, "sampled": results}
-    mutation["candidates"] = (killed + survived + stillborn) if listed else total
+    mutation = {"seed": 0, "max": args.max, "mode": "isolated", "killed": killed, "survived": survived,
+                "stillborn": stillborn, "invalid": invalid, "skipped": skipped, "sampled": results}
+    mutation["candidates"] = (killed + survived + stillborn + invalid) if listed else total
     if listed:
         mutation["listed"] = args.mutants
     _write_meta_mutation(meta_path, run_dir, mutation, meta)
@@ -8113,9 +8241,9 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
 
 def cmd_mutate(args, conf):
     """Opt-in, bounded mutation testing of a reported run (--mutate RUN [--max N]): mutants of
-    the run's own changed lines (Python, C/C++) run in an isolated copy of the checkout, graded by the phase's
-    acceptance commands that are not marked (characterization) (all of them when every one is). Survivors are
-    information, not a failure."""
+    the run's own changed lines (Python, C/C++) run in a grading copy of its candidate, graded by the phase's
+    acceptance commands that are not marked (characterization) (all of them when every one is), each against its
+    expected result. Survivors are information, not a failure."""
     if args.max < 1:
         die("--max must be >= 1", code=2)
     repo = repo_root(args.repo or os.getcwd())
@@ -8134,12 +8262,18 @@ def cmd_mutate(args, conf):
     acceptance = meta.get("acceptance") or []
     if not acceptance:
         die(f"{run_id} has no acceptance commands; nothing would grade a mutant", code=2)
+    if not meta.get("candidate"):
+        die(f"{run_id} has no graded candidate (the run was rejected): mutants are made from the candidate and graded "
+            "in a copy of it, so --grade the run once the checkout holds only its scoped changes, then --mutate it",
+            code=2)
+    expect = list(meta.get("acceptance_expect") or []) + ["green"] * len(acceptance)
+    checks = list(zip(acceptance, expect))                     # (command, expected result), as grading reads them
     try:
         marked = parse_acceptance_marked((run_dir / "phase.md").read_text())
     except OSError:
         marked = []
     if [cmd for cmd, _ in marked] == acceptance:
-        acceptance = [cmd for cmd, char in marked if not char] or acceptance
+        checks = [c for c, (_, char) in zip(checks, marked) if not char] or checks
     check_timeout = CHECK_TIMEOUT_S
     state_path = run_dir / "state.json"
     if state_path.exists():
@@ -8147,7 +8281,7 @@ def cmd_mutate(args, conf):
             check_timeout = json.loads(state_path.read_text()).get("check_timeout") or CHECK_TIMEOUT_S
         except (OSError, ValueError):
             pass
-    return mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout)
+    return mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, checks, check_timeout)
 
 def cmd_list(conf):
     for name in EXECUTORS:
@@ -8333,11 +8467,12 @@ def main():
     parser.add_argument("--show", metavar="RUN_ID")
     parser.add_argument("--restore", metavar="RUN_ID")
     parser.add_argument("--mutate", metavar="RUN_ID",
-                        help="opt-in mutation testing of a reported run's own changed lines (Python, C/C++) in an "
-                             "isolated copy of the checkout; each mutant stops at its first failing acceptance command")
+                        help="opt-in mutation testing of a reported run's own changed lines (Python, C/C++) in a "
+                             "grading copy of its candidate; each mutant stops at the first acceptance command whose "
+                             "exit code is not its expected result (126, 127 or a signal: invalid)")
     parser.add_argument("--max", type=int, default=10, help="with --mutate: sample at most N mutants (default 10)")
     parser.add_argument("--mutants", metavar="FILE", help="with --mutate: a JSON list of planner-written mutants "
-                        "{id, file, old, new, occ?, check?, what?} to grade in an isolated copy")
+                        "{id, file, old, new, occ?, check?, what?} to grade in a grading copy of the run's candidate")
     parser.add_argument("--build", metavar="CMD", help="with --mutate (isolated): build command; it must configure and "
                         "build from a clean copy (it runs before the acceptance); a mutant whose build fails is stillborn")
     args = parser.parse_intermixed_args()   # allows: kimi --via dsh 2
