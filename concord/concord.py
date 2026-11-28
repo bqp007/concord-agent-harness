@@ -4142,27 +4142,6 @@ def cmd_run(args, target, phase, conf):
     return rc
 
 
-def run_diff_base(repo, meta):
-    """The commit a reported run's review diffs against: meta["head_before"] when that object is a commit here and
-    an ancestor of HEAD (so a run committed before its review still shows its changes), else the literal "HEAD".
-    Uses subprocess, not git(): a missing object (128) and "not an ancestor" (1) are answers, not failures."""
-    if not isinstance(meta, dict):
-        return "HEAD"
-    sha = meta.get("head_before")
-    if not isinstance(sha, str) or not sha:
-        return "HEAD"
-    try:
-        exists = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
-                                capture_output=True, text=True, timeout=PR_TIMEOUT)
-        if exists.returncode != 0:
-            return "HEAD"
-        ancestor = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", sha, "HEAD"],
-                                  capture_output=True, text=True, timeout=PR_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):
-        return "HEAD"
-    return sha if ancestor.returncode == 0 else "HEAD"
-
-
 def side_bytes(path):
     """What git compares for a path: a symlink's own target text (never the file it points to, which may be binary or a
     FIFO that blocks a read), a regular file's bytes, else nothing."""
