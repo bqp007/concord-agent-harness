@@ -27,7 +27,7 @@ Concord is a governance layer for coding agents. It separates three roles that o
 <p align="center"><a href="https://bqp007.github.io/concord-agent-harness/map/"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/fig2-loop-dark.svg"><img src="docs/figures/fig2-loop.svg" alt="The Concord loop: plan, grill, verifier, your go, failing tests, implement, check, review, report, your commit." width="760"></picture></a></p>
 <p align="center">Online: the <a href="https://bqp007.github.io/concord-agent-harness/">explainer</a> (the loop, step by step) and the <a href="https://bqp007.github.io/concord-agent-harness/map/">interactive map</a> (every command, skill and record).</p>
 
-Over 46 days of production use by one developer, Concord recorded 1,315 verdicts; 84% of phases given to a low-cost model passed on the first attempt.
+Over 46 days of production use by one developer, Concord recorded 1,315 verdicts. Low-cost models made the first attempt on two-thirds of the phases: in their checkout, 84% of those phases received a recorded PASS on the first attempt and 95% by the second. Executor list-price charges came to US$0.10 per phase with a recorded PASS (US$1.79 with the same tokens repriced at Claude Opus 5.5 rates); planning, checks and reviews ran on a flat-rate frontier subscription.
 
 ## Contents
 
@@ -56,7 +56,7 @@ Of the systems compared, only Concord binds an approval to the hash of the plan 
 | Plan mode and subagents (Claude Code) | Permission prompts and the plan | Nothing built in | Optional | Nothing built in |
 | Role-play frameworks (MetaGPT, ChatDev) | Nothing during a run | Unit tests or execution feedback | Author or same model | Typed documents or chat chains |
 | Workflow plugins (ECC, agentic-sdlc) | Prompt-text gates, advisory sign-offs | Reports quoting commands and exit codes | A separate agent | Gate reports, persisted state |
-| Self-improving harnesses (Harness²) | Nothing during a run | Behavioral contrasts | Automated selector or judge | Rollout ledgers |
+| Self-improving harnesses (Harness²) | Nothing during a run | Execution contrasts | Automated selector or judge | Rollout ledgers |
 | Concord | Every plan; the commit | Acceptance results the dispatcher re-ran | A fresh agent by risk tier; two families at high | Every run, verdict, cause and finding |
 
 ## How it works
@@ -128,14 +128,21 @@ One developer's ledger, 11 October to 25 November 2026, shipping a production mo
 
 | Measure | Value |
 |---|---|
-| Plans | 130, across 119 tickets |
+| Plans | 130, across 119 checkout groups (ticket worktrees, main checkouts, scratch checkouts) |
 | Recorded verdicts | 1,315: 1,156 PASS, 159 FAIL |
-| Failure causes | 72 executor, 51 plan gaps, 18 blocked, 13 test defects, 5 flaky |
-| Executor runs passing | 738 of 866 (85%) |
-| Executor phases passing on the first attempt | 585 of 696 (84%) |
-| Executor spend at list prices, 11 to 20 October | US$7.50 for 137 runs, median US$0.02 per run |
+| Failure causes, as the planner labeled them | 72 executor, 51 plan gaps, 18 blocked, 13 test defects, 5 flaky |
+| Phases first attempted by low-cost executors | 696 of 1,047 (66%) |
+| Executor phases with a recorded PASS on the first attempt, per checkout | 585 of 696 (84%) |
+| Executor phases with a recorded PASS by the second attempt, per checkout | 664 of 696 (95%) |
+| Executor phases without a PASS on their checkout | 25 of 696; 13 of them passed in another checkout of the same ticket |
+| A typical executor phase (medians) | 6.7 minutes of summed executor time (n = 696), about 190 changed lines (n = 497), 3 files in scope (n = 478), 2.1 million tokens processed (n = 692) |
+| Executor list-price charges per phase with a recorded PASS | US$0.10: US$64.27 for the 866 runs with a verdict, over 671 phases; US$0.12 with the 170 runs without a verdict (US$79.43) |
+| The same executor tokens repriced at frontier list prices (price-only) | US$0.89 per phase with a recorded PASS at Claude Sonnet 5.5 rates, US$1.79 at Claude Opus 5.5 rates |
+| Matched Claude Code activity plus executor verdict runs, at list prices | US$6 to US$9 per phase with a recorded PASS (1,016 phases, any runner) in three matching scenarios; executors are 0.7 to 1.1% of these charges |
 
-Method: the planner assigned each failure cause. The counts leave out 111 runs that a model provider refused. The spend row covers 11 to 20 October because the `pi` executor, which ran most later phases, records no per-run price. [docs/PILOT.md](docs/PILOT.md) designs a paired comparison of the full loop with a lighter path on matched tickets.
+Method: the rates are per checkout. An attempt is a run with a verdict on a phase in one checkout, by any runner and after any cause of failure (81 of the 86 later passes were executor retries); a run a model provider refused (111 runs, left out of every count), a refusal at the red-run gate and a run without a verdict are not attempts. A phase is one step of a plan with its own files and acceptance commands, and a later attempt starts with the evidence of the failed one; the workflow's own three-failure stop, enforced by the dispatcher before 3.0 and an instruction in the plugin from 3.0, counts only EXECUTOR failures. 499 of the 696 phases (72%) received a PASS as their earliest recorded event of any kind; 41 began with a provider refusal and 30 with a refusal at the red-run gate. The record spans Concord from its pre-release versions to 3.2, and the checks described above took their present form in versions 3.0 to 3.3 (21 to 27 November 2026), so most recorded runs passed under earlier, looser checks; of the 585 first-attempt passes, 386 kept a run record, and 286 of those show every acceptance command with its expected result and no forced verdict. Of the 111 phases that failed their first attempt, the planner labeled 59 of those failures as the executor's work, 33 as a gap in the plan and 19 as a blocked run, a test defect or a flaky check; no second rater checked the labels.
+
+The executor charges apply list prices read on 28 November 2026 to the recorded tokens of the 866 executor runs with a verdict, failed attempts included (2.19 billion tokens, US$64.27), divided by the 671 executor phases with a recorded PASS; 5 of those 671 got their first PASS from a Claude run whose cost is not in the numerator. The token kinds priced are uncached input, cache reads, cache writes (zero in every measured executor run) and output; for 180 runs the split between kinds is estimated from measured runs of the same executor and model family, and 12 verdict runs without a token record count as zero. The price-only row reprices the same executor tokens, attempts and cache reads at another model's list price with everything else fixed; it does not model how that model would have done the work. A frontier model wrote the plan, the file scope and the failing tests before an executor started. Planning, checks and reviews by Claude models, and the phases Claude models wrote, ran on a flat-rate frontier subscription; the matched row prices that Claude Code activity at list from the session transcripts, matched to the same checkout, the same repository, or those folders and their parent folders, on days with ledger runs. Not in the matched charges: reviews on low-cost models (US$31.69 at list prices for those with a token record), executor runs without a verdict (US$15.16), provider-refused runs, human time and subscription spend. [docs/PILOT.md](docs/PILOT.md) designs a paired comparison of the full loop with a lighter path on matched tickets.
 
 ## Citation
 
