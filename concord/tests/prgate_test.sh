@@ -187,9 +187,9 @@ opus 63 medium concord:reviewer-opus55 "$T/high_a.txt"; st 63
 has "FINDINGS OPEN" && [ $RC -eq 1 ] && ok "3 a later answer of the same head with a HIGH: FINDINGS OPEN (exit 1)" || { bad "3 open rc=$RC"; tail -3 "$T/out.txt"; }
 
 echo "== 4 a low-tier PR reaches REVIEWED at low; owner/repo#N uses the remote that names it"
-runpr 61 low docs.txt "echo 'd = 61' > docs.txt"
+PASSIT=1 runpr 61 low docs.txt "echo 'd = 61' > docs.txt"
 FAKE_JSON="$T/medium.txt" flash 61 fake/m --tier low; RC1=$?; st 61
-[ $RC1 -eq 0 ] && has "REVIEWED at low" && [ $RC -eq 0 ] && ok "4 a PR whose run was Risk: low, a flash review at low with only a MEDIUM: REVIEWED at low (the MEDIUM does not hold the gate)" \
+[ $RC1 -eq 0 ] && has "REVIEWED at low" && [ $RC -eq 0 ] && ok "4 a PR whose run was Risk: low and passed, a flash review at low with only a MEDIUM: REVIEWED at low (the MEDIUM does not hold the gate)" \
   || { bad "4 low PR rc=$RC1/$RC"; tail -3 "$T/out.txt"; }
 newpr 64 r.py 'r = 64'
 git -C "$C" remote set-url origin https://github.com/other/repo.git && git -C "$C" remote add harness https://github.com/me/kit.git \

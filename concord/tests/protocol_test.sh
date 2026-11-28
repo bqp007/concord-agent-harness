@@ -99,7 +99,7 @@ p = []
 try:
     base = {"findings": [{"severity": "high", "path": "./a.py", "line": "3", "problem": "p", "fix": "f",
                           "repro": {"input": 1, "expected": None}, "bogus": 1}],
-            "clauses": [{"clause": "c", "status": "pass"}], "tests": [{"test": "t", "discriminates": "YES"}]}
+            "clauses": [{"clause": "c", "status": "pass"}], "tests": [{"test": "t", "discriminates": "YES"}], "verdict": "FIX"}
     txt = "noise\nREVIEW-JSON\n{\"findings\": []}\nEND-REVIEW-JSON\nREVIEW-JSON\n```json\n" + json.dumps(base) + "\n```\nEND-REVIEW-JSON\ntrailing"
     obj, errs = d.parse_review_json(txt)
     if errs or obj is None:
@@ -115,7 +115,7 @@ try:
             p.append(f"clause/test defaults: {obj['clauses']} {obj['tests']}")
         if len(obj["findings"]) != 1:
             p.append("last block not used")
-    obj2, errs2 = d.parse_review_json("prose first {\"findings\": [{\"severity\": \"NOTE\", \"path\": \"b.py\", \"line\": 1, \"problem\": \"q\"}]} prose after")
+    obj2, errs2 = d.parse_review_json("prose first {\"findings\": [{\"severity\": \"NOTE\", \"path\": \"b.py\", \"line\": 1, \"problem\": \"q\"}], \"clauses\": [], \"tests\": [], \"verdict\": \"CLEAN\"} prose after")
     if errs2 or not obj2 or obj2["findings"][0]["severity"] != "NOTE":
         p.append(f"no-marker fallback: {errs2}")
     obj3, errs3 = d.parse_review_json("REVIEW-JSON\n{\"findings\": [{\"severity\": \"HIGH\", \"path\": \"a.py\", \"line\": 0, \"problem\": \"\"}, {\"severity\": \"LOW\", \"path\": \"\", \"line\": 2, \"problem\": \"x\"}]}\nEND-REVIEW-JSON")
@@ -138,7 +138,8 @@ try:
                 p.append(f"hostile input accepted: {hostile[:40]!r}")
         except Exception as exc:
             p.append(f"hostile input raised {exc.__class__.__name__}: {hostile[:40]!r}")
-    many = json.dumps({"findings": [{"severity": "NOTE", "path": "a.py", "line": i + 1, "problem": "q"} for i in range(30)]})
+    many = json.dumps({"findings": [{"severity": "NOTE", "path": "a.py", "line": i + 1, "problem": "q"} for i in range(30)],
+                       "clauses": [], "tests": [], "verdict": "CLEAN"})
     o, e = d.parse_review_json("prose " + many + " prose")
     if o is None or len(o["findings"]) != 30:
         p.append(f"unmarked answer with 30 findings not parsed: {e}")
