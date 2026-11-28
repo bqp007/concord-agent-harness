@@ -48,22 +48,30 @@ plan-integrity check. The billing guard is a filter on the model's name: it refu
 holds a Claude family word (claude, anthropic, sonnet, opus, haiku) on another harness, and a harness
 started without an explicit model. It cannot see which provider or account a harness routes an id to.
 
-The script does not verify the work. It snapshots the working tree (including gitignored paths),
-hashes the plan, runs the CLI in the repo root, and reports in-scope changes, changes outside the
-phase's write scope, its `Files:` and `Follow-through:` lists (source counted; untracked build/cache
-output listed separately), deletions, staged edits, git hooks/config edits, branch or HEAD movement,
-and any edit to the plan file. On OpenCode the write scope is enforced through its edit permission
-rules; elsewhere it is advisory.
-The calling agent re-runs the acceptance commands printed in the report (captured before the run)
-and records its verdict with --verdict.
+The script grades the work and leaves the judgment to the planner. It snapshots the working tree (including
+gitignored paths), hashes the plan, runs the CLI in the repo root, and reports the in-scope changes and what rejects
+the run: changes outside the phase's write scope, its `Files:` and `Follow-through:` lists (source counted; build and
+cache output listed separately), deletions, index changes, git hooks/config edits, branch or HEAD movement, and an
+edit to the plan file. On OpenCode the write scope is enforced through its edit permission rules; elsewhere it is
+advisory. A run it does not reject gets a candidate, the checkout's tree, and its acceptance commands run on a grading
+copy of that tree against each command's expected result (exit 0, or a failing test for one marked `(fails until`).
+The planner reads the diff and those results, records the verdict with --verdict (a PASS is refused while a result is
+not the expected one or the checkout no longer holds the graded candidate and state) and names a FAIL's cause.
 Before the executor starts, the acceptance commands run once on a grading copy of the untouched tree (red run): a
 phase whose acceptance already passes is not run (exit 6), because its tests do not test it.
-Exit codes: 2 usage/plan/lock, 3 session executor, 4 unknown model (--fork-graded: a run in the fork or --dest is open),
-5 billing guard, 6 baseline, 7 PASS refused (an acceptance result missing or not the expected one, or acceptance files
-changed), 8 PR review-round cap, 9 provider refusal, 10 DRIFT BLOCK or a reported plan, 11 plan text with no
-plan-verifier APPROVE or a plan read changed after it, 75 PR head
-unsettled or unverified (gh's head and the fetched pull ref differ, or one is unreadable; run again), 124 timeout, 125 resource limit (run watchdog);
---pr-status exits 1 unless the head is REVIEWED.
+Exit codes: 1 --pr-status short of REVIEWED, --plan-verdict REVISE, a partial --restore, --fork-graded with no run or no
+PASS for the fork; 2 usage, plan, lock or run state (a declared path that leaves the checkout, a lock that cannot be
+read, --grade or --restore beside a live run, a run id that does not fit the command, a verifier or review answer that
+does not hold one answer, a closed or empty PR, --mutate of a run with no candidate); 3 a Claude model on the run path,
+a tool (git, gh) missing or failing, a model review that ended with no usable answer, --check with a required tool
+missing; 4 unknown model (--fork-graded: a run in the fork or --dest is open); 5 billing guard; 6 baseline; 7 PASS
+refused (an acceptance result missing or not the expected one, a rejected run, a checkout that no longer holds the
+graded candidate, its grading files or the state it was graded in), or --grade refused (the checkout differs from the
+run's start outside its write scope); 8 PR review-round cap; 9 provider refusal; 10 DRIFT BLOCK or a reported plan;
+11 plan text with no plan-verifier APPROVE, or the approved revision's plan read gone, unreadable or changed after it;
+75 PR head unsettled or unverified (gh's head and the fetched pull ref differ, or one is unreadable; run again); 124
+timeout; 125 resource limit (run watchdog, or free disk below the floor); 130 a delegate run interrupted (its executor
+stopped and its lock released).
 Run artifacts live in <git-common-dir>/concord/<run-id>/ (outside the working tree).
 Repository notes for executors: ~/.claude/concord/repo-notes/<repo-dir-name>.md (binding facts,
 kept short; prepended to every task for that repository).
