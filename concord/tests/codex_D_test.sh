@@ -48,6 +48,12 @@ newrepo '# Plan\n## Design\nA phase looks like this:\n```markdown\n## Phase 1 - 
 dry qwen
 [ "$(acc)" = "['true']" ] && ok "a phase heading inside a code fence is no phase: the real Phase 1 and its command are read" \
   || bad "fenced example phase heading: acceptance $(acc)"
+newrepo '# Plan\n## Design\nA phase looks like this:\n```markdown\n## Phase 1 - example\n```\nDESIGN-AFTER-FENCE\n## Phase 1 - real\nFiles: a.py\nAcceptance:\n- `grep -q z a.py`\n'
+approve PLAN_T.md "$R" || exit 1
+run 'echo z >> a.py'; $DP --review "$(rid)" --packet --repo "$R" > "$T/out.txt" 2>&1
+PK=$(sed -n 's/^PACKET \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -f "$PK" ] && grep -qF "DESIGN-AFTER-FENCE" "$PK" && ok "a phase heading inside a code fence does not end the Design block of a review packet" \
+  || { bad "the Design block stopped at a fenced phase heading ($PK)"; tail -2 "$T/out.txt"; }
 newrepo '# Plan\n## Phase 1 - real\nFiles: a.py\nSteps:\n1. Add:\n```python\n# helper\ndef f(): pass\n```\nAcceptance:\n- `grep -q y a.py`\n'
 dry qwen
 [ "$(acc)" = "['grep -q y a.py']" ] && ok "a # line inside a code fence ends neither the phase nor a field: the Acceptance after it is read" \

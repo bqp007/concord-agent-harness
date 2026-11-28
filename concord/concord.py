@@ -4893,11 +4893,12 @@ def phase_of(text, phase):
 
 
 def plan_phase_text(meta):
-    """The run's phase as the plan on disk reads now; "" when the plan or the phase is gone or unreadable."""
+    """The run's phase as the plan on disk reads now, through its approval text as every reader of a phase reads it;
+    "" when the plan or the phase is gone or unreadable."""
     try:
         repo, plan = meta.get("repo"), meta.get("plan")
         if repo and plan:
-            return phase_of((Path(repo) / plan).read_text(), meta.get("phase"))
+            return phase_of(approval_text((Path(repo) / plan).read_text()), meta.get("phase"))
     except (SystemExit, Exception):
         pass
     return ""
@@ -4997,14 +4998,14 @@ def _process_review(raw_text, meta, root, repo, reviewer, run_id, diff_text, app
             "finding_ids": [f["id"] for f in findings] + [c["id"] for c in fails]}
 
 
-def review_files(repo, meta, live=False, cand=None):
+def review_files(repo, meta, cand=None):
     """The files of the run's graded change (start tree to candidate, or to `cand`, a stored tree, when given) that are
     its own: not a concurrent run's (in its Files: and not in this run's) and not what the report classed as generated
     (cache and build output such as __pycache__, .pytest_cache), so reviewers see the phase's work, not tool debris. A
-    file the run deleted is part of the change: every review shows its diff. `live` (--mutate, which mutates the
-    checkout) and a run without a candidate: the run's changed and created files that still exist."""
+    file the run deleted is part of the change: every review shows its diff. A run without a candidate: the run's
+    changed and created files that still exist."""
     gen = set(meta.get("generated", []))
-    if live or not meta.get("candidate"):
+    if not meta.get("candidate"):
         return [f for f in sorted(set(meta.get("changed", []) + meta.get("created", [])))
                 if f not in gen and (repo / f).is_file()]
     start, cand = (meta["start_tree"], cand) if cand else stored_trees(repo, meta)
@@ -5146,16 +5147,15 @@ def acceptance_block(run_dir, meta):
 
 def design_block(run_dir):
     """The plan's `## Design` section from the plan text the run used for its gate (plan.snapshot.md), labeled as the
-    design the plan approves; a phase heading ends it. No Design section (or no snapshot): no block."""
+    design the plan approves; a phase heading ends it, except inside a closed code fence (an example of a phase, as
+    phase_spans reads it). No Design section (or no snapshot): no block."""
     try:
         text = (Path(run_dir) / "plan.snapshot.md").read_text(errors="replace")
     except OSError:
         return ""
-    body = []
-    for line in plan_section(text, "Design"):
-        if PHASE_HEAD.match(line):
-            break
-        body.append(line)
+    body = plan_section(text, "Design", fences=True)
+    fenced = fenced_lines(body)
+    body = body[:next((i for i, line in enumerate(body) if i not in fenced and PHASE_HEAD.match(line)), len(body))]
     if not any(line.strip() for line in body):
         return ""
     tok = secrets.token_hex(8)
@@ -7396,11 +7396,14 @@ def cmd_grade(args):
     return 0
 
 
-def plan_section(text, name):
-    """Body lines of the plan's `## <name>` section: the heading's first words, up to the next `## ` heading."""
+def plan_section(text, name, fences=False):
+    """Body lines of the plan's `## <name>` section: the heading's first words, up to the next `## ` heading. With
+    `fences`, a heading inside a closed code fence (an example) neither starts nor ends a section."""
+    lines = text.splitlines()
+    fenced = fenced_lines(lines) if fences else set()
     body, keep = [], False
-    for line in text.splitlines():
-        if line.startswith("## "):
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and i not in fenced:
             keep = line.casefold().startswith(f"## {name}".casefold())
             continue
         if keep:
