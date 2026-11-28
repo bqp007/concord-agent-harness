@@ -5,6 +5,8 @@ on:
   pull_request:
 jobs:
   test:
+    # the main-branch ruleset requires "test (ubuntu-latest)" and "test (macos-latest)"; the extra Python run keeps its version in the name
+    name: ${{ matrix.python == '3.12' && format('test ({0})', matrix.os) || format('test ({0}, {1})', matrix.os, matrix.python) }}
     strategy:
       fail-fast: false
       matrix:
