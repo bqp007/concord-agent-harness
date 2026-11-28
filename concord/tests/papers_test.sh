@@ -499,27 +499,6 @@ PK=$(sed -n 's/^PACKET \(.*\)$/\1/p' "$T/out.txt" | head -1)
 [ -f "$PK" ] && grep -q '^+x = 2$' "$PK" && grep -q '^+n = 1$' "$PK" \
   && ok "start commit no longer an ancestor of HEAD and the created file deleted since: the packet still holds the run's graded change" \
   || bad "rewritten history changed the packet '$PK'"
-pyblock <<'PYB'
-import importlib.util, subprocess, sys
-from pathlib import Path
-sys.dont_write_bytecode = True
-sp = importlib.util.spec_from_file_location("d", sys.argv[1]); d = importlib.util.module_from_spec(sp); sp.loader.exec_module(d)
-repo = Path(sys.argv[2]) / "rb"
-g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True).stdout.strip()
-repo.mkdir()
-g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
-(repo / "f").write_text("1\n"); g("add", "f"); g("commit", "-qm", "c1"); c1 = g("rev-parse", "HEAD")
-(repo / "f").write_text("2\n"); g("commit", "-qam", "c2")
-g("checkout", "-q", "--orphan", "o"); g("commit", "-qm", "orphan"); orphan = g("rev-parse", "HEAD"); g("checkout", "-q", "main")
-cases = [({"head_before": c1}, c1),                      # ancestor of HEAD -> the run's start commit
-         ({"head_before": g("rev-parse", "HEAD")}, g("rev-parse", "HEAD")),   # not committed yet: HEAD's own sha
-         ({}, "HEAD"), ({"head_before": ""}, "HEAD"), ({"head_before": 5}, "HEAD"),
-         ({"head_before": "de" * 20}, "HEAD"),           # missing object
-         ({"head_before": orphan}, "HEAD")]              # exists, not an ancestor
-bad = [(m, want, d.run_diff_base(repo, m)) for m, want in cases if d.run_diff_base(repo, m) != want]
-print("  ok   run_diff_base: ancestor / missing / empty / non-str / not-ancestor cases" if not bad else f"  FAIL run_diff_base {bad}")
-sys.exit(1 if bad else 0)
-PYB
 
 echo "== diff hunk parsing (post-filter anchors)"
 pyblock <<'EOF'

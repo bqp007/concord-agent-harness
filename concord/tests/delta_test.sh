@@ -275,13 +275,15 @@ mkdir -p "$R/.claude"; printf '# Plan\n## Phase 1 - low run\nExecutor: deepseek-
 ( set -e; cd "$R"; git checkout -q main; git checkout -qb pr99 ) || { echo "setup failed: branch pr99"; exit 1; }
 approve .claude/PLAN_99.md "$R" || exit 1
 FAKE_ACTIONS='printf "x = 99\n" > a.py' $DP 1 --plan .claude/PLAN_99.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
-[ -n "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" ] || { echo "setup failed: run for PR 99"; cat "$T/out.txt"; exit 1; }
+RUN99=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -n "$RUN99" ] && $DP --verdict "$RUN99" PASS --repo "$R" > "$T/v99.txt" 2>&1 || { echo "setup failed: run for PR 99 and its PASS"; cat "$T/out.txt" "$T/v99.txt"; exit 1; }
 ( set -e; cd "$R"; git add -A; git commit -qm "run 99"; git push -qf origin HEAD:refs/pull/99/head; git checkout -q main; git branch -qD pr99 ) || { echo "setup failed: commit 99"; exit 1; }
 prjson 99; opus 99 low concord:reviewer-opus55 "$T/clean.txt" || { echo "setup failed: PR 99 low review"; cat "$T/out.txt"; exit 1; }
-# the fix commit is a second low run, so the runs account for a.py's whole change and the needed tier stays low
+# the fix commit is a second low run that passed, so the runs account for a.py's whole change and the needed tier stays low
 ( set -e; cd "$R"; git fetch -q origin refs/pull/99/head; git checkout -qb pr99 FETCH_HEAD ) || { echo "setup failed: branch pr99 fix"; exit 1; }
 FAKE_ACTIONS='printf "x = 100\n" > a.py' $DP 1 --plan .claude/PLAN_99.md --via qwen --model fake/m --no-baseline --repo "$R" > "$T/out.txt" 2>&1
-[ -n "$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)" ] || { echo "setup failed: fix run for PR 99"; cat "$T/out.txt"; exit 1; }
+RUN99=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1)
+[ -n "$RUN99" ] && $DP --verdict "$RUN99" PASS --repo "$R" > "$T/v99.txt" 2>&1 || { echo "setup failed: fix run for PR 99 and its PASS"; cat "$T/out.txt" "$T/v99.txt"; exit 1; }
 ( set -e; cd "$R"; git add -A; git commit -qm "fix 99"; git push -q origin HEAD:refs/pull/99/head; git checkout -q main; git branch -qD pr99 ) || { echo "setup failed: commit fix 99"; exit 1; }
 prjson 99
 FAKE_SEV=MEDIUM FAKE_PATH=a.py $DP --review-pr 99 --delta --via qwen --model fake/m --tier low --repo "$R" > "$T/out.txt" 2>&1; RC=$?; RD="$RUNS/$(rid)"

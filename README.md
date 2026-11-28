@@ -41,15 +41,15 @@ Each promise is kept by code up to its limit. A test asserts each refusal in the
 |---|---|---|---|
 | **P1.** Runs follow the approved plan text | A recorded APPROVE binds to the text's hash | An edited plan's run exits 11, even with `--user-approved` | The code checks only that a recorded APPROVE quotes the text's hash, not who wrote it, and it neither records nor checks your go/no-go |
 | **P2.** Tests fail before the code exists | The red run: acceptance runs on the untouched tree first | A delegated phase whose tests already pass exits 6 | A session run (`--begin`) only warns |
-| **P3.** A PASS rests on recorded results | The dispatcher re-runs the acceptance commands on a copy of the run's result | An unexpected or missing result: PASS exits 7 | A forced PASS is listed first; weak tests pass weak code |
+| **P3.** A PASS rests on recorded results | The dispatcher re-runs the acceptance commands on a copy of the run's result | An unexpected or missing result: PASS exits 7 | A forced PASS, or one with no acceptance command, is listed first; weak tests pass weak code |
 | **P4.** Each phase declares its files first | A change outside `Files:` and `Follow-through:` rejects the run | `REJECTED (not graded)`; PASS exits 7 | Only OpenCode refuses the edit while the run is in progress; on the other executors the edit is found after the run |
-| **P5.** Review rises with risk | Each file in a pull request needs its riskiest run's tier; high needs two model families | `--pr-status` exits 1 until every file is covered, no finding open | A review covers only what its reviewer read |
-| **P6.** Every run is recorded; overrides come first | Ledgers keep every verdict, cause and finding, and the report's first section lists every override, such as a forced PASS | `--report` exits 2 while a run lacks a verdict | The planner alone assigns the causes |
-| **P7.** You commit | Concord never commits; a staged file or moved HEAD rejects a run | A file staged after the run began makes `--grade` exit 7 and names the file | No code stops the planning session from committing; that rule is an instruction |
+| **P5.** Review rises with risk | Each file in a pull request needs its riskiest run's tier; high needs two model families | `--pr-status` exits 1 until every file is covered, no BLOCKER, HIGH or clause FAIL open | A review covers only what its reviewer read, at the rank of the reviewer name the caller records |
+| **P6.** Every run is recorded; overrides come first | Ledgers keep every verdict, cause and finding, and the report's first section lists every override, such as a forced PASS | `--report` exits 2 while a run lacks a verdict | The planner alone assigns the causes; the report is a status export, not a check that every phase passed |
+| **P7.** You commit | Concord never commits to a branch (the only commit object it writes is the snapshot `wt.py fork` makes with `git commit-tree`, which no branch or ref points to); any index change or moved HEAD rejects a run | A file staged after the run began makes `--grade` and a later PASS exit 7 and names the file | No code stops the planning session from committing; that rule is an instruction |
 
 ## How it differs
 
-Of the systems compared, only Concord binds an approval to the exact plan text and re-runs the acceptance commands itself. Its dispatcher refuses a run whose plan text has no recorded APPROVE, and a PASS unless every acceptance command it re-ran gave the expected result. Source: [docs/COMPARISON.md](docs/COMPARISON.md).
+Of the systems compared, only Concord binds an approval to the hash of the plan text its verifier read and re-runs the acceptance commands itself. Its dispatcher refuses a run whose plan text has no recorded APPROVE, and a PASS unless every acceptance command it re-ran gave the expected result. Source: [docs/COMPARISON.md](docs/COMPARISON.md).
 
 | Kind of harness | What you approve | What a PASS rests on | Who reviews | What is recorded |
 |---|---|---|---|---|
@@ -80,7 +80,7 @@ bash install.sh --dry-run   # previews; writes nothing
 bash install.sh
 ```
 
-The install backs up and edits `~/.claude/CLAUDE.md` and `~/.claude/settings.json`, letting `gh`, `git push`, `git fetch`, `git pull` and `git clone` run outside Claude Code's sandbox in every project. It needs bash, git, Python 3.9+ and Claude Code; `--plugin` uses the marketplace instead. To update: `git pull`, `bash install.sh`, restart Claude Code ([setup](docs/SETUP.md)).
+The install backs up and edits `~/.claude/CLAUDE.md` and `~/.claude/settings.json`, letting `gh`, `git push`, `git fetch`, `git pull` and `git clone` run outside Claude Code's sandbox in every project. It needs bash, git, Python 3.9+ and Claude Code; `--plugin` uses the marketplace instead. To update: `git pull`, then `bash install.sh` (or `bash install.sh --plugin` and the two `claude plugin` update commands for a marketplace install), then restart Claude Code ([setup](docs/SETUP.md#upgrade)).
 
 ## Try it without credentials
 
@@ -116,9 +116,9 @@ Full table: [docs/REFERENCE.md](docs/REFERENCE.md#components).
 
 ## Safety and limits
 
-- **Enforced by the dispatcher:** plan approval, red run, PASS rule, scope rejection, review tiers, billing guard, executor environment allow-list.
+- **Enforced by the dispatcher:** plan approval, red run, PASS rule, scope rejection, review tiers, a billing guard on model names, an executor environment allow-list that never passes Claude or Anthropic variables.
 - **Advisory:** the executor contract and hook rules.
-- **Not a sandbox:** agents run commands as your user; acceptance commands run the executor's code unsandboxed ([SECURITY.md](SECURITY.md)).
+- **Not a sandbox:** agents run commands as your user; the red run and the acceptance commands run before and after each run, unsandboxed, with your environment ([SECURITY.md](SECURITY.md)).
 
 The executors are OpenCode and the `pi` CLI; the native `qwen`, `dsh` and `kimi` adapters also ship but are untested in this release. The demo needs no executor. In execute mode the planning session writes every phase, so an executor is needed only for the reviews that run on a cheap flash model: the low-tier review, and the second review from another model family that a high-risk change needs ([setup](docs/SETUP.md#executors)).
 

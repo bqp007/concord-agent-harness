@@ -325,7 +325,7 @@ python3 -I -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p))
 for k in ("end_hashes", "backup_hashes", "end_kinds", "end_exec"): m[k]["../escape.txt"] = m[k]["a.py"]
 m["backed_up"] = m.get("backed_up", []) + ["../escape.txt"]; json.dump(m, open(p, "w"))' "$R/.git/concord/$G/meta.json"
 $DP --restore "$G" --repo "$R" > "$T/out.txt" 2>&1
-[ "$(cat "$T/escape.txt")" = "$ESC" ] && has "../escape.txt: not restored (its path resolves outside the repository)" && ! has "Traceback" \
+[ "$(cat "$T/escape.txt")" = "$ESC" ] && has "../escape.txt: not restored (its path leaves the repository)" && ! has "Traceback" \
   && ok "8 a backup path that resolves outside the repository is not restored, though its end state and start hash match" || { bad "8 backup path outside the repository was written or not named"; cat "$T/out.txt"; }
 rm -f "$T/escape.txt"
 mkrepo "$BASIC"; run "echo y >> a.py"; G=$(rid); AY=$(cat "$R/a.py")

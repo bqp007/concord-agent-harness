@@ -134,7 +134,7 @@ NODES = [
     dict(id="verify-plan", kind="skill", title="verify-plan", sub="A fresh verifier's check",
          file=f"{ADAPTER}/skills/verify-plan/SKILL.md",
          reads="The plan read that concord.py --lint writes for the plan.",
-         writes="The verifier's answer, recorded with concord.py --plan-verdict for the exact text it read.",
+         writes="The verifier's answer, recorded with concord.py --plan-verdict for the hash of the text it read.",
          never="Has the planner check its own plan, or lets owner words stand in for a new verdict after an edit."),
     dict(id="lean-testing", kind="skill", title="lean-testing", sub="The check that catches",
          file=f"{ADAPTER}/skills/lean-testing/SKILL.md",
@@ -170,8 +170,8 @@ NODES = [
          reads="One review packet or brief, then repository files only to confirm a suspicion, in the read-only "
                "copy the packet names.",
          writes="One REVIEW-JSON block; each confirmed BLOCKER, HIGH or MEDIUM finding streamed as it lands.",
-         never="Edits files, runs git commands that change anything, or reports a finding it cannot anchor to a "
-               "line of the diff."),
+         never="Edits repository files, runs git commands that change anything, or reports a finding it cannot "
+               "anchor to a line of the diff."),
     dict(id="reviewer-delta", kind="judge", title="reviewer-delta", sub="Checks a fix's delta",
          file=f"{ADAPTER}/agents/reviewer-delta.md",
          reads="One delta packet: the open findings and the numbered hunks of the fix.",
@@ -221,7 +221,7 @@ NODES = [
          source="concord/wt.py", wt=True,
          detail="new makes the worktree from the main checkout and links the configured folders; fork and join "
                 "run a phase that shares a file in its own copy and apply its graded change back; done archives "
-                "the plan and removes the worktree once you have committed.",
+                "the plan and removes the worktree once you have committed, no run is open in it and its run lock reads.",
          type="python3 ~/.claude/concord/wt.py new <TICKET>",
          never="Deletes a branch or a commit."),
     dict(id="red", kind="step", title="tests fail first", sub="Written, then a red run",
@@ -230,60 +230,66 @@ NODES = [
                 "that each fails for the stated reason; a routine change under characterization checks needs "
                 "none. Before an executor run the dispatcher runs the phase's acceptance on a copy of the "
                 "untouched tree: a phase whose acceptance already passes is not run (exit 6), because its tests "
-                "do not test it. A session run (--begin) records the same baseline and warns."),
+                "do not test it. A command marked (fails until ...) counts as red only as a failing test: not a "
+                "timeout, a command that cannot run or one a signal ended, while an abort counts. A session run "
+                "(--begin) records the same baseline and warns."),
     dict(id="check", kind="step", title="check", sub="Grades the candidate",
          source="concord/concord.py", flags=["--verdict", "--cause", "--grade"], cmd=["--verdict"],
          detail="After a run the checkout becomes its candidate, and the dispatcher runs the acceptance commands "
                 "on a copy of it, never on the executor's account. The planning session reads the report and "
                 "the change, then records PASS or FAIL with a cause. A PASS is refused (exit 7) when a result is "
                 "missing or unexpected, the run was rejected, or the checkout no longer holds the graded "
-                "candidate. Only EXECUTOR failures count as attempts: three, then you decide.",
+                "candidate and the state it was graded in. --grade needs the checkout to itself. Only EXECUTOR failures count as attempts: three, then you decide.",
          never="Takes the executor's own account of its work."),
     dict(id="review", kind="step", title="review", sub="By risk tier", view="review-tiers",
          source=f"{ADAPTER}/skills/review-change/gate.md",
          flags=["--review", "--packet", "--review-record", "--review-pr", "--delta"],
          detail="Each implementing phase is reviewed at its Risk: tier: low by a flash model, approve-only; medium "
                 "by reviewer-opus55; high by both at once. A round is a full review, the fixes, then a delta "
-                "review that closes the findings it shows fixed; the loop stops at no open BLOCKER or HIGH. A "
-                "review reads the run's graded change in a read-only copy of the candidate."),
+                "review of the fix (at the pull request gate the dispatcher closes each finding it shows fixed); "
+                "the loop stops at no open BLOCKER, HIGH or clause FAIL. A review reads the run's graded change in a read-only copy of the candidate."),
     dict(id="report", kind="step", title="report", sub="From recorded data",
          source="concord/concord.py", flags=["--report"], cmd=["--report"],
          detail="Writes the test report once every run of the plan has a verdict. It opens with the overrides "
-                "(forced PASS, owner words and their use, waivers, phases reviewed below their risk), then each "
-                "phase with who wrote it, the plan revision, the graded candidate and its review, the Test plan, "
-                "each finding's outcome, the open items and the time against the ETA. Writing it stops the drift "
-                "clock and closes the plan to new runs (exit 10).",
+                "(forced PASS, PASS with no acceptance command, skipped red runs, owner words and their use, "
+                "waivers, files reviewed below their risk), then each phase with who wrote it, the plan revision, the graded candidate and its review, the Test plan, "
+                "each PR finding's outcome, the open items and the time against the ETA. It is a status export, "
+                "not a check that every phase passed. Writing it stops the drift clock and closes the plan to new "
+                "runs (exit 10).",
          never="Writes while a run of the plan is open or has no verdict (exit 2)."),
     dict(id="lint", kind="step", title="--lint", sub="Writes the plan read",
          source="concord/concord.py", flags=["--lint"], cmd=["--lint"],
          detail="A read-only pre-flight of a phase that makes no model call: ACCEPTANCE LINT lines for defects in "
                 "acceptance commands that plan reviews kept rediscovering, and PLAN LINT lines for missing "
-                "Size:, ETA: or Tests: lines. It writes the plan's approval-relevant text to a plan read named by "
+                "Size:, ETA: or Tests: lines and for a phase with two headings or a field given twice. It writes the plan's approval-relevant text to a plan read named by "
                 "its hash and prints PLAN-READ: <path>."),
     dict(id="plan-verdict", kind="step", title="--plan-verdict", sub="Records the APPROVE",
          source="concord/concord.py", flags=["--plan-verdict"], cmd=["--plan-verdict"],
          detail="Reads the verifier's answer. An APPROVE that quotes the hash of a plan read of the plan's current "
-                "text becomes the next approved revision of the ticket; a REVISE records nothing (exit 1). Only "
-                "that text opens --begin and executor runs.",
+                "text becomes the next approved revision of the ticket; a REVISE records nothing (exit 1), and "
+                "an answer with more than one VERDICT or PLAN-HASH line records nothing (exit 2). Only that text "
+                "opens --begin and executor runs.",
          never="Records an approval for a plan read that no longer hashes to its name."),
     dict(id="estimate", kind="step", title="--estimate", sub="Lanes, critical path, ETA",
          source="concord/concord.py", flags=["--estimate"], cmd=["--estimate"],
          detail="Turns each phase's Size: and After: waits, and the median and p75 run times in the run ledger, "
                 "into phase minutes, the lanes, the critical path and the ETA, and stores the ETA for the drift "
-                "gate. Code computes; the model challenges."),
+                "gate. ESTIMATE LINT lines name the waits it ignores. Code computes; the model challenges."),
     dict(id="begin-end", kind="step", title="--begin / --end", sub="A session run",
          source="concord/concord.py", flags=["--begin", "--end", "--abort"], cmd=["--begin", "--end"],
          detail="Wraps a phase written by the planning session or a Claude implementer subagent, so it gets the "
                 "same gates, backup, scope report and plan check as an executor run. --begin refuses a plan text "
                 "with no APPROVE (exit 11) and a drift block (exit 10), takes the run lock and prints the run's "
-                "snapshot of the approved plan; --end writes the report."),
+                "snapshot of the approved plan; --end writes the report and refuses an executor run, a run begun "
+                "in another checkout and one without its session lock; --abort stops a live executor run first."),
     dict(id="executor-run", kind="step", title="executor run", sub="One phase, external CLI",
          source="concord/concord.py", flags=["words", "--extra", "--wall"],
          type="python3 ~/.claude/concord/concord.py <model> <phase> --plan PLAN_<ticket>.md",
-         detail="Runs one phase on an external coding-agent CLI under the executor contract: it records the start "
-                "tree, backs up in-scope files, runs the red run, starts the executor in the checkout, then "
-                "reports from snapshots, never from the executor's account. A change outside the write scope, a "
-                "deletion, a staged path or a moved branch rejects the run."),
+         detail="Runs one phase on an external coding-agent CLI under the executor contract: it backs up in-scope "
+                "files, records the start tree and the start state, runs the red run, starts the executor in the "
+                "checkout, then reports from snapshots, never from the executor's account. A change outside the "
+                "write scope, a deletion outside it, any index change, a plan edit or a moved HEAD or branch "
+                "rejects the run."),
     dict(id="run-record", kind="step", title="each run", sub="Session or executor",
          source="concord/concord.py", flags=["--begin", "--end"],
          detail="Every run, a session run between --begin and --end or an executor run, checks the plan's "
@@ -293,8 +299,8 @@ NODES = [
          source="concord/concord.py", flags=["--pr-status", "--exclude"], cmd=["--pr-status"],
          detail="Reads the pull request's diff from its merge base to its current head. Each file needs the "
                 "highest Risk: among the runs whose work is in the PR's commits, or medium when no run's is. It "
-                "prints REVIEWED, and exits 0, only when no finding is open and every file is covered at its tier "
-                "by a review that read it, or excluded by the owner's words naming it."),
+                "prints REVIEWED, and exits 0, only when no BLOCKER, HIGH or clause FAIL is open and every file is "
+                "covered at its tier by a review that read it, or excluded by the owner's words naming it."),
     dict(id="tier", kind="step", title="tier", sub="Risk: and the floor",
          source=f"{ADAPTER}/skills/review-change/gate.md", flags=["--tier"],
          detail="A phase's tier is its Risk: line, medium when it has none, raised for matching non-test files by "
@@ -313,13 +319,13 @@ NODES = [
     dict(id="high", kind="step", title="high tier", sub="Both, at the same time",
          source=f"{ADAPTER}/skills/review-change/gate.md", flags=["--review", "--packet"],
          detail="reviewer-opus55 and, started at the same time, a flash review from another model family, whose "
-                "findings join the same list. The report lists a high phase without that second review under "
-                "Overrides."),
+                "findings join the same list. The report lists under Overrides each file of the change that "
+                "no review at the tier read, or that no review from another model family read."),
     dict(id="delta", kind="step", title="delta review", sub="Reads only the fix",
          source=f"{ADAPTER}/skills/review-change/gate.md", flags=["--delta"],
          detail="After a fix, a delta review answers for each open finding (yes with the lines as evidence, else "
-                "no or unsure) and ties each changed hunk to the finding it fixes. A hunk that changes anything "
-                "else stays for a review at its file's tier. Delta reviews run on flash, else on reviewer-delta, "
+                "no or unsure) and ties each changed hunk to the finding it fixes, within that finding's files. A hunk that changes "
+                "anything else stays for a review at its file's tier, and a fix that rewrites a file is refused. Delta reviews run on flash, else on reviewer-delta, "
                 "never on Opus."),
 
     # --- files and records ---------------------------------------------------------------------------------------
@@ -332,8 +338,9 @@ NODES = [
     dict(id="plan-read", kind="file", title="plan read", sub="plan-reads/<hash>.md",
          source="concord/concord.py",
          detail="--lint writes the plan's approval-relevant text to the runs root as plan-reads/<hash>.md. The "
-                "verifier reads this file and quotes its hash, --plan-verdict records that hash, and each run "
-                "checks that the stored read still holds the approved text."),
+                "verifier reads this file and quotes its hash, --plan-verdict records that hash (the first 16 hex "
+                "digits of the text's SHA-256, line endings aside), and a run exits 11 when the stored read is "
+                "gone, unreadable or no longer holds the approved text."),
     dict(id="drift-json", kind="file", title="drift.json", sub="Approvals, ETA, clock",
          source="concord/concord.py",
          detail="In the runs root, per ticket: the approved revisions (the plan read hashes), the ETA that "
@@ -341,9 +348,10 @@ NODES = [
                 "1.2 times the measure and blocks at 1.5 times (exit 10)."),
     dict(id="run-folder", kind="file", title="run folder", sub="concord/<run-id>/",
          source="concord/concord.py",
-         detail="One folder per run under the repository's git directory, outside the working tree: the backup of "
-                "in-scope files, the run's snapshot of the approved plan and phase, the baseline and acceptance "
-                "results, report.md, meta.json with the start tree and the candidate, and the review answers."),
+         detail="One owner-only folder per run under the repository's git directory, outside the working tree: "
+                "the executor's prompt and raw output, the backup of in-scope files and pinned grading inputs, the "
+                "run's snapshot of the approved plan and phase, the baseline and acceptance results, report.md, "
+                "meta.json with the start tree and the candidate, and the review answers."),
     dict(id="runs-jsonl", kind="file", title="runs.jsonl", sub="Every run, every repo",
          source="concord/concord.py",
          detail="~/.claude/concord/runs.jsonl: one line per run and per verdict, across repositories, written best "
@@ -399,12 +407,12 @@ NODES = [
     dict(id="exit-7", kind="stop", title="exit 7", sub="PASS refused",
          source="concord/concord.py",
          detail="An acceptance result is missing or not the expected one, the run was rejected, a post-run command "
-                "changed the tree, or the checkout no longer holds the graded candidate or its grading files. "
-                "--force records PASS (forced), which the report lists first, under Overrides."),
+                "changed the tree, or the checkout no longer holds the graded candidate, its grading files or "
+                "the state it was graded in. --force records PASS (forced), which the report lists first, under Overrides."),
     dict(id="exit-1", kind="stop", title="exit 1", sub="Not REVIEWED yet",
          source="concord/concord.py",
-         detail="--pr-status exits 1 unless the PR's current head is REVIEWED: an open finding, or a file not "
-                "covered at its tier by a review that read it. A review counts at most at its reviewer's rank, "
+         detail="--pr-status exits 1 unless the PR's current head is REVIEWED: an open BLOCKER, HIGH or clause "
+                "FAIL, a file not covered at its tier by a review that read it, no changed file, or a closed PR. A review counts at most at its reviewer's rank, "
                 "and owner words never raise it."),
 ]
 

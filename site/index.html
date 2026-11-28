@@ -53,7 +53,7 @@
       </div>
       <div>
         <span class="eyebrow">Version</span>
-        <p>3.3.0</p>
+        <p>3.4.0</p>
         <p class="note">Python 3.9+, standard library only</p>
       </div>
       <div>
@@ -98,7 +98,7 @@
       </article>
     </div>
 
-    <p>The <button type="button" class="term is-strong" data-term="dispatcher">dispatcher</button> is <code>concord.py</code>, a standard-library Python script. It enforces what a prompt alone cannot: a plan approval bound to the exact plan text the <button type="button" class="term" data-term="verifier">plan verifier</button> was asked to judge, a <button type="button" class="term" data-term="red-run">red run</button> before any code, a <button type="button" class="term" data-term="scope">write scope</button> checked against snapshots of the checkout, acceptance results taken on a copy of the <button type="button" class="term" data-term="candidate">candidate</button>, review tiers, and a <button type="button" class="term" data-term="ledger">ledger</button> of every verdict with its cause.</p>
+    <p>The <button type="button" class="term is-strong" data-term="dispatcher">dispatcher</button> is <code>concord.py</code>, a standard-library Python script. It enforces what a prompt alone cannot: a plan approval bound to the hash of the plan text the <button type="button" class="term" data-term="verifier">plan verifier</button> read, a <button type="button" class="term" data-term="red-run">red run</button> before any code, a <button type="button" class="term" data-term="scope">write scope</button> checked against snapshots of the checkout, acceptance results taken on a copy of the <button type="button" class="term" data-term="candidate">candidate</button>, review tiers, and a <button type="button" class="term" data-term="ledger">ledger</button> of every verdict with its cause.</p>
     <p>Each ticket runs in one of two modes. In <button type="button" class="term" data-term="execute-mode">execute mode</button> the planning session writes every phase; in <button type="button" class="term" data-term="delegate-mode">delegate mode</button> each phase goes to the <button type="button" class="term" data-term="executor">executor</button> the plan assigns, free tiers first for the bulky ones. The loop around the writing is the same in both.</p>
   </section>
 
@@ -204,8 +204,8 @@
         <h3 id="h-verifier"><span class="num">3.</span> An independent verifier</h3>
         <button type="button" class="fig-chip k-judge" data-fig-step="verifier" aria-label="Show step 3 in figure">&uarr; in figure</button>
       </div>
-      <p><code>concord.py --lint</code> checks each phase without a model call and writes the <button type="button" class="term" data-term="plan-read">plan read</button>: the approval-relevant text of the plan, saved under a name taken from its hash. The <code>plan-verifier</code> agent reads that file and checks the plan against the code: that every item serves the goal, that its claims about interfaces and callers are true, that each acceptance command fails before the work, and that each <code>Risk:</code> fits what the phase touches. It answers with CUT, MERGE and FIX items.</p>
-      <p><code>--plan-verdict</code> records an APPROVE answer that quotes the plan read&rsquo;s hash, and it holds only for that exact text. The dispatcher checks the hash, not who wrote the answer. Every run reads the plan once and checks that text against the approved revisions; a run whose plan text has none exits 11, and no words of yours open that gate.</p>
+      <p><code>concord.py --lint</code> checks each phase without a model call and writes the <button type="button" class="term" data-term="plan-read">plan read</button>: the approval-relevant text of the plan, saved under a name taken from its hash. The <code>plan-verifier</code> agent reads that file and checks the plan against the code by reading it: that every item serves the goal, that its claims about interfaces and callers are true, that each acceptance command would fail before the work, and that each <code>Risk:</code> fits what the phase touches. It answers with CUT, MERGE and FIX items.</p>
+      <p><code>--plan-verdict</code> records an APPROVE answer that quotes the plan read&rsquo;s hash, and it holds only for text with that hash: the plan without the prose of its Open questions, Handoff and Passes sections, read line by line so that line endings do not change it. An answer with more than one VERDICT or PLAN-HASH line records nothing. The dispatcher checks the hash, not who wrote the answer. Every run reads the plan once and checks that text against the approved revisions; a run whose plan text has none exits 11, and no words of yours open that gate.</p>
       <div class="codeblock">
         <span class="code-label">Demo output &middot; lint and the plan read (paths shortened)</span>
 <pre class="wrap"><code><span class="head">3. Lint: dry-run the phase pre-flight so the questions are visible before spending a token.</span>
@@ -278,8 +278,8 @@ changed in scope: cart.py (+1 -1)
         <h3 id="h-check"><span class="num">7.</span> Check</h3>
         <button type="button" class="fig-chip k-disp" data-fig-step="check" aria-label="Show step 7 in figure">&uarr; in figure</button>
       </div>
-      <p>After the run, the dispatcher compares the checkout with the start state it kept in its own memory, where the executor cannot rewrite it. A change outside the write scope, a deletion outside it, a staged path or a moved HEAD rejects the run: no post-run command runs and there is no candidate. Otherwise the checkout as the writer left it becomes the run&rsquo;s candidate, and the acceptance commands run on a copy of it.</p>
-      <p>The report comes from these snapshots, never from the writer&rsquo;s account. A PASS needs the expected result of every acceptance command, in a checkout that still holds the candidate; otherwise <code>--verdict PASS</code> exits 7. A FAIL is recorded with its cause, and only EXECUTOR failures count as attempts: after three, the planner stops and asks you.</p>
+      <p>After the run, the dispatcher compares the checkout with the start state it kept in its own memory, where the executor cannot rewrite it. A change outside the write scope, the deletion of a file outside it that is not build output, any change to the index, an executor&rsquo;s edit of the plan, or a moved HEAD rejects the run: no post-run command runs and there is no candidate. The red run ran on a copy of the start tree after that start state was taken, so what it changed counts too. Otherwise the checkout as the writer left it becomes the run&rsquo;s candidate, and the acceptance commands run on a copy of it.</p>
+      <p>The report comes from these snapshots, never from the writer&rsquo;s account. A PASS needs the expected result of every acceptance command, in a checkout that still holds the candidate and the state it was graded in; otherwise <code>--verdict PASS</code> exits 7. A FAIL is recorded with its cause, and only EXECUTOR failures count as attempts: after three, the planner stops and asks you.</p>
       <div class="codeblock">
         <span class="code-label">Demo output &middot; delegate mode, attempt 2 (excerpt, paths shortened)</span>
 <pre class="wrap"><code><span class="head">7. Attempt 2: the executor edits only cart.py, so the failing test should now pass.</span>
@@ -305,7 +305,7 @@ baseline: all acceptance commands failed before the change, as expected (check t
         <div class="tier"><div class="bar" aria-hidden="true"><i class="on"></i><i class="on"></i><i></i></div><span class="eyebrow">Medium, the default</span><p><strong>Opus 5.5</strong>, as an independent reviewer agent.</p></div>
         <div class="tier"><div class="bar" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i></div><span class="eyebrow">High</span><p><strong>Opus 5.5 and a flash model from another family</strong>, at the same time; their blind spots differ.</p></div>
       </div>
-      <p>A finding needs a reproduction to stay above NOTE. Confirmed findings are fixed, then a cheap <button type="button" class="term" data-term="delta">delta review</button> closes each finding it shows fixed; the loop stops at zero open BLOCKER and HIGH findings. Before merge, <code>concord.py --pr-status</code> exits 0 only when every file of the current diff is covered at its tier and no finding is open.</p>
+      <p>A finding needs a reproduction to stay above NOTE. Confirmed findings are fixed, then a cheap <button type="button" class="term" data-term="delta">delta review</button> shows which findings the fix closed; the loop stops at zero open BLOCKER, HIGH and clause FAIL findings. Before merge, <code>concord.py --pr-status</code> exits 0 only when every file of the current diff is covered at its tier and no BLOCKER, HIGH or clause FAIL is open; there the dispatcher closes a finding when a later review cites the lines that fix it.</p>
       <div class="codeblock">
         <span class="code-label">Demo output &middot; the low-tier review and the verdict</span>
 <pre class="wrap"><code><span class="head">8. Review: a cheap model reads the diff and returns a CLEAN REVIEW-JSON answer.</span>
@@ -325,7 +325,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <h3 id="h-report"><span class="num">9.</span> Report</h3>
         <button type="button" class="fig-chip k-disp" data-fig-step="report" aria-label="Show step 9 in figure">&uarr; in figure</button>
       </div>
-      <p>Once every run of the plan has a verdict, <code>concord.py --report</code> writes the test report from recorded data, stops the drift clock and closes the plan to new runs: a later run on it exits 10. The report opens with the <button type="button" class="term" data-term="overrides">overrides</button>: each forced PASS beside its failed commands, each waiver and owner go-ahead, and each PASS whose phase a later revision changed. Then come the phases, with who wrote each, the plan revision its run followed, the graded candidate and its latest review.</p>
+      <p>Once every run of the plan has a verdict, <code>concord.py --report</code> writes the test report from recorded data, stops the drift clock and closes the plan to new runs: a later run on it exits 10. The report opens with the <button type="button" class="term" data-term="overrides">overrides</button>: each forced PASS beside its failed commands, each PASS with no acceptance command, each skipped red run, each waiver and owner go-ahead, and each PASS whose phase a later revision changed. Then come the phases, with who wrote each, the plan revision its run followed, the graded candidate and its latest review.</p>
       <div class="codeblock">
         <span class="code-label">Demo output &middot; the phase table of each ticket&rsquo;s report</span>
 <pre><code><span class="head">11. Reports: each ticket's phase table names who wrote the phase, the plan revision, the candidate and its review.</span>
@@ -348,7 +348,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <h3 id="h-commit"><span class="num">10.</span> Your commit</h3>
         <button type="button" class="fig-chip k-you" data-fig-step="commit" aria-label="Show step 10 in figure">&uarr; in figure</button>
       </div>
-      <p>The session replaces the repository notes the ticket changed and merges the approved case changes into the <code>Cases:</code> file. Then you commit and merge. The dispatcher never commits, pushes or changes branches in your checkout; the planning session is told not to, by an instruction rather than by code.</p>
+      <p>The session replaces the repository notes the ticket changed and merges the approved case changes into the <code>Cases:</code> file. Then you commit and merge. The dispatcher never commits to a branch, pushes or changes branches in your checkout (<code>wt.py fork</code> writes only a snapshot commit object that no branch or ref points to); the planning session is told not to, by an instruction rather than by code.</p>
     </section>
   </section>
 
@@ -383,15 +383,15 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <summary><span class="p-num">P3</span><span class="p-title">A PASS rests on recorded results</span><span class="p-exit">exit 7</span><svg class="p-chev" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg></summary>
         <div class="p-body"><dl>
           <dt>Mechanism</dt><dd>The dispatcher takes the checkout the writer left as the run&rsquo;s candidate, runs the acceptance commands on a copy of it and writes the report from snapshots of the tree.</dd>
-          <dt class="refusal">Refusal you can reproduce</dt><dd><code>--verdict PASS</code> exits 7 when an acceptance result is missing or not the expected one, when a post-run command changed the tree, or when the checkout no longer holds the graded candidate.</dd>
-          <dt class="limit">Limit</dt><dd>The acceptance commands are only as strong as the tests the plan names. <code>--force</code> records a PASS (forced), and the report lists it first, under Overrides.</dd>
+          <dt class="refusal">Refusal you can reproduce</dt><dd><code>--verdict PASS</code> exits 7 when an acceptance result is missing or not the expected one, when a post-run command changed the tree, or when the checkout no longer holds the graded candidate and the state it was graded in.</dd>
+          <dt class="limit">Limit</dt><dd>The acceptance commands are only as strong as the tests the plan names. <code>--force</code> records a PASS (forced), and the report lists it first, under Overrides, as it does a PASS with no acceptance command.</dd>
         </dl></div>
       </details>
 
       <details class="principle">
         <summary><span class="p-num">P4</span><span class="p-title">Each phase declares its files first</span><span class="p-exit">rejected, exit 7</span><svg class="p-chev" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg></summary>
         <div class="p-body"><dl>
-          <dt>Mechanism</dt><dd>Each phase lists its <code>Files:</code> and <code>Follow-through:</code> in the approved plan. The run lock covers those files; after the run, a change outside them, a deletion outside them, a staged path or a moved HEAD rejects the run, which then has no candidate. On OpenCode, edits outside the scope are refused during the run.</dd>
+          <dt>Mechanism</dt><dd>Each phase lists its <code>Files:</code> and <code>Follow-through:</code> in the approved plan. The run lock covers those files; after the run, a change outside them, the deletion of a file outside them that is not build output, any change to the index, an executor&rsquo;s edit of the plan or a moved HEAD rejects the run, which then has no candidate. On OpenCode, edits outside the scope are refused during the run.</dd>
           <dt class="refusal">Refusal you can reproduce</dt><dd>The run report prints <code>REJECTED (not graded)</code>, and a PASS on that run exits 7. <code>bash scripts/demo.sh</code> shows it.</dd>
           <dt class="limit">Limit</dt><dd>During a run, scope is enforced only by OpenCode&rsquo;s edit tools, not shell redirection. On other executors an out-of-scope edit is caught after the run, and the backup of in-scope files is the safety net.</dd>
         </dl></div>
@@ -402,7 +402,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <div class="p-body"><dl>
           <dt>Mechanism</dt><dd>The phase&rsquo;s <code>Risk:</code> picks the tier: a flash model at low, Opus 5.5 at medium, Opus 5.5 and a flash model from another family at high. At the merge gate every file needs a review at its tier, and a finding stays open until a review of a later head shows it fixed.</dd>
           <dt class="refusal">Refusal you can reproduce</dt><dd><code>concord.py --pr-status</code> exits 1 until the current diff is REVIEWED; <code>--review-pr --tier</code> below a file&rsquo;s needed tier is refused (exit 2).</dd>
-          <dt class="limit">Limit</dt><dd>A review covers only what its reviewer could read, and a binary file needs your words naming it. At the low tier the reviewer may run on the same low-cost model as the executor, in a fresh context.</dd>
+          <dt class="limit">Limit</dt><dd>A review covers only what its reviewer could read, at the rank of the reviewer name the planner records, and a binary file needs your words naming it. At the low tier the reviewer may run on the same low-cost model as the executor, in a fresh context.</dd>
         </dl></div>
       </details>
 
@@ -411,14 +411,14 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         <div class="p-body"><dl>
           <dt>Mechanism</dt><dd>Every run and verdict goes to a ledger, a FAIL with its cause: EXECUTOR, PLAN_GAP, TEST_DEFECT, FLAKY, PROVIDER or BLOCKED; only EXECUTOR counts as an attempt. <code>--report</code> writes the test report from recorded data and opens with the overrides: each forced PASS beside its failed commands, each waiver and owner go-ahead.</dd>
           <dt class="refusal">Refusal you can reproduce</dt><dd><code>--report</code> refuses while a run of the plan has no verdict (exit 2). Once the report is written, a new run or <code>--begin</code> on that plan exits 10.</dd>
-          <dt class="limit">Limit</dt><dd>The planner alone assigns the failure causes. A FAIL recorded without a cause gets only a reminder.</dd>
+          <dt class="limit">Limit</dt><dd>The planner alone assigns the failure causes. A FAIL recorded without a cause gets only a reminder. The report is a status export: it does not check that every phase passed.</dd>
         </dl></div>
       </details>
 
       <details class="principle">
         <summary><span class="p-num">P7</span><span class="p-title">You commit</span><span class="p-exit">rejected, exit 7</span><svg class="p-chev" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg></summary>
         <div class="p-body"><dl>
-          <dt>Mechanism</dt><dd>The dispatcher never commits, pushes or changes branches in your checkout, and the planning session is told not to. A run that stages a path, moves HEAD or changes the branch is rejected, and OpenCode&rsquo;s rules deny an executor <code>git commit</code>, <code>git push</code> and similar commands.</dd>
+          <dt>Mechanism</dt><dd>The dispatcher never commits to a branch, pushes or changes branches in your checkout (<code>wt.py fork</code> writes only a snapshot commit object that no branch or ref points to), and the planning session is told not to. A run that changes the index, moves HEAD or changes the branch is rejected, and OpenCode&rsquo;s rules deny an executor <code>git commit</code>, <code>git push</code> and similar commands.</dd>
           <dt class="refusal">Refusal you can reproduce</dt><dd>The run report lists the staged path or the moved HEAD as a rejection, and a PASS on that run exits 7.</dd>
           <dt class="limit">Limit</dt><dd>No code stops the planning session from committing outside a run: that rule is an instruction in Concord&rsquo;s Claude Code rules and the run command, and the dispatcher sees a moved HEAD only inside a run. Outside OpenCode, the git rules in the executor contract are instructions a model can ignore too: a commit during a run is caught after the run, not prevented. <code>wt.py new</code> creates a branch and a worktree per ticket when you ask.</dd>
         </dl></div>
@@ -474,7 +474,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
             <td>ECC hooks that block <code>--no-verify</code>, protect config files and gate a first edit; an agentic-sdlc hook that asks before commit, tag, push and publish (it fails open by design), and strike counters; nothing in agent-protocols</td>
             <td>Stage or phase order; retry and round caps</td>
             <td>Grader verdicts kept from the improver; turn and time caps</td>
-            <td class="us">Plan approval bound to the exact plan text, red run, acceptance results and file hashes, review tiers and finding closure, billing guard; edit scope and no web on OpenCode</td>
+            <td class="us">Plan approval bound to the hash of the text the verifier read, red run, a lock on each run&rsquo;s files, the scope check, acceptance results on the graded candidate tree, pinned grading files, review tiers and PR finding closure, a billing guard on model names; edit scope and no web fetch on OpenCode</td>
           </tr>
         </tbody>
       </table>
@@ -581,7 +581,7 @@ note: confirm every BLOCKER and HIGH against the diff before failing the phase; 
         </ul>
       </div>
     </div>
-    <p class="notice"><strong>Not a sandbox.</strong> Agents run shell commands as your user. On macOS the OpenCode and pi executors run under a Seatbelt profile, which is skipped on Linux and inside another sandbox; the acceptance commands that run after an executor run its code unsandboxed. Known gaps and how to report a vulnerability: <a href="https://github.com/bqp007/concord-agent-harness/blob/main/SECURITY.md">SECURITY.md</a>. Setup details: <a href="https://github.com/bqp007/concord-agent-harness/blob/main/docs/SETUP.md">docs/SETUP.md</a>.</p>
+    <p class="notice"><strong>Not a sandbox.</strong> Agents run shell commands as your user. On macOS the OpenCode and pi executors run under a Seatbelt profile, which is skipped on Linux and inside another sandbox; the red run and the acceptance commands run the checkout&rsquo;s code before and after each run, unsandboxed, with your environment. Known gaps and how to report a vulnerability: <a href="https://github.com/bqp007/concord-agent-harness/blob/main/SECURITY.md">SECURITY.md</a>. Setup details: <a href="https://github.com/bqp007/concord-agent-harness/blob/main/docs/SETUP.md">docs/SETUP.md</a>.</p>
   </section>
 
 </main>

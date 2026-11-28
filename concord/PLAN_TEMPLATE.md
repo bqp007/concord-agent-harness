@@ -66,13 +66,16 @@ ETA: <N> min, lands at <hh:mm> local
 
 <!--
 - The schedule (`## Passes`) and its diagram: `/concord:run` §4. The planner writes `Size:` and `After:`, never
-  minutes; `--estimate` turns them and the run ledger into minutes. `After:` names only a real wait, with its reason.
+  minutes; `--estimate` turns them and the run ledger into minutes. `After:` names only a real wait, with its reason. `After:` and `Executor:` are scheduling advice:
+  no run checks that the phases it waits for passed or that its executor is the one named.
 - Tier: the planner's judgment of the plan's size, which sets the estimate's final revision and turns on the drift clock;
   no line count decides it.
 - Risk (default medium) picks the review: low = approve-only flash, medium = the reviewer-opus55 agent, high = the
   reviewer-opus55 agent and a flash review from another model family, both of the same change. High: untrusted
   input, scores or thresholds, security, money, data deletion or concurrency.
-- Files: every changed file with behavior, exact paths, comma-separated; scope is enforced during the run only on
+- Files: every changed file with behavior, exact paths, comma-separated; a path in backticks is one path, spaces
+  included; an entry ending in `/` covers a folder and what it will hold; a glob's `*` also crosses `/`; an absolute
+  path or one with a `..` part refuses the run (exit 2). Scope is enforced during the run only on
   OpenCode, and every run's report checks it (OUT OF SCOPE); the run lock lets phases whose Files and Follow-through
   are disjoint run in one checkout at once. Only planner phases list the repo's `Cases:` file.
 - Follow-through: patterns for the files that change only because the phase's change requires it and carry no
@@ -84,14 +87,20 @@ ETA: <N> min, lands at <hh:mm> local
   `| Child | Done when | Files | Interface it gives the others | After |`, one row per child ticket. It is verified
   and approved once; each child then gets its own plan and run (`/concord:run`, "A large ticket").
 - Notes: the dispatcher inlines each pointer's current code into the executor's task, resolving functions by name, as
-  line numbers drift between runs.
-- Acceptance: fast, deterministic offline commands in backticks that check behaviour, not wiring, tell right from
-  plausible wrong code, and fail on the untouched code (red run) unless marked `(characterization)`. A
+  line numbers drift between runs. That code, the repository notes and any `--extra` feedback are read at each run
+  and are not part of the approved plan's hash.
+- Acceptance: one command per list line, or the inline value after `Acceptance:`; inline code on a continuation line
+  or inside a parenthesised note is prose. Commands run under `/bin/sh -c` without pipefail. A command marked
+  `(fails until …)` must fail as a test until then: a non-zero exit other than a timeout (124), a command that
+  cannot run (126, 127) or a signal; an abort (134) counts as a failing test. Fast, deterministic offline commands
+  that check behaviour, not wiring, tell right from plausible wrong code, and fail on the untouched code (red run) unless marked `(characterization)`. A
   behaviour-preserving phase sets `Baseline: pass`, optionally `Characterize: <command>` (output diffed before and
   after). Acceptance leaves the checkout as it found it (exit 7 otherwise): output goes to ignored paths or to
   cache output (built-in names and the `generated` setting).
 - Test plan: the rows and actions follow the `concord:lean-testing` skill. `Tests:` is a planning estimate: the report
   prints it beside the actual test lines and it decides nothing. Home names the test file: an executor phase that changes a Home file its Files: does
   not list is rejected and cannot pass (exit 7).
+- A heading or a `Field:` line inside a closed code fence is example text. A phase with two headings, or a field
+  given twice, draws a PLAN LINT line, and every command reads the first.
 - One phase: about 5 files and 7 steps at most; Notes, Interfaces, Decisions, Out of scope only when needed.
 -->

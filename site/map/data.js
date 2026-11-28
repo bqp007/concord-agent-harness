@@ -59,7 +59,7 @@ window.CONCORD_MAP = {
    "title": "You approve"
   },
   "begin-end": {
-   "detail": "Wraps a phase written by the planning session or a Claude implementer subagent, so it gets the same gates, backup, scope report and plan check as an executor run. --begin refuses a plan text with no APPROVE (exit 11) and a drift block (exit 10), takes the run lock and prints the run's snapshot of the approved plan; --end writes the report.",
+   "detail": "Wraps a phase written by the planning session or a Claude implementer subagent, so it gets the same gates, backup, scope report and plan check as an executor run. --begin refuses a plan text with no APPROVE (exit 11) and a drift block (exit 10), takes the run lock and prints the run's snapshot of the approved plan; --end writes the report and refuses an executor run, a run begun in another checkout and one without its session lock; --abort stops a live executor run first.",
    "facts": [
     [
      "Command",
@@ -79,7 +79,7 @@ window.CONCORD_MAP = {
       ],
       [
        "--abort RUN_ID",
-       "release a session run's lock without a report"
+       "close an open run without a report: release a session run's lock; a live executor run is stopped first"
       ]
      ],
      "flags"
@@ -103,7 +103,7 @@ window.CONCORD_MAP = {
    "title": "the code"
   },
   "check": {
-   "detail": "After a run the checkout becomes its candidate, and the dispatcher runs the acceptance commands on a copy of it, never on the executor's account. The planning session reads the report and the change, then records PASS or FAIL with a cause. A PASS is refused (exit 7) when a result is missing or unexpected, the run was rejected, or the checkout no longer holds the graded candidate. Only EXECUTOR failures count as attempts: three, then you decide.",
+   "detail": "After a run the checkout becomes its candidate, and the dispatcher runs the acceptance commands on a copy of it, never on the executor's account. The planning session reads the report and the change, then records PASS or FAIL with a cause. A PASS is refused (exit 7) when a result is missing or unexpected, the run was rejected, or the checkout no longer holds the graded candidate and the state it was graded in. --grade needs the checkout to itself. Only EXECUTOR failures count as attempts: three, then you decide.",
    "facts": [
     [
      "Command",
@@ -119,7 +119,7 @@ window.CONCORD_MAP = {
      [
       [
        "--verdict RUN_ID PASS|FAIL",
-       "record the phase's outcome"
+       "record the phase's outcome; PASS needs each acceptance command's expected result: exit 0, or for one marked `(fails until`, a failing test (not a timeout 124, a command that cannot run 126 or 127, or a signal other than an abort, which a failed C or C++ assertion gives). Acceptance commands run under /bin/sh -c without pipefail: a pipeline's exit is its last command's"
       ],
       [
        "--cause {EXECUTOR,PLAN_GAP,TEST_DEFECT,FLAKY,PROVIDER,BLOCKED}",
@@ -186,7 +186,7 @@ window.CONCORD_MAP = {
    "view": "delegate"
   },
   "delta": {
-   "detail": "After a fix, a delta review answers for each open finding (yes with the lines as evidence, else no or unsure) and ties each changed hunk to the finding it fixes. A hunk that changes anything else stays for a review at its file's tier. Delta reviews run on flash, else on reviewer-delta, never on Opus.",
+   "detail": "After a fix, a delta review answers for each open finding (yes with the lines as evidence, else no or unsure) and ties each changed hunk to the finding it fixes, within that finding's files. A hunk that changes anything else stays for a review at its file's tier, and a fix that rewrites a file is refused. Delta reviews run on flash, else on reviewer-delta, never on Opus.",
    "facts": [
     [
      "concord.py --help",
@@ -246,7 +246,7 @@ window.CONCORD_MAP = {
    "title": "drift.json"
   },
   "estimate": {
-   "detail": "Turns each phase's Size: and After: waits, and the median and p75 run times in the run ledger, into phase minutes, the lanes, the critical path and the ETA, and stores the ETA for the drift gate. Code computes; the model challenges.",
+   "detail": "Turns each phase's Size: and After: waits, and the median and p75 run times in the run ledger, into phase minutes, the lanes, the critical path and the ETA, and stores the ETA for the drift gate. ESTIMATE LINT lines name the waits it ignores. Code computes; the model challenges.",
    "facts": [
     [
      "Command",
@@ -295,7 +295,7 @@ window.CONCORD_MAP = {
    "title": "executor"
   },
   "executor-run": {
-   "detail": "Runs one phase on an external coding-agent CLI under the executor contract: it records the start tree, backs up in-scope files, runs the red run, starts the executor in the checkout, then reports from snapshots, never from the executor's account. A change outside the write scope, a deletion, a staged path or a moved branch rejects the run.",
+   "detail": "Runs one phase on an external coding-agent CLI under the executor contract: it backs up in-scope files, records the start tree and the start state, runs the red run, starts the executor in the checkout, then reports from snapshots, never from the executor's account. A change outside the write scope, a deletion outside it, any index change, a plan edit or a moved HEAD or branch rejects the run.",
    "facts": [
     [
      "Command",
@@ -329,7 +329,7 @@ window.CONCORD_MAP = {
    "title": "executor run"
   },
   "exit-1": {
-   "detail": "--pr-status exits 1 unless the PR's current head is REVIEWED: an open finding, or a file not covered at its tier by a review that read it. A review counts at most at its reviewer's rank, and owner words never raise it.",
+   "detail": "--pr-status exits 1 unless the PR's current head is REVIEWED: an open BLOCKER, HIGH or clause FAIL, a file not covered at its tier by a review that read it, no changed file, or a closed PR. A review counts at most at its reviewer's rank, and owner words never raise it.",
    "facts": [],
    "id": "exit-1",
    "kind": "stop",
@@ -349,7 +349,7 @@ window.CONCORD_MAP = {
    "title": "exit 6"
   },
   "exit-7": {
-   "detail": "An acceptance result is missing or not the expected one, the run was rejected, a post-run command changed the tree, or the checkout no longer holds the graded candidate or its grading files. --force records PASS (forced), which the report lists first, under Overrides.",
+   "detail": "An acceptance result is missing or not the expected one, the run was rejected, a post-run command changed the tree, or the checkout no longer holds the graded candidate, its grading files or the state it was graded in. --force records PASS (forced), which the report lists first, under Overrides.",
    "facts": [],
    "id": "exit-7",
    "kind": "stop",
@@ -384,7 +384,7 @@ window.CONCORD_MAP = {
    "title": "gate.md"
   },
   "high": {
-   "detail": "reviewer-opus55 and, started at the same time, a flash review from another model family, whose findings join the same list. The report lists a high phase without that second review under Overrides.",
+   "detail": "reviewer-opus55 and, started at the same time, a flash review from another model family, whose findings join the same list. The report lists under Overrides each file of the change that no review at the tier read, or that no review from another model family read.",
    "facts": [
     [
      "concord.py --help",
@@ -533,7 +533,7 @@ window.CONCORD_MAP = {
    "title": "findings ledger"
   },
   "lint": {
-   "detail": "A read-only pre-flight of a phase that makes no model call: ACCEPTANCE LINT lines for defects in acceptance commands that plan reviews kept rediscovering, and PLAN LINT lines for missing Size:, ETA: or Tests: lines. It writes the plan's approval-relevant text to a plan read named by its hash and prints PLAN-READ: <path>.",
+   "detail": "A read-only pre-flight of a phase that makes no model call: ACCEPTANCE LINT lines for defects in acceptance commands that plan reviews kept rediscovering, and PLAN LINT lines for missing Size:, ETA: or Tests: lines and for a phase with two headings or a field given twice. It writes the plan's approval-relevant text to a plan read named by its hash and prints PLAN-READ: <path>.",
    "facts": [
     [
      "Command",
@@ -644,7 +644,7 @@ window.CONCORD_MAP = {
    "title": "PLAN_<ticket>.md"
   },
   "plan-read": {
-   "detail": "--lint writes the plan's approval-relevant text to the runs root as plan-reads/<hash>.md. The verifier reads this file and quotes its hash, --plan-verdict records that hash, and each run checks that the stored read still holds the approved text.",
+   "detail": "--lint writes the plan's approval-relevant text to the runs root as plan-reads/<hash>.md. The verifier reads this file and quotes its hash, --plan-verdict records that hash (the first 16 hex digits of the text's SHA-256, line endings aside), and a run exits 11 when the stored read is gone, unreadable or no longer holds the approved text.",
    "facts": [],
    "id": "plan-read",
    "kind": "file",
@@ -679,7 +679,7 @@ window.CONCORD_MAP = {
    "view": "plan-then-delegate"
   },
   "plan-verdict": {
-   "detail": "Reads the verifier's answer. An APPROVE that quotes the hash of a plan read of the plan's current text becomes the next approved revision of the ticket; a REVISE records nothing (exit 1). Only that text opens --begin and executor runs.",
+   "detail": "Reads the verifier's answer. An APPROVE that quotes the hash of a plan read of the plan's current text becomes the next approved revision of the ticket; a REVISE records nothing (exit 1), and an answer with more than one VERDICT or PLAN-HASH line records nothing (exit 2). Only that text opens --begin and executor runs.",
    "facts": [
     [
      "Command",
@@ -759,7 +759,7 @@ window.CONCORD_MAP = {
    "title": "planning session"
   },
   "pr-status": {
-   "detail": "Reads the pull request's diff from its merge base to its current head. Each file needs the highest Risk: among the runs whose work is in the PR's commits, or medium when no run's is. It prints REVIEWED, and exits 0, only when no finding is open and every file is covered at its tier by a review that read it, or excluded by the owner's words naming it.",
+   "detail": "Reads the pull request's diff from its merge base to its current head. Each file needs the highest Risk: among the runs whose work is in the PR's commits, or medium when no run's is. It prints REVIEWED, and exits 0, only when no BLOCKER, HIGH or clause FAIL is open and every file is covered at its tier by a review that read it, or excluded by the owner's words naming it.",
    "facts": [
     [
      "Command",
@@ -799,14 +799,14 @@ window.CONCORD_MAP = {
    "title": "principles.md"
   },
   "red": {
-   "detail": "For a changed behavior the planning session writes the failing tests in their own run and checks that each fails for the stated reason; a routine change under characterization checks needs none. Before an executor run the dispatcher runs the phase's acceptance on a copy of the untouched tree: a phase whose acceptance already passes is not run (exit 6), because its tests do not test it. A session run (--begin) records the same baseline and warns.",
+   "detail": "For a changed behavior the planning session writes the failing tests in their own run and checks that each fails for the stated reason; a routine change under characterization checks needs none. Before an executor run the dispatcher runs the phase's acceptance on a copy of the untouched tree: a phase whose acceptance already passes is not run (exit 6), because its tests do not test it. A command marked (fails until ...) counts as red only as a failing test: not a timeout, a command that cannot run or one a signal ended, while an abort counts. A session run (--begin) records the same baseline and warns.",
    "facts": [
     [
      "concord.py --help",
      [
       [
        "--no-baseline",
-       "skip the pre-run acceptance check (red run) and characterization baseline"
+       "skip the pre-run acceptance check (red run); the Characterize: commands still run before the change, and the report lists the skip under Overrides"
       ],
       [
        "--force",
@@ -834,7 +834,7 @@ window.CONCORD_MAP = {
    "title": "repo notes"
   },
   "report": {
-   "detail": "Writes the test report once every run of the plan has a verdict. It opens with the overrides (forced PASS, owner words and their use, waivers, phases reviewed below their risk), then each phase with who wrote it, the plan revision, the graded candidate and its review, the Test plan, each finding's outcome, the open items and the time against the ETA. Writing it stops the drift clock and closes the plan to new runs (exit 10).",
+   "detail": "Writes the test report once every run of the plan has a verdict. It opens with the overrides (forced PASS, PASS with no acceptance command, skipped red runs, owner words and their use, waivers, files reviewed below their risk), then each phase with who wrote it, the plan revision, the graded candidate and its review, the Test plan, each PR finding's outcome, the open items and the time against the ETA. It is a status export, not a check that every phase passed. Writing it stops the drift clock and closes the plan to new runs (exit 10).",
    "facts": [
     [
      "Command",
@@ -874,7 +874,7 @@ window.CONCORD_MAP = {
    "title": "test report"
   },
   "review": {
-   "detail": "Each implementing phase is reviewed at its Risk: tier: low by a flash model, approve-only; medium by reviewer-opus55; high by both at once. A round is a full review, the fixes, then a delta review that closes the findings it shows fixed; the loop stops at no open BLOCKER or HIGH. A review reads the run's graded change in a read-only copy of the candidate.",
+   "detail": "Each implementing phase is reviewed at its Risk: tier: low by a flash model, approve-only; medium by reviewer-opus55; high by both at once. A round is a full review, the fixes, then a delta review of the fix (at the pull request gate the dispatcher closes each finding it shows fixed); the loop stops at no open BLOCKER, HIGH or clause FAIL. A review reads the run's graded change in a read-only copy of the candidate.",
    "facts": [
     [
      "concord.py --help",
@@ -992,7 +992,7 @@ window.CONCORD_MAP = {
    "title": "reviewer-delta"
   },
   "reviewer-opus55": {
-   "detail": "Independent read-only code reviewer on Claude Opus 5.5 (Claude subscription). Medium- and high-risk phases (the only reviewer above low; at high a flash review from another model family runs beside it), and medium- and high-tier PRs at the PR gate. Give it the path of a review packet (`concord.py --review <run> --packet`, or a PR packet), or of a review brief for a change outside Concord (`concord:review-change`). Answers with one REVIEW-JSON block.",
+   "detail": "Independent code reviewer on Claude Opus 5.5 (Claude subscription) that edits no repository file. Medium- and high-risk phases (the only reviewer above low; at high a flash review from another model family runs beside it), and medium- and high-tier PRs at the PR gate. Give it the path of a review packet (`concord.py --review <run> --packet`, or a PR packet), or of a review brief for a change outside Concord (`concord:review-change`). Answers with one REVIEW-JSON block.",
    "facts": [
     [
      "Reads",
@@ -1004,7 +1004,7 @@ window.CONCORD_MAP = {
     ],
     [
      "Never",
-     "Edits files, runs git commands that change anything, or reports a finding it cannot anchor to a line of the diff."
+     "Edits repository files, runs git commands that change anything, or reports a finding it cannot anchor to a line of the diff."
     ],
     [
      "Model",
@@ -1091,7 +1091,7 @@ window.CONCORD_MAP = {
    "view": "run"
   },
   "run-folder": {
-   "detail": "One folder per run under the repository's git directory, outside the working tree: the backup of in-scope files, the run's snapshot of the approved plan and phase, the baseline and acceptance results, report.md, meta.json with the start tree and the candidate, and the review answers.",
+   "detail": "One owner-only folder per run under the repository's git directory, outside the working tree: the executor's prompt and raw output, the backup of in-scope files and pinned grading inputs, the run's snapshot of the approved plan and phase, the baseline and acceptance results, report.md, meta.json with the start tree and the candidate, and the review answers.",
    "facts": [],
    "id": "run-folder",
    "kind": "file",
@@ -1186,7 +1186,7 @@ window.CONCORD_MAP = {
     ],
     [
      "Writes",
-     "The verifier's answer, recorded with concord.py --plan-verdict for the exact text it read."
+     "The verifier's answer, recorded with concord.py --plan-verdict for the hash of the text it read."
     ],
     [
      "Never",
@@ -1202,7 +1202,7 @@ window.CONCORD_MAP = {
    "view": "verify-plan"
   },
   "wt": {
-   "detail": "One git worktree per ticket session: isolated branch and files, shared history, big folders linked. new makes the worktree from the main checkout and links the configured folders; fork and join run a phase that shares a file in its own copy and apply its graded change back; done archives the plan and removes the worktree once you have committed.",
+   "detail": "One git worktree per ticket session: isolated branch and files, shared history, big folders linked. new makes the worktree from the main checkout and links the configured folders; fork and join run a phase that shares a file in its own copy and apply its graded change back; done archives the plan and removes the worktree once you have committed, no run is open in it and its run lock reads.",
    "facts": [
     [
      "Command",

@@ -250,7 +250,7 @@ mkpr(){ local n=$1 f=$2; ( set -e; cd "$R"; git checkout -q main; git checkout -
   prjson "$n" main "$(git -C "$O" rev-parse "refs/pull/$n/head")" "t" "b"; }
 st2(){ $DP --pr-status "$1" --repo "$R" > "$T/out.txt" 2>&1; RC=$?; }
 mkpr 12 g12.py; C1=$(calls); FAKE_GARBAGE=1 $DP --review-pr 12 --via qwen --model fake/m --tier medium --repo "$R" > "$T/out.txt" 2>&1; RCG=$?
-[ $RCG -eq 0 ] && [ "$(calls)" = $((C1 + 2)) ] && has ", retried" && has "verdict UNPARSED" || bad "unparsed review: one retry, then UNPARSED (rc=$RCG calls $C1 -> $(calls))"
+[ $RCG -eq 3 ] && [ "$(calls)" = $((C1 + 2)) ] && has ", retried" && has "verdict UNPARSED" || bad "unparsed review: one retry, then UNPARSED and exit 3 (rc=$RCG calls $C1 -> $(calls))"
 st2 12
 ! has ": REVIEWED" && [ $RC -eq 1 ] && ok "a model answer that never parses (after its retry): the head is not REVIEWED, exit 1" || { bad "unparsed status rc=$RC"; cat "$T/out.txt"; }
 mkpr 13 g13.py
