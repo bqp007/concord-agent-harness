@@ -9,6 +9,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        python: ["3.12"]
+        include:
+          # the oldest Python the documents support
+          - os: ubuntu-latest
+            python: "3.9"
     runs-on: ${{ matrix.os }}
     env:
       GIT_AUTHOR_NAME: ci
@@ -19,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Concord suites
         run: bash concord/tests/run_all.sh
       - name: Repository checks

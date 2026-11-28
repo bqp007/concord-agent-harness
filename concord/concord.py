@@ -7261,8 +7261,9 @@ def joined_result(fork, dest, meta, matched):
 def cmd_fork_graded(args):
     """--fork-graded (wt.py join, holding the lock mutex of the fork and of --dest): exit 4 while the fork has an open
     run (fork_open_runs) or --dest has a live holder of its lock (an executor run, or a session run neither ended nor
-    aborted). Otherwise whether the fork is the candidate of its newest PASS run, under that run's rule: exit 0 for no
-    run or a match, 1 for runs without a matching PASS candidate. With --dest and without --ungraded, a match is joined
+    aborted). Otherwise whether the fork is the candidate of its newest PASS run, under that run's rule: exit 0 for a
+    match, 1 for no run or runs without a matching PASS candidate (an ungraded fork: wt.py join refuses it unless
+    --ungraded). With --dest and without --ungraded, a match is joined
     as joined_result decides. The fork's runs are those recorded in it since wt.py made it (a fork path is used again
     after a join)."""
     repo = repo_root(args.repo or os.getcwd())
@@ -7289,7 +7290,7 @@ def cmd_fork_graded(args):
                 runs.append(meta)
     if not runs:
         print("no Concord run graded this fork")
-        return 0
+        return 1
     passed = [m for m in runs if m.get("verdict") == "PASS" and m.get("verdict_candidate")]
     if not passed:
         print(f"the fork {repo.name} has Concord runs but none passed with a graded candidate: grade it with "

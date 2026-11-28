@@ -1,6 +1,6 @@
 #!/bin/bash
 # Repository contract checks. Run from anywhere: bash tests/package_test.sh [SECTION [TREE ...]]
-# Sections: scrub layout agents python install style hygiene docs site (none = all); blog runs only when named.
+# Sections: scrub layout agents python install style hygiene docs site (none = all).
 # `scrub` takes trees to scope it and reads its patterns from ${CONCORD_SCRUB_FILE:-~/.config/concord/scrub.txt}
 # (one extended regular expression per line, kept outside the repository; no file = section skipped).
 # Output: one "check <section>/<name>: ok|FAIL <detail>" per check, then "passed N, failed M"; exit 0 iff M = 0.
@@ -22,11 +22,11 @@ COMMANDS="run plan-then-delegate delegate rules-review"
 HOOKS="block-destructive-git block-rm-outside-scratch block-plan-md block-rm-home-paths"
 SUITES="acclint delegate delta guards papers pr_review protocol simplify testquality worktree"
 
-# Every relative link, reference link and image in the given markdown files names a file that would be
+# Every given markdown file exists, and every relative link, reference link and image in it names a file that would be
 # published: present, and tracked or untracked-but-not-ignored (a link into an ignored folder breaks on GitHub).
 LINK_RE=$'\\]\\([^)#[:space:]]+|^\\[[^]]+\\]: *[^#[:space:]]+|src(set)?=["\'][^"\'#]+'
 links_ok() { local f l p bad=0
-  for f in "$@"; do [ -f "$f" ] || continue
+  for f in "$@"; do [ -f "$f" ] || { echo "$f: no such file"; bad=1; continue; }
     for l in $(grep -oE "$LINK_RE" "$f" | sed -E 's/^\]\(//; s/^\[[^]]*\]: *//; s/^src(set)?=.//'); do
       case "$l" in http://*|https://*|mailto:*) continue;; esac
       p="$(dirname "$f")/$l"
@@ -56,7 +56,8 @@ s_scrub() { local trees="$*" t pat
   [ -s "$pat" ] || { check scrub/pattern-file "echo no patterns in $SCRUB_FILE; false"; return; }
   [ -n "$trees" ] || trees="$K adapters install.sh README.md docs LICENSE SECURITY.md CONTRIBUTING.md CITATION.cff scripts examples tests assets site .github .gitignore .claude-plugin"
   for t in $trees; do [ -e "$t" ] || { [ $# = 0 ] && continue; check "scrub/$t" "echo no such tree; false"; continue; }
-    check "scrub/$t" "n=\$(grep -rnIE -f '$pat' '$t' | wc -l | tr -d ' '); [ \"\$n\" = 0 ] || { echo \"\$n matches\"; false; }"
+    # grep status: 1 = no match; 0 = matches; 2 = grep could not search (an invalid pattern, an unreadable file)
+    check "scrub/$t" "grep -rnIE -f '$pat' -- '$t' > '$TMPROOT/scrub.hits'; rc=\$?; [ \$rc = 1 ] || { [ \$rc = 0 ] && echo \"\$(wc -l < '$TMPROOT/scrub.hits' | tr -d ' ') matches\" || echo \"grep failed (exit \$rc)\"; false; }"
   done
   case " $trees " in *" $K "*)
     check scrub/worktrees-template "! grep -qE '^[^#].*\.(links|base) *=' $K/worktrees.conf"
@@ -286,7 +287,7 @@ inst_kk() { local own="$H/mine/adapters/claude-code/skills/design-review" l="$H/
   inst --plugin --no-tests > "$H/out" 2>&1 && [ "$(readlink "$l")" = "$own" ] && grep -qF "keep $l" "$H/out"; }
 # a link the manifest records stays Concord's after its clone is moved or deleted: the next install from a new clone updates it
 inst_ll() { local d="$H/x" r f
-  for r in kit1 kit2; do mkdir "$H/$r" && for f in install.sh concord adapters; do cp -R "$f" "$H/$r/"; done; done
+  for r in kit1 kit2; do mkdir "$H/$r" && for f in install.sh LICENSE concord adapters; do cp -R "$f" "$H/$r/"; done; done
   env HOME=$H CLAUDE_HOME=$d bash "$H/kit1/install.sh" --no-tests >/dev/null &&
   rm -rf "$H/kit1" && env HOME=$H CLAUDE_HOME=$d bash "$H/kit2/install.sh" --no-tests >/dev/null &&
   [ "$(readlink "$d/skills/concord:design-review")" = "$(cd "$H/kit2" && pwd -P)/$A/skills/design-review" ]; }
@@ -325,7 +326,47 @@ assert os.path.isabs(w) and os.path.isfile(w), c
 inst_jj() { mkdir -p "$H/.claude" && printf '%s' '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":null}]}]}}' > "$H/.claude/settings.json" &&
   { inst --no-tests > "$H/out" 2>&1; [ $? = 2 ]; } && grep -qF 'PostToolUse' "$H/out" && ! grep -q Traceback "$H/out" &&
   [ ! -e "$H/.claude/concord" ] && [ ! -e "$H/.claude/CLAUDE.md" ]; }
-s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb dd ee ff gg hh ii jj kk ll mm nn oo pp; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
+# an existing sandbox.excludedCommands list keeps its entries and gains each of Concord's that it lacks, once
+inst_qq() { mkdir -p "$H/.claude" && printf '%s' '{"sandbox":{"excludedCommands":["docker *","gh *"]}}' > "$H/.claude/settings.json" &&
+  inst --no-tests >/dev/null && inst --no-tests >/dev/null && python3 -B -I -c "
+import json, sys
+have = json.load(open(sys.argv[1]))['sandbox']['excludedCommands']
+ours = json.load(open(sys.argv[2]))['sandbox']['excludedCommands']
+assert have[:2] == ['docker *', 'gh *'] and all(have.count(c) == 1 for c in ours) and len(have) == len(set(have + ours)), have
+" "$H/.claude/settings.json" "$ROOT/$A/settings.snippet.json"; }
+# py_shim WHEN PATTERN SCRIPT: a python3 first on PATH that runs SCRIPT before (WHEN=before) or after (after) the real python3
+# whenever its arguments match the shell PATTERN; PATH="$H/shim:$PATH" puts it first
+py_shim() { local real; real=$(command -v python3); mkdir -p "$H/shim"
+  if [ "$1" = before ]; then printf '#!/bin/bash\ncase " $* " in %s) %s;; esac\nexec "%s" "$@"\n' "$2" "$3" "$real" > "$H/shim/python3"
+  else printf '#!/bin/bash\n"%s" "$@"; rc=$?\ncase " $* " in %s) %s;; esac\nexit $rc\n' "$real" "$2" "$3" > "$H/shim/python3"; fi
+  chmod +x "$H/shim/python3"; }
+# CLAUDE.md is replaced, never truncated in place: a write that fails part way (a 1 KiB file size limit on the python3 that
+# writes it; stderr goes to a file of its own, which the limit does not reach) leaves the file as it was and no temporary file
+inst_rr() { local i md="$H/.claude/CLAUDE.md"; mkdir -p "$H/.claude" && for i in $(seq 1 60); do echo "MINE line $i of my own rules"; done > "$md" &&
+  cp "$md" "$H/before" && py_shim before '*"/adapters/claude-code/CLAUDE.md "*' 'ulimit -f 1' &&
+  { PATH="$H/shim:$PATH" inst --no-tests > /dev/null 2> "$H/err"; [ $? != 0 ]; } && cmp -s "$H/before" "$md" &&
+  [ -z "$(ls "$H/.claude" | grep -F 'CLAUDE.md.')" ] && grep -qF "$md could not be written" "$H/err"; }
+# a failed install names what it wrote: settings.json breaks after the preflight, and the refusal lists the dispatcher
+# files, a link and CLAUDE.md, which it wrote before, and claims nothing it did not do
+inst_ss() { local s="$H/.claude/settings.json"; mkdir -p "$H/.claude" && printf '{"a": 1}\n' > "$s" &&
+  py_shim after '*" check "*settings.json*' "printf '{\"a\": ' > '$s'" &&
+  { PATH="$H/shim:$PATH" inst --no-tests > /dev/null 2> "$H/err"; [ $? = 2 ]; } && [ "$(cat "$s")" = '{"a": ' ] &&
+  grep -qF "stopped (exit 2) after it wrote:" "$H/err" && grep -qF "update $H/.claude/CLAUDE.md" "$H/err" &&
+  grep -qF "link $H/.claude/agents/implementer.md" "$H/err" && grep -qE "copy [0-9]+ files into $H/.claude/concord/" "$H/err" &&
+  ! grep -q 'rest of the install is done' "$H/err"; }
+# the settings write never reports "nothing written": CLAUDE.md markers that break after Concord wrote its block (a
+# concurrent edit) are the user's; settings.json is still merged and the install completes
+inst_tt() { local md="$H/.claude/CLAUDE.md"; mkdir -p "$H/.claude" && printf '{"a": 1}\n' > "$H/.claude/settings.json" &&
+  py_shim after '*"/adapters/claude-code/CLAUDE.md "*' "printf '<!-- concord:begin -->\\n' >> '$md'" &&
+  PATH="$H/shim:$PATH" inst --no-tests > "$H/out" 2>&1 && ! grep -q 'nothing written' "$H/out" && [ "$(grep -c 'concord:begin' "$md")" = 2 ] &&
+  python3 -B -I -c "import json, sys; d = json.load(open(sys.argv[1])); assert d['a'] == 1 and 'hooks' in d, d" "$H/.claude/settings.json"; }
+# the MIT notice is installed with the dispatcher, from the checkout's LICENSE
+inst_uu() { inst --no-tests >/dev/null && cmp -s LICENSE "$H/.claude/concord/LICENSE"; }
+# the CLAUDE.md block names the home it is installed to: ~/.claude by default, the CLAUDE_HOME path otherwise
+inst_vv() { inst --no-tests >/dev/null && grep -qF '`~/.claude/settings.json`' "$H/.claude/CLAUDE.md" &&
+  env HOME=$H CLAUDE_HOME=$H/x bash install.sh --no-tests >/dev/null && grep -qF "\`$H/x/settings.json\`" "$H/x/CLAUDE.md" &&
+  ! grep -qF '~/.claude' "$H/x/CLAUDE.md"; }
+s_install() { local c; for c in a b c d e f g h i j k l m n o p q r s u v w x y z aa bb dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss tt uu vv; do H=$(tmpd); check "install/$c" "inst_$c"; done; }
 
 # Style: concord.py reads concord/style.conf (prose = terse, the default, or a sentence of your own). The
 # executor task (a dry-run prompt) and the review prompt then carry that sentence.
@@ -369,9 +410,22 @@ s_style() {
   check style/task-lean "grep -q 'lean STE' '$SD/exec.txt'"
   check style/review-lean "grep -q 'lean STE' '$SD/review.txt'"; }
 
-# Release hygiene: the two manifest versions are equal; no PLAN_*.md (bar the two templates) or __pycache__ is tracked.
+# Release hygiene: the two manifest versions and the version the site shows are equal; every copy of LICENSE that ships
+# (the plugin's subtree, the installed dispatcher, the Pages artifact) is the root LICENSE; no PLAN_*.md (bar the two
+# templates) or __pycache__ is tracked; the scrub check fails when grep cannot search.
+versions_ok() { python3 -B -I - "$A" <<'PY'
+import json, re, sys
+m = json.load(open(".claude-plugin/marketplace.json"))["plugins"][0]["version"]
+p = json.load(open(sys.argv[1] + "/.claude-plugin/plugin.json"))["version"]
+site = re.search(r'<span class="eyebrow">Version</span>\s*<p>([^<]*)</p>', open("site/index.html").read())
+assert site, "site/index.html shows no version"
+assert m == p == site.group(1).strip(), (m, p, site.group(1).strip())
+PY
+}
 s_hygiene() {
-  check hygiene/versions "python3 -B -I -c \"import json; m=json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version']; p=json.load(open('$A/.claude-plugin/plugin.json'))['version']; assert m==p, (m,p)\""
+  check hygiene/versions versions_ok
+  check hygiene/license "grep -q 'Permission is hereby granted' LICENSE && cmp LICENSE $A/LICENSE && grep -qxF '        run: cp LICENSE site/LICENSE' .github/workflows/pages.yml"
+  check hygiene/scrub-grep-error "printf '[\\n' > '$TMPROOT/bad-pattern' && ! CONCORD_SCRUB_FILE='$TMPROOT/bad-pattern' bash tests/package_test.sh scrub README.md > '$TMPROOT/scrub.out' && grep -q 'scrub/README.md: FAIL grep failed' '$TMPROOT/scrub.out'"
   check hygiene/no-plan-md "[ -z \"\$(git ls-files | grep -E '(^|/)PLAN_[^/]*\.md\$' | grep -vE '(^|/)(PLAN_TEMPLATE|PLAN_example)\.md\$')\" ]"
   check hygiene/no-pycache "[ -z \"\$(git ls-files | grep -E '__pycache__|\.pyc\$')\" ]"; }
 
@@ -382,6 +436,7 @@ s_docs() { local h f
   check docs/readme-links "grep -q 'docs/SETUP.md' README.md && grep -q 'docs/WORKFLOW.md' README.md && grep -q install.sh README.md"
   check docs/setup-harnesses "grep -q Codex docs/SETUP.md && grep -q OpenCode docs/SETUP.md"
   check docs/links "links_ok README.md CONTRIBUTING.md docs/*.md"
+  check docs/links-missing-input "! links_ok '$TMPROOT/no-such-file.md'"
   check docs/lint-count "counts_ok \$(sed -n '/^def acceptance_lint(/,/^def /p' $K/concord.py | grep -c 'out\.append(') defects docs/WORKFLOW.md"
   for f in docs/figures/*.svg; do check "docs/figure-$(basename "$f")" "grep -qF '$(basename "$f")' README.md docs/*.md"; done
   check docs/figures-current "python3 -B -I scripts/figures.py --check"
@@ -394,12 +449,6 @@ s_docs() { local h f
   # the plugin), so only the setup table spells the plugin names
   check docs/agent-names "! git grep -n -I --untracked -E 'concord:(implementer|reviewer-|plan-verifier)' -- $scope | grep -v '^docs/SETUP.md:[0-9]*:| Agents |'"; }
 
-s_blog() {
-  check blog/exists "[ -f docs/BLOG.md ]"
-  check blog/words "w=\$(wc -w < docs/BLOG.md); [ \$w -ge 2400 ] && [ \$w -le 3200 ] || { echo \"\$w words\"; false; }"
-  check blog/references "[ \$(grep -cE '^\[[0-9]+\]' docs/BLOG.md) -le 10 ]"
-  check blog/links "links_ok docs/BLOG.md"; }
-
 # The Pages site: the map's generated data matches the repository (scripts/site_map.py names what differs), and both
 # pages exist.
 s_site() {
@@ -409,6 +458,6 @@ s_site() {
 
 SECTIONS="scrub layout agents python install style hygiene docs site"
 if [ $# = 0 ]; then for s in $SECTIONS; do "s_$s"; done
-else sec=$1; shift; case " $SECTIONS blog " in *" $sec "*) "s_$sec" "$@";; *) echo "unknown section: $sec" >&2; exit 2;; esac; fi
+else sec=$1; shift; case " $SECTIONS " in *" $sec "*) "s_$sec" "$@";; *) echo "unknown section: $sec" >&2; exit 2;; esac; fi
 echo "passed $pass, failed $fail"
 [ "$fail" = 0 ]

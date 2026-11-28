@@ -21,20 +21,23 @@ done  removes a finished ticket's worktree. First its PLAN_*.md files are archiv
       than caches/build output and wt.py's own unchanged copies (same bytes and permission bits) would be lost
       (listed with sizes), or (c) this session's sandbox write-protects files inside (Claude Code protects
       .claude/settings*.json of a worktree it entered: run `done` unsandboxed then), or (d) a link wt.py made now
-      points somewhere else (listed). --force skips (a), (b) and (d); it removes a link, never its target.
-      Branches and commits are never deleted.
+      points somewhere else (listed), or (e) a Concord run holds the worktree's run lock (a --begin run neither
+      ended nor aborted, or a live executor run; named). --force skips (a), (b) and (d), never (e); it removes a
+      link, never its target. From the check of (e) to the removal it holds that lock's mutex, so no run starts in
+      the worktree meanwhile. Branches and commits are never deleted.
 fork  snapshots DIR's working state (tracked and untracked, not ignored; DIR's HEAD, index and branch stay
-      untouched) in a temporary commit and checks it out detached at
+      untouched) in a commit object that no branch or ref points to (git commit-tree) and checks it out detached at
       <main>/.claude/worktrees/<TICKET>-p<N>, then copies DIR's top-level PLAN_*.md and links the folders
       `new` linked (plus the configured ones). Prints the path; exits 2 when it exists.
 join  applies the fork's changes (binary diff of its working tree, untracked included, against its fork snapshot)
       to DIR, then unlinks its links and runs `git worktree remove --force`. It refuses, even with --force, when
       DIR is now on another branch than the one the fork was made from (new commits on that branch are fine).
-      Before touching anything it refuses, keeping the fork and listing each path, while join would lose work:
+      Once it holds the run locks (below), and before touching anything, it refuses, keeping the fork and listing
+      each path, while join would lose work:
       staged and working content that differ, a deletion whose working file is back, an ignored file only the fork
       holds (in content or permission bits), a link wt.py made that now points somewhere else. --force joins
       anyway and drops those. A patch that does not apply exits 2 naming the files and keeps the fork. Prints the
-      files applied. A fork with Concord runs must also match the candidate of its newest PASS run (`concord.py
+      files applied. The fork must also match the candidate of its newest PASS run (`concord.py
       --fork-graded`: the tree concord.py graded, under that run's rule); otherwise it refuses, applying nothing, and
       names the files that differ. A graded join applies the change from the fork snapshot to that candidate, not
       the working tree, so cache and build output in the fork stay behind. DIR must hold the grading files outside
@@ -45,12 +48,13 @@ join  applies the fork's changes (binary diff of its working tree, untracked inc
       these checks, joins the working tree and says so (--force does not: it drops join blockers only). A join
       holds the run lock of the fork and of DIR from its first check to the fork's removal, so no run starts in
       either; a fork with an open run (begun and neither ended nor aborted, or a live holder of its run lock), or a
-      DIR with a live holder of its run lock, is refused even with --ungraded or --force. A fork with no runs joins
-      as before and says no run graded it.
+      DIR with a live holder of its run lock, is refused even with --ungraded or --force. A fork with no Concord run
+      is ungraded: join refuses it, saying no run graded it, and --ungraded joins it.
 """
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -401,6 +405,10 @@ def cmd_done(args):
     if not wt.exists():
         die(f"no worktree {wt}")
     gitdir = Path(git(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
+    run_mutex(wt)                          # held until this process exits: no run starts before the worktree is gone
+    if busy := open_runs(wt):              # an open run writes here or will report on these files: --force never drops it
+        die(f"{wt} has an open Concord run ({', '.join(busy)}): end it with `concord.py --end RUN` or abort it with "
+            "`concord.py --abort RUN` there first; nothing removed")
     mark_path = gitdir / MARK
     made = [rel for rel in mark_path.read_text(errors="replace").splitlines() if rel.strip()] \
         if mark_path.exists() else []
@@ -489,6 +497,42 @@ def git_bytes(dirpath, *args, env=None):
     if res.returncode != 0:
         die(f"git {' '.join(args)} failed: {res.stderr.decode(errors='replace').strip()}")
     return res.stdout
+
+
+def run_mutex(checkout):
+    """Take the mutex beside the checkout's Concord run lock (<git-dir>/concord.lock.mutex), the one concord.py holds
+    whenever it starts or ends a run, and return its descriptor; the lock is held until the descriptor is closed or the
+    process exits."""
+    fd = os.open(Path(git(checkout, "rev-parse", "--path-format=absolute", "--git-dir")) / "concord.lock.mutex",
+                 os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def open_runs(checkout):
+    """The run ids of the live holders of the checkout's Concord run lock (<git-dir>/concord.lock), read as concord.py
+    reads it: a --begin holder lives until --end or --abort, any other while its pid or its harness's process group
+    runs. The caller holds the mutex (run_mutex)."""
+    def alive(pid, group):
+        try:
+            (os.killpg if group else os.kill)(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+
+    lock = Path(git(checkout, "rev-parse", "--path-format=absolute", "--git-dir")) / "concord.lock"
+    try:
+        data = json.loads(lock.read_text())
+    except (OSError, ValueError):
+        return []
+    holders = data.get("holders") if isinstance(data, dict) else None
+    if not isinstance(holders, list):          # the one-holder file written before 2026-11-15
+        holders = [data] if isinstance(data, dict) and data.get("run") else []
+    return [str(h.get("run")) for h in holders if isinstance(h, dict) and (h.get("manual") or any(
+        isinstance(h.get(k), int) and not isinstance(h.get(k), bool) and h[k] > 0 and alive(h[k], k == "child")
+        for k in ("pid", "child")))]
 
 
 def snapshot_commit(dirpath):
@@ -651,9 +695,9 @@ def read_copies(gitdir):
 
 def graded_check(fork, dest, ungraded=False):
     """(exit code, text, applied) of `concord.py --fork-graded` for the fork joining `dest`, the caller holding the
-    Concord lock mutex of both: 0 for no run or a match; 4, a run open in the fork or in `dest`, always refuses the
-    join; any other code, a fork or joined result without a matching PASS or a check that could not run, refuses it
-    unless --ungraded (`ungraded`: concord.py checks for open runs and joins nothing). `applied`, the files of its
+    Concord lock mutex of both: 0 for a match; 4, a run open in the fork or in `dest`, always refuses the join; any
+    other code, a fork with no run, a fork or joined result without a matching PASS or a check that could not run,
+    refuses it unless --ungraded (`ungraded`: concord.py checks for open runs and joins nothing). `applied`, the files of its
     `applied:` line, is set once concord.py applied the graded change itself, else None; with a code other than 0 the
     result it left in `dest` is not the graded one."""
     res = subprocess.run([sys.executable, str(HERE / "concord.py"), "--fork-graded", "--repo", str(fork), "--dest",
@@ -740,19 +784,17 @@ def cmd_join(args):
             why = w["locked"] if isinstance(w["locked"], str) else ""
             die(f"the fork {fork.name} is locked by git{f' ({why})' if why else ''}, and nothing was applied; unlock it with "
                 f"`git worktree unlock {fork}`, then run join again; fork kept")
-    blockers = join_blockers(fork, origin or dirpath, record)
-    if blockers and not args.force:
-        die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "
-            + "\n  ".join(blockers[:15]))
-    # The Concord lock mutexes of the fork and of this checkout are held from the grading check to the fork's removal:
-    # no run starts or ends in either in between, so the check sees every run there is, and none changes the files the
-    # join checks and applies.
+    # The Concord lock mutexes of the fork and of this checkout are held from the first check of the fork's work to the
+    # fork's removal: no run starts or ends in either in between, so the checks see every run there is, and none changes
+    # the files the join checks and applies.
     mutexes = []
     try:
         for checkout in (fork, dirpath):
-            mutexes.append(os.open(Path(git(checkout, "rev-parse", "--path-format=absolute", "--git-dir"))
-                                   / "concord.lock.mutex", os.O_CREAT | os.O_RDWR, 0o644))
-            fcntl.flock(mutexes[-1], fcntl.LOCK_EX)
+            mutexes.append(run_mutex(checkout))
+        blockers = join_blockers(fork, origin or dirpath, record)
+        if blockers and not args.force:
+            die(f"the fork {fork.name} holds work join cannot carry; fork kept (--force joins anyway and drops it):\n  "
+                + "\n  ".join(blockers[:15]))
         code, graded, applied = graded_check(fork, dirpath, args.ungraded)
         if code == 4:
             die(f"{graded}; nothing was applied, fork kept")

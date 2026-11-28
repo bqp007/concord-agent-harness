@@ -233,23 +233,23 @@ $WT fork T8 2 --repo "$W8" > "$T/f1.txt" 2>&1; RF=$?; F8="$M/.claude/worktrees/T
 $WT fork T8 2 --repo "$W8" > "$T/f2.txt" 2>&1; RF2=$?
 [ $RF2 -eq 2 ] && grep -q "exists" "$T/f2.txt" && ok "a second fork of the same phase exits 2" || { bad "second fork rc=$RF2"; cat "$T/f2.txt"; }
 printf 'x = 3\n' > "$F8/a.py"; printf 'm = 1\n' > "$F8/made.py"
-$WT join T8 2 --repo "$W8" > "$T/j1.txt" 2>&1; RJ=$?
+$WT join T8 2 --repo "$W8" --ungraded > "$T/j1.txt" 2>&1; RJ=$?
 [ $RJ -eq 0 ] && [ "$(cat "$W8/a.py")" = "x = 3" ] && [ "$(cat "$W8/made.py" 2>/dev/null)" = "m = 1" ] && [ "$(cat "$W8/new.py")" = "n = 1" ] \
   && [ ! -e "$F8" ] && [ -f "$M/data/blob" ] && ok "join applies the phase's changes and removes the fork (link target kept)" \
   || { bad "join rc=$RJ"; cat "$T/j1.txt"; }
 $WT fork T8 3 --repo "$W8" > /dev/null 2>&1; F9="$M/.claude/worktrees/T8-p3"
 [ -d "$F9" ] && printf 'x = 4\n' > "$F9/a.py"; printf 'x = 5\n' > "$W8/a.py"
-$WT join T8 3 --repo "$W8" > "$T/j2.txt" 2>&1; RJ2=$?
+$WT join T8 3 --repo "$W8" --ungraded > "$T/j2.txt" 2>&1; RJ2=$?
 [ $RJ2 -eq 2 ] && [ -d "$F9" ] && [ "$(cat "$W8/a.py")" = "x = 5" ] && grep -q "a.py" "$T/j2.txt" \
   && ok "a conflicting ticket edit: join exits 2, names a.py, keeps the fork" || { bad "conflict join rc=$RJ2"; cat "$T/j2.txt"; }
 mkdir -p "$W8/sub"; printf 's\n' > "$W8/sub/s.txt"; F10="$M/.claude/worktrees/T8-p4"
 ( cd "$W8/sub" && $WT fork T8 4 > /dev/null 2>&1 ); FA=$(cat "$F10/a.py" 2>/dev/null); [ -d "$F10" ] && printf 't\n' > "$F10/top2.txt"
-( cd "$W8/sub" && $WT join T8 4 > "$T/j3.txt" 2>&1 ); RJ3=$?
+( cd "$W8/sub" && $WT join T8 4 --ungraded > "$T/j3.txt" 2>&1 ); RJ3=$?
 [ "$FA" = "x = 5" ] && [ -f "$W8/top2.txt" ] && [ ! -e "$F10" ] \
   && ok "fork and join from a subdirectory work on the whole checkout" || { bad "subdir join rc=$RJ3"; cat "$T/j3.txt"; }
 echo "== join: a fork graded by a PASS run"
-# a fork with no Concord run joins as before and says no run graded it
-grep -qF "no Concord run graded this fork" "$T/j1.txt" && ok "a fork with no runs joins as before and prints that no run graded it" || { bad "no-run join message"; cat "$T/j1.txt"; }
+# a fork with no Concord run joins with --ungraded and says no run graded it
+grep -qF "joined ungraded (--ungraded): no Concord run graded this fork" "$T/j1.txt" && ok "a fork with no runs joins with --ungraded and prints that no run graded it" || { bad "no-run join message"; cat "$T/j1.txt"; }
 $WT new TJ --repo "$M" --no-fetch --base main > /dev/null 2>&1; WJ="$M/.claude/worktrees/TJ"; plan "$WJ"; mv "$WJ/PLAN_T.md" "$WJ/PLAN_J.md"; A0="$(cat "$WJ/a.py")"
 # gradefork N ACTIONS [PLAN]: fork N of TJ, one run of PLAN (default PLAN_J.md) phase 1 in it with PASS recorded (ACTIONS is the fake executor); sets FJ and RJ
 gradefork(){ local gp=${3:-PLAN_J.md}; $WT fork TJ "$1" --repo "$WJ" > /dev/null 2>&1; FJ="$M/.claude/worktrees/TJ-p$1"
@@ -265,9 +265,10 @@ JT=$(cd "$WJ" && cp "$(git rev-parse --path-format=absolute --git-path index)" "
   && ok "a fork that still matches its PASS run's candidate joins, its tree applied as graded, and join names the run" \
   || { bad "graded join rc=$RG tree=$JT candidate=$CAND"; cat "$T/jg.txt"; }
 $WT fork TJ 1 --repo "$WJ" > /dev/null 2>&1; $WT join TJ 1 --repo "$WJ" > "$T/jn.txt" 2>&1; RN=$?
-[ $RN -eq 0 ] && grep -qF "no Concord run graded this fork" "$T/jn.txt" \
+[ $RN -ne 0 ] && grep -qF "no Concord run graded this fork" "$T/jn.txt" \
   && ok "a fork made again at a joined fork's path counts only its own runs (none here), not the old fork's PASS" \
   || { bad "re-made fork join rc=$RN"; cat "$T/jn.txt"; }
+$WT join TJ 1 --repo "$WJ" --ungraded > /dev/null 2>&1
 git -C "$WJ" checkout -q -- a.py
 gradefork 2 'echo y >> a.py'; printf 'extra = 1\n' > "$FJ/extra.py"
 $WT join TJ 2 --repo "$WJ" > "$T/jr.txt" 2>&1; RR=$?
@@ -354,60 +355,60 @@ echo "== join: committed work, the checkout it runs in, staged and ignored work 
 git -C "$M" worktree remove --force "$F9" > /dev/null 2>&1
 printf 'x = 5\n' > "$W8/a.py"; $WT fork T8 5 --repo "$W8" > /dev/null 2>&1; F5="$M/.claude/worktrees/T8-p5"; [ -d "$F5" ] || { echo "setup failed: fork 5"; exit 1; }
 printf 'x = 7\n' > "$F5/a.py"; printf 'k = 1\n' > "$F5/kept.py"; git -C "$F5" add -A; git -C "$F5" -c user.email=t@t -c user.name=t commit -qm "work in the fork"
-$WT join T8 5 --repo "$W8" > "$T/j5.txt" 2>&1; RJ5=$?
+$WT join T8 5 --repo "$W8" --ungraded > "$T/j5.txt" 2>&1; RJ5=$?
 [ $RJ5 -eq 0 ] && [ "$(cat "$W8/a.py")" = "x = 7" ] && [ "$(cat "$W8/kept.py" 2>/dev/null)" = "k = 1" ] && [ ! -e "$F5" ] \
   && ok "join applies work committed in the fork (an edit and a new file)" || { bad "committed work lost rc=$RJ5 a.py='$(cat "$W8/a.py")'"; cat "$T/j5.txt"; }
 $WT fork T8 6 --repo "$W8" > /dev/null 2>&1; F6="$M/.claude/worktrees/T8-p6"; [ -d "$F6" ] || { echo "setup failed: fork 6"; exit 1; }
 printf 'o = 1\n' > "$F6/only6.py"
-$WT join T8 6 --repo "$M" > "$T/j6.txt" 2>&1; RJ6=$?
+$WT join T8 6 --repo "$M" --ungraded > "$T/j6.txt" 2>&1; RJ6=$?
 [ $RJ6 -ne 0 ] && [ -d "$F6" ] && [ ! -e "$M/only6.py" ] && ok "join from a checkout other than the fork's origin is refused, the fork kept, that checkout untouched" \
   || { bad "join from another checkout rc=$RJ6"; cat "$T/j6.txt"; }
-$WT join T8 6 --repo "$W8" > /dev/null 2>&1
+$WT join T8 6 --repo "$W8" --ungraded > /dev/null 2>&1
 printf 'x = 8\n' > "$W8/a.py"; $WT fork T8 7 --repo "$W8" > /dev/null 2>&1; F7="$M/.claude/worktrees/T8-p7"; [ -d "$F7" ] || { echo "setup failed: fork 7"; exit 1; }
 printf 'x = 10\n' > "$F7/a.py"; git -C "$F7" add a.py; printf 'x = 11\n' > "$F7/a.py"
-$WT join T8 7 --repo "$W8" > "$T/j7.txt" 2>&1; RJ7=$?
+$WT join T8 7 --repo "$W8" --ungraded > "$T/j7.txt" 2>&1; RJ7=$?
 [ $RJ7 -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && ok "join with staged content that differs from the working file is refused, the fork kept" \
   || { bad "staged differs rc=$RJ7"; cat "$T/j7.txt"; }
 git -C "$F7" reset -q a.py; git -C "$F7" rm -q --cached a.py      # a staged deletion; the working file stays, untracked
-$WT join T8 7 --repo "$W8" > "$T/j7b.txt" 2>&1; RJ7B=$?
+$WT join T8 7 --repo "$W8" --ungraded > "$T/j7b.txt" 2>&1; RJ7B=$?
 [ $RJ7B -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && grep -q 'a\.py' "$T/j7b.txt" \
   && ok "join with a staged deletion whose path exists again in the fork is refused, the fork kept, the path named" \
   || { bad "staged deletion of a recreated path rc=$RJ7B"; cat "$T/j7b.txt"; }
 git -C "$F7" reset -q a.py; git -C "$F7" rm -q --cached a.py; git -C "$F7" -c user.email=t@t -c user.name=t commit -qm "drop a.py"   # a committed deletion; the file stays, untracked
-$WT join T8 7 --repo "$W8" > "$T/j7c.txt" 2>&1; RJ7C=$?
+$WT join T8 7 --repo "$W8" --ungraded > "$T/j7c.txt" 2>&1; RJ7C=$?
 [ $RJ7C -ne 0 ] && [ -d "$F7" ] && [ "$(cat "$W8/a.py")" = "x = 8" ] && grep -q 'a\.py' "$T/j7c.txt" \
   && ok "join with a committed deletion whose path exists again in the fork is refused, the fork kept, the path named" \
   || { bad "committed deletion of a recreated path rc=$RJ7C"; cat "$T/j7c.txt"; }
-git -C "$F7" reset -q HEAD~1; $WT join T8 7 --repo "$W8" > /dev/null 2>&1
+git -C "$F7" reset -q HEAD~1; $WT join T8 7 --repo "$W8" --ungraded > /dev/null 2>&1
 $WT fork T8 8 --repo "$W8" > /dev/null 2>&1; F8="$M/.claude/worktrees/T8-p8"; [ -d "$F8" ] || { echo "setup failed: fork 8"; exit 1; }
 printf 'x = 12\n' > "$F8/a.py"; mkdir -p "$F8/build"; printf 'o\n' > "$F8/build/only-here.o"
-$WT join T8 8 --repo "$W8" > "$T/j8.txt" 2>&1; RJ8=$?
+$WT join T8 8 --repo "$W8" --ungraded > "$T/j8.txt" 2>&1; RJ8=$?
 [ $RJ8 -ne 0 ] && [ -d "$F8" ] && [ -f "$F8/build/only-here.o" ] && grep -q "build" "$T/j8.txt" \
   && ok "join with an ignored file only the fork holds (build/only-here.o) is refused, the fork kept, the file named" || { bad "ignored file only in the fork rc=$RJ8"; cat "$T/j8.txt"; }
-$WT join T8 8 --repo "$W8" --force > "$T/j8f.txt" 2>&1; RJ8F=$?
+$WT join T8 8 --repo "$W8" --force --ungraded > "$T/j8f.txt" 2>&1; RJ8F=$?
 [ $RJ8F -eq 0 ] && [ ! -e "$F8" ] && grep -q "^dropped (--force):" "$T/j8f.txt" && grep -q "only-here.o" "$T/j8f.txt" \
   && ok "join --force joins anyway and prints 'dropped (--force):' naming the ignored file it dropped" || { bad "join --force rc=$RJ8F"; cat "$T/j8f.txt"; }
 $WT fork T8 9 --repo "$W8" > /dev/null 2>&1; F9B="$M/.claude/worktrees/T8-p9"; [ -d "$F9B" ] || { echo "setup failed: fork 9"; exit 1; }
 printf 'o9 = 1\n' > "$F9B/only9.py"; rm -f "$(git -C "$F9B" rev-parse --path-format=absolute --git-dir)/.wt-fork"
-$WT join T8 9 --repo "$W8" > "$T/j9.txt" 2>&1; RJ9=$?
+$WT join T8 9 --repo "$W8" --ungraded > "$T/j9.txt" 2>&1; RJ9=$?
 [ $RJ9 -ne 0 ] && [ -d "$F9B" ] && [ ! -e "$W8/only9.py" ] && grep -q "before 3.0" "$T/j9.txt" \
   && ok "a fork without .wt-fork (made by an older wt.py) is refused and kept, with the reason" || { bad "fork without .wt-fork rc=$RJ9"; cat "$T/j9.txt"; }
-$WT join T8 9 --repo "$W8" --force > /dev/null 2>&1
+$WT join T8 9 --repo "$W8" --force --ungraded > /dev/null 2>&1
 $WT fork T8 10 --repo "$W8" > /dev/null 2>&1; F10B="$M/.claude/worktrees/T8-p10"; [ -d "$F10B" ] || { echo "setup failed: fork 10"; exit 1; }
 printf 'x = 13\n' > "$F10B/a.py"; mkdir -p "$F10B/build"; printf 'precious\n' > "$F10B/build/out.txt"; git -C "$F10B" add -f build/out.txt
-$WT join T8 10 --repo "$W8" > "$T/j10.txt" 2>&1; RJ10=$?
+$WT join T8 10 --repo "$W8" --ungraded > "$T/j10.txt" 2>&1; RJ10=$?
 [ $RJ10 -ne 0 ] && [ -d "$F10B" ] && [ -f "$F10B/build/out.txt" ] && grep -q 'build/out\.txt' "$T/j10.txt" \
   && ok "join with an ignored file staged in the fork (git add -f) is refused, the fork kept, the file named" || { bad "staged ignored file rc=$RJ10"; cat "$T/j10.txt"; }
-git -C "$F10B" reset -q build/out.txt; $WT join T8 10 --repo "$W8" --force > /dev/null 2>&1
+git -C "$F10B" reset -q build/out.txt; $WT join T8 10 --repo "$W8" --force --ungraded > /dev/null 2>&1
 $WT fork T8 11 --repo "$W8" > /dev/null 2>&1; F11="$M/.claude/worktrees/T8-p11"; [ -d "$F11" ] || { echo "setup failed: fork 11"; exit 1; }
 printf 'o11 = 1\n' > "$F11/only11.py"; printf 'x = 11\n' > "$F11/a.py"; git -C "$M" worktree lock "$F11"
 B11=$(cd "$W8" && git status --porcelain -uall; cat a.py)
-$WT join T8 11 --repo "$W8" > "$T/j11.txt" 2>&1; RJ11=$?
+$WT join T8 11 --repo "$W8" --ungraded > "$T/j11.txt" 2>&1; RJ11=$?
 [ $RJ11 -ne 0 ] && [ -d "$F11" ] && [ "$(cd "$W8" && git status --porcelain -uall; cat a.py)" = "$B11" ] && [ ! -e "$W8/only11.py" ] \
   && grep -qi "locked" "$T/j11.txt" && grep -qF "git worktree unlock $F11" "$T/j11.txt" \
   && ok "join of a locked fork is refused before it applies anything: the origin is unchanged, the unlock command named" \
   || { bad "locked fork join rc=$RJ11"; cat "$T/j11.txt"; }
-git -C "$M" worktree unlock "$F11"; $WT join T8 11 --repo "$W8" > "$T/j11b.txt" 2>&1; RJ11B=$?
+git -C "$M" worktree unlock "$F11"; $WT join T8 11 --repo "$W8" --ungraded > "$T/j11b.txt" 2>&1; RJ11B=$?
 [ $RJ11B -eq 0 ] && [ ! -e "$F11" ] && [ "$(cat "$W8/a.py")" = "x = 11" ] && [ -f "$W8/only11.py" ] \
   && ok "after git worktree unlock, the retried join applies the work and removes the fork" || { bad "join after unlock rc=$RJ11B"; cat "$T/j11b.txt"; }
 echo "== done and join do not over-refuse: tracked .claude files, cache folders, unchanged copies, copies of an older wt.py"
@@ -423,13 +424,13 @@ $WT done T5 --repo "$T/r5" > "$T/d5.txt" 2>&1; RD5=$?
 mkr "$T/r6"; $WT new T6 --repo "$T/r6" --no-fetch > /dev/null 2>&1; W6="$T/r6/.claude/worktrees/T6"
 $WT fork T6 1 --repo "$W6" > /dev/null 2>&1; F6B="$T/r6/.claude/worktrees/T6-p1"
 printf 'x = 2\n' > "$F6B/mod.py"; mkdir -p "$F6B/__pycache__"; printf 'pyc\n' > "$F6B/__pycache__/mod.cpython-39.pyc"
-$WT join T6 1 --repo "$W6" > "$T/j6b.txt" 2>&1; RJ6B=$?
+$WT join T6 1 --repo "$W6" --ungraded > "$T/j6b.txt" 2>&1; RJ6B=$?
 [ $RJ6B -eq 0 ] && [ "$(cat "$W6/mod.py")" = "x = 2" ] && [ ! -e "$F6B" ] \
   && ok "join ignores an ignored __pycache__ folder of the fork (the folders done treats as disposable)" || { bad "join with __pycache__ rc=$RJ6B"; cat "$T/j6b.txt"; }
 mkr "$T/r7"; $WT new T7 --repo "$T/r7" --no-fetch > /dev/null 2>&1; W7="$T/r7/.claude/worktrees/T7"
 printf '# Plan\n' > "$W7/PLAN_T7.md"; $WT fork T7 1 --repo "$W7" > /dev/null 2>&1; F7B="$T/r7/.claude/worktrees/T7-p1"
 printf 'x = 3\n' > "$F7B/mod.py"; printf '# Plan\n## Passes\n- pass 1 done\n' > "$W7/PLAN_T7.md"
-$WT join T7 1 --repo "$W7" > "$T/j7b.txt" 2>&1; RJ7B=$?
+$WT join T7 1 --repo "$W7" --ungraded > "$T/j7b.txt" 2>&1; RJ7B=$?
 [ $RJ7B -eq 0 ] && [ "$(cat "$W7/mod.py")" = "x = 3" ] && grep -q "^## Passes" "$W7/PLAN_T7.md" && [ ! -e "$F7B" ] \
   && ok "join: the fork's copy of the plan, unchanged, is not unique to the fork although the ticket's plan was edited since" || { bad "edited ticket plan blocks join rc=$RJ7B"; cat "$T/j7b.txt"; }
 mkr "$T/r8"; mkdir -p "$T/r8/.claude"; printf '{}\n' > "$T/r8/.claude/settings.local.json"; $WT new T8b --repo "$T/r8" --no-fetch > /dev/null 2>&1
@@ -449,27 +450,27 @@ fork9() { $WT fork T9L "$1" --repo "$W9L" > /dev/null 2>&1; F9L="$T/r9/.claude/w
   { [ -L "$F9L/data" ] && [ -L "$F9L/scratch.lnk" ] && git -C "$F9L" status --porcelain --ignored | grep -q '^!! scratch.lnk$'; } \
     || { echo "setup failed: fork $1 with an ignored user symlink"; exit 1; }; }
 fork9 1
-$WT join T9L 1 --repo "$W9L" > "$T/j9l1.txt" 2>&1; RJ9L1=$?
+$WT join T9L 1 --repo "$W9L" --ungraded > "$T/j9l1.txt" 2>&1; RJ9L1=$?
 [ $RJ9L1 -ne 0 ] && [ -d "$F9L" ] && [ -L "$F9L/scratch.lnk" ] && [ "$(cat "$W9L/mod.py")" = "x = 1" ] && grep -q "scratch.lnk" "$T/j9l1.txt" && ! grep -q "^  data" "$T/j9l1.txt" \
   && ok "join with an ignored symlink only the fork holds (made by the user) is refused, the fork and the link kept, the link named and not wt.py's own data link" \
   || { bad "join with a user symlink only in the fork rc=$RJ9L1"; cat "$T/j9l1.txt"; }
 [ -d "$F9L" ] || fork9 1
-$WT join T9L 1 --repo "$W9L" --force > /dev/null 2>&1; rm -f "$W9L/mod.py"; git -C "$W9L" checkout -q -- mod.py
+$WT join T9L 1 --repo "$W9L" --force --ungraded > /dev/null 2>&1; rm -f "$W9L/mod.py"; git -C "$W9L" checkout -q -- mod.py
 fork9 2; ln -sf "$T/other.txt" "$W9L/scratch.lnk"
-$WT join T9L 2 --repo "$W9L" > "$T/j9l2.txt" 2>&1; RJ9L2=$?
+$WT join T9L 2 --repo "$W9L" --ungraded > "$T/j9l2.txt" 2>&1; RJ9L2=$?
 [ $RJ9L2 -ne 0 ] && [ -d "$F9L" ] && grep -q "scratch.lnk" "$T/j9l2.txt" \
   && ok "join: an origin entry that is a link with another target does not make the fork's link the same" || { bad "join with a link of another target rc=$RJ9L2"; cat "$T/j9l2.txt"; }
 [ -d "$F9L" ] || fork9 2
-$WT join T9L 2 --repo "$W9L" --force > /dev/null 2>&1; git -C "$W9L" checkout -q -- mod.py
+$WT join T9L 2 --repo "$W9L" --force --ungraded > /dev/null 2>&1; git -C "$W9L" checkout -q -- mod.py
 fork9 3; ln -sf "$T/elsewhere.txt" "$W9L/scratch.lnk"
-$WT join T9L 3 --repo "$W9L" > "$T/j9l3.txt" 2>&1; RJ9L3=$?
+$WT join T9L 3 --repo "$W9L" --ungraded > "$T/j9l3.txt" 2>&1; RJ9L3=$?
 [ $RJ9L3 -eq 0 ] && [ ! -e "$F9L" ] && [ "$(cat "$W9L/mod.py")" = "x = 5" ] && [ -L "$W9L/scratch.lnk" ] && [ -f "$T/r9/data/blob" ] \
   && ok "join: the origin holds the same link (same target text): joins, removes the fork, keeps the link and the data folder" || { bad "join with the same link in the origin rc=$RJ9L3"; cat "$T/j9l3.txt"; }
 mkdir -p "$T/data9b"; fork9 4; ln -sfn "$T/data9b" "$F9L/data"          # the user re-points wt.py's own data link
-$WT join T9L 4 --repo "$W9L" > "$T/j9l4.txt" 2>&1; RJ9L4=$?
+$WT join T9L 4 --repo "$W9L" --ungraded > "$T/j9l4.txt" 2>&1; RJ9L4=$?
 [ $RJ9L4 -ne 0 ] && [ -d "$F9L" ] && [ "$(readlink "$F9L/data")" = "$T/data9b" ] && grep -q "^  data: " "$T/j9l4.txt" \
   && ok "join: a link wt.py made that now points elsewhere is refused, the fork and the new target kept, the link named" || { bad "join lost a re-pointed wt.py link rc=$RJ9L4"; cat "$T/j9l4.txt"; }
-[ -d "$F9L" ] && $WT join T9L 4 --repo "$W9L" --force > /dev/null 2>&1
+[ -d "$F9L" ] && $WT join T9L 4 --repo "$W9L" --force --ungraded > /dev/null 2>&1
 $WT new T9R --repo "$T/r9" --no-fetch --link data > /dev/null 2>&1; W9R="$T/r9/.claude/worktrees/T9R"; ln -sfn "$T/data9b" "$W9R/data"
 $WT done T9R --repo "$T/r9" > "$T/d9r.txt" 2>&1; RD9R=$?
 [ $RD9R -ne 0 ] && [ "$(readlink "$W9R/data")" = "$T/data9b" ] && grep -q "data: " "$T/d9r.txt" \
@@ -492,12 +493,12 @@ echo "== join checks the branch; done and join compare permission bits; file nam
 mkr "$T/r11"; $WT new T11B --repo "$T/r11" --no-fetch > /dev/null 2>&1; W11B="$T/r11/.claude/worktrees/T11B"
 $WT fork T11B 1 --repo "$W11B" > /dev/null 2>&1; F11B="$T/r11/.claude/worktrees/T11B-p1"; [ -d "$F11B" ] || { echo "setup failed: fork for the branch check"; exit 1; }
 printf 'x = 2\n' > "$F11B/mod.py"; git -C "$W11B" switch -q -c elsewhere
-$WT join T11B 1 --repo "$W11B" > "$T/j11c.txt" 2>&1; RJ11C=$?
+$WT join T11B 1 --repo "$W11B" --ungraded > "$T/j11c.txt" 2>&1; RJ11C=$?
 [ $RJ11C -ne 0 ] && [ -d "$F11B" ] && [ "$(cat "$W11B/mod.py")" = "x = 1" ] && [ "$(git -C "$W11B" branch --show-current)" = "elsewhere" ] \
   && grep -q "feature/T11B" "$T/j11c.txt" && grep -q "elsewhere" "$T/j11c.txt" \
   && ok "join after the origin checkout switched branches is refused naming both branches, nothing applied, the fork kept" || { bad "join on another branch rc=$RJ11C"; cat "$T/j11c.txt"; }
 git -C "$W11B" switch -q feature/T11B; printf 'n = 1\n' > "$W11B/progress.py"; git -C "$W11B" add progress.py; git -C "$W11B" commit -qm progress
-$WT join T11B 1 --repo "$W11B" > "$T/j11d.txt" 2>&1; RJ11D=$?
+$WT join T11B 1 --repo "$W11B" --ungraded > "$T/j11d.txt" 2>&1; RJ11D=$?
 [ $RJ11D -eq 0 ] && [ ! -e "$F11B" ] && [ "$(cat "$W11B/mod.py")" = "x = 2" ] \
   && ok "join after a new commit on the same origin branch still applies and removes the fork" || { bad "join after progress rc=$RJ11D"; cat "$T/j11d.txt"; }
 mkr "$T/r12"; mkdir -p "$T/r12/.claude"; printf '{}\n' > "$T/r12/.claude/settings.local.json"; $WT new T12 --repo "$T/r12" --no-fetch > /dev/null 2>&1
@@ -509,10 +510,10 @@ $WT done T12 --repo "$T/r12" --force > /dev/null 2>&1
 mkr "$T/r13"; printf 'out.bin\n' >> "$T/r13/.git/info/exclude"; $WT new T13 --repo "$T/r13" --no-fetch > /dev/null 2>&1; W13="$T/r13/.claude/worktrees/T13"
 printf 'o\n' > "$W13/out.bin"; $WT fork T13 1 --repo "$W13" > /dev/null 2>&1; F13="$T/r13/.claude/worktrees/T13-p1"
 printf 'o\n' > "$F13/out.bin"; chmod 755 "$F13/out.bin"
-$WT join T13 1 --repo "$W13" > "$T/j13.txt" 2>&1; RJ13=$?
+$WT join T13 1 --repo "$W13" --ungraded > "$T/j13.txt" 2>&1; RJ13=$?
 [ $RJ13 -ne 0 ] && [ -d "$F13" ] && grep -q "out.bin" "$T/j13.txt" \
   && ok "join keeps an ignored file that differs from the origin only by its executable bit, and names it" || { bad "mode-only ignored file rc=$RJ13"; cat "$T/j13.txt"; }
-$WT join T13 1 --repo "$W13" --force > /dev/null 2>&1; $WT done T13 --repo "$T/r13" --force > /dev/null 2>&1
+$WT join T13 1 --repo "$W13" --force --ungraded > /dev/null 2>&1; $WT done T13 --repo "$T/r13" --force > /dev/null 2>&1
 mkr "$T/r14"; printf '# tracked\n' > "$T/r14/PLAN_q1.md"; mkdir -p "$T/r14/lk[1]" "$T/r14/lk1"; printf 'a\n' > "$T/r14/lk[1]/f"; printf 'b\n' > "$T/r14/lk1/f"
 git -C "$T/r14" add PLAN_q1.md && git -C "$T/r14" commit -qm plan
 $WT new T14 --repo "$T/r14" --no-fetch --link 'lk[1]' > /dev/null 2>&1; W14="$T/r14/.claude/worktrees/T14"
