@@ -163,13 +163,14 @@ run 'printf "def f(x):\n    return x + 1\n" > lib.py'; MR=$(rid)
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
 [ $RC -eq 0 ] && has "MUTATION $MR:" && ! has "unmutated copy" && ok "an expected-red command that fails on the candidate is its expected result, not a setup failure" \
   || { bad "expected-red setup rc=$RC"; head -4 "$T/out.txt"; }
-newrepo '# Plan\n## Phase 1 - a\nExecutor: deepseek-flash\nFiles: lib.py\nAcceptance:\n- `python3 -c "import lib, sys; sys.exit(0 if lib.f(1) == 2 else 127)"`\n- `python3 -c "import lib, os, signal; lib.f(2) == 3 or os.kill(os.getpid(), signal.SIGTERM)"`\n'
+# g's mutants (line 4) meet a check that exits 127, f's (line 2) one that ends by a signal, as a crash would
+newrepo '# Plan\n## Phase 1 - a\nExecutor: deepseek-flash\nFiles: lib.py\nAcceptance:\n- `python3 -c "import lib, sys; sys.exit(0 if lib.g(1) == 3 else 127)"`\n- `python3 -c "import lib, os, signal; lib.f(1) == 2 or os.kill(os.getpid(), signal.SIGTERM)"`\n'
 approve PLAN_T.md "$R" || exit 1
-run 'printf "def f(x):\n    return x + 1\n" > lib.py'; MR=$(rid)
+run 'printf "def f(x):\n    return x + 1\ndef g(x):\n    return x + 2\n" > lib.py'; MR=$(rid)
 TMPDIR="$T/tmp" $DP --mutate "$MR" --repo "$R" > "$T/out.txt" 2>&1; RC=$?
-G=$(mj "$R/.git/concord/$MR/meta.json" '(m["mutation"]["killed"], m["mutation"].get("invalid", 0) == len(m["mutation"]["sampled"]) > 0)')
-[ $RC -eq 0 ] && [ "$G" = "(0, True)" ] && ok "a mutant whose check exits 127 or ends by a signal is invalid, not killed" \
-  || { bad "tool error or signal counted: rc=$RC (killed, all invalid) = $G"; head -4 "$T/out.txt"; }
+G=$(mj "$R/.git/concord/$MR/meta.json" '[sorted({r["result"] for r in m["mutation"]["sampled"] if r["line"] == n} - {"survived"}) for n in (2, 4)]')
+[ $RC -eq 0 ] && [ "$G" = "[['killed'], ['invalid']]" ] && ok "a mutant whose green check exits 127 is invalid; one whose green check ends by a signal is killed" \
+  || { bad "tool error or signal: rc=$RC results by line (2, 4) = $G"; head -4 "$T/out.txt"; }
 
 echo "passed $pass, failed $fail"
 [ $fail -eq 0 ]

@@ -1,6 +1,6 @@
 #!/bin/bash
 # concord.py run lifecycle, locks, verdicts, recovery and the report (outside review, package B): a PASS with no
-# acceptance command or no change is listed under Overrides (A); a crash is no red result (B); --abort and a signal
+# acceptance command or no change is listed under Overrides (A); a crash other than an abort is no red result (B); --abort and a signal
 # stop a live executor before its lock goes (C); run ids pass the run-selection rules and --end checks its run first
 # (D); --grade and --restore hold the checkout (E); a timed-out check whose output pipe stays open (F); a damaged lock
 # and parallel run folders (G); meta.json before report.md (H); verdict history and the grade it judged (I); --grade
@@ -84,12 +84,17 @@ begin 1; A2=$(bid); $DP --end "$A2" --repo "$R" > /dev/null 2>&1; verdict "$A2" 
   || { bad "A no change: verdict rc=$RC"; overrides; }
 fi
 
-if sel B; then echo "== B. a timeout, a command that cannot run or a signal is no red result"
+if sel B; then echo "== B. a timeout, a command that cannot run or a signal other than an abort is no red result"
 newrepo b1 "$(phase 1 'Acceptance:\n- `kill -TERM $$` (fails until phase 2)')"
 run 1 --no-baseline; B1=$(rid); verdict "$B1" PASS --note "kill fails until phase 2"; RC=$?
 [ "$(meta "$B1" acceptance_after_rc)" = "[-15]" ] && [ $RC -eq 7 ] && [ "$(meta "$B1" verdict)" = "None" ] && has "not red as expected" \
   && ok "B an expected-red command ended by a signal: PASS refused (exit 7), nothing recorded" \
   || { bad "B signal accepted as red: rc=$RC after=$(meta "$B1" acceptance_after_rc)"; cat "$T/out.txt"; }
+newrepo b3 "$(phase 1 'Acceptance:\n- `exit 134` (fails until phase 2)')"
+run 1 --no-baseline; B3=$(rid); verdict "$B3" PASS --note "the assertion fails until phase 2"; RC=$?
+[ "$(meta "$B3" acceptance_after_rc)" = "[134]" ] && [ $RC -eq 0 ] && [ "$(meta "$B3" verdict)" = "PASS" ] \
+  && ok "B an expected-red command ended by an abort (134, a failed C or C++ assertion) is a failing test: PASS recorded" \
+  || { bad "B abort not red: rc=$RC after=$(meta "$B3" acceptance_after_rc)"; cat "$T/out.txt"; }
 newrepo b2 "$(phase 1 'Acceptance:\n- `no-such-command-zq7`')"
 begin 1; RC=$?; B2=$(bid); cp "$T/out.txt" "$T/b2.txt"; $DP --end "$B2" --repo "$R" > "$T/out.txt" 2>&1
 [ $RC -eq 0 ] && grep -qF "baseline: 0/1 acceptance commands fail before the change" "$T/b2.txt" \

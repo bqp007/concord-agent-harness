@@ -1598,8 +1598,11 @@ def graded_copy(repo, run_dir, rec, tree):
 
 def failing_test(rc):
     """Whether a non-zero exit code is a failing test (a red result): not a timeout (124), a command that cannot run
-    (126, 127) or one a signal ended (a negative code, or 128 + N, the status a shell gives a child signal N ended).
-    Commands run under /bin/sh -c without pipefail: a pipeline's status is its last command's."""
+    (126, 127) or one a signal other than an abort ended (a negative code, or 128 + N, the status a shell gives a child
+    signal N ended). An abort (SIGABRT) is how a failed C or C++ assertion ends, so it is a failing test. Commands run
+    under /bin/sh -c without pipefail: a pipeline's status is its last command's."""
+    if rc in (-signal.SIGABRT, 128 + signal.SIGABRT):
+        return True
     return rc > 0 and rc not in (124, 126, 127) and not 128 < rc <= 128 + 64
 
 
@@ -1624,13 +1627,13 @@ def acceptance_problems(rec, after):
             out.append(f"exit {after[k]}, expected green: {cmd}")
         elif expect[k] == "red" and not failing_test(after[k]):
             out.append(f"exit {after[k]}, not red as expected (a timeout, a command that cannot run or one a signal "
-                       f"ended is not a failing test): {cmd}")
+                       f"other than an abort ended is not a failing test): {cmd}")
     return out
 
 
 def baseline_failing(st):
     """How many red-run commands failed before the change: failing tests under `Baseline: fail` (a timeout, a command
-    that cannot run or a signal is no red result), any non-zero exit under `Baseline: pass`."""
+    that cannot run or a signal other than an abort is no red result), any non-zero exit under `Baseline: pass`."""
     return sum(failing_test(b["rc"]) if st.get("baseline_mode") == "fail" else b["rc"] != 0 for b in st.get("baseline") or [])
 
 
@@ -2636,8 +2639,8 @@ def start_state(run_dir, repo, plan, plan_rel, phase, phase_text, who, mode, tra
             "\n\n".join(f"$ {b['cmd']}\n[exit {b['rc']}]\n{b['tail']}" for b in baseline) + "\n")
     # Per-command red run (D1): an unmarked acceptance command that already passes before an implementing change
     # makes the dispatcher refuse (done in cmd_run, exit 6); a marked command that fails before the change is only
-    # noted. An unmarked command that times out, cannot run or ends by a signal is no red result (failing_test): the
-    # report and the start line say so. `Baseline: pass` and `skip` are unchanged.
+    # noted. An unmarked command that times out, cannot run or ends by a signal other than an abort is no red result
+    # (failing_test): the report and the start line say so. `Baseline: pass` and `skip` are unchanged.
     marks = [marked for _, marked in parse_acceptance_marked(phase_text)]
     green_unmarked, char_failed, not_red = [], [], []
     if baseline_mode == "fail":
@@ -3126,7 +3129,8 @@ def finish_run(run_dir, rc, secs=None, st=None):
                 lines.append("BASELINE: these acceptance commands already passed before the change: " + "; ".join(passed))
             if not_red:
                 lines.append("BASELINE WARNING: no failing test before the change (a timeout, a command that cannot run "
-                             f"or one a signal ended is no red run): {'; '.join(not_red)}; output: {run_dir / 'baseline.txt'}")
+                             f"or one a signal other than an abort ended is no red run): {'; '.join(not_red)}; output: "
+                             f"{run_dir / 'baseline.txt'}")
             if not passed and not not_red:
                 lines.append("baseline: all acceptance commands failed before the change, as expected "
                              f"(check they failed for the intended reason: {run_dir / 'baseline.txt'})")
@@ -7151,7 +7155,7 @@ def cmd_begin(args, phase, conf):
                    f"reasons in {run_dir / 'baseline.txt'}")
         if st.get("baseline_not_red"):
             bl_line += ("\nBASELINE WARNING: no failing test before the change (a timeout, a command that cannot run "
-                        "or one a signal ended): " + "; ".join(st["baseline_not_red"]))
+                        "or one a signal other than an abort ended): " + "; ".join(st["baseline_not_red"]))
     print(f"BEGIN {run_dir.name}\nexecutor: {who}\nrisk: {st['risk']}\nfiles in scope: {st['files'] or '-'}\n"
           f"acceptance: {st['acceptance'] or '-'}\n{bl_line}\nbacked up: {len(st['backed_up'])} file(s)\n"
           + "".join(f"note: {n}\n" for n in st["notes"])
@@ -7259,8 +7263,8 @@ def record_verdict(repo, run_dir, meta_path, meta, verdict, cause=None, note=Non
     blocked = second_blocked(repo, meta) if verdict == "FAIL" and cause == "BLOCKED" else None
     if blocked:
         die(blocked)
-    # PASS needs, for every acceptance command, a result from after the run and the expected one (exit 0, or non-zero
-    # other than 124, 126 and 127 for a command marked `(fails until`), and a graded candidate that the checkout still
+    # PASS needs, for every acceptance command, a result from after the run and the expected one (exit 0, or a failing
+    # test for a command marked `(fails until`: failing_test), and a graded candidate that the checkout still
     # holds (candidate_problems). An expected-red command also needs --note naming the failing tests and why. A run
     # recorded before 3.1.0 has no candidate: run the phase again. --force records PASS anyway: the verdict reads
     # PASS (forced) and the report lists what failed beside the reason. The check and the write happen under the run's
@@ -8462,14 +8466,18 @@ def _write_meta_mutation(meta_path, run_dir, mutation, fallback_meta):
 
 def mutant_outcome(rc, expect):
     """A mutant's result from one check's exit code under the grading rules (acceptance_problems), or None when the
-    code is the check's expected result (`expect`: green, exit 0; red, a failing test). A command that cannot run
-    (126, 127) or ends by a signal (a negative code, or above 128 from the shell) is invalid: it tells nothing about
-    the mutant. 124 is a timeout, counted as killed; any other unexpected code kills the mutant."""
-    if rc in (126, 127) or rc < 0 or rc > 128:
+    code is the check's expected result. A check expected green: exit 0 is its result; a command that cannot run (126,
+    127) is invalid, it tells nothing about the mutant; 124 is a timeout, counted as killed; any other exit, a crash of
+    the mutated code by a signal included, kills the mutant. A check expected red: a failing test (failing_test) is its
+    result, exit 0 kills the mutant, and anything else (a timeout, a command that cannot run, a signal other than an
+    abort) is invalid."""
+    if expect == "red":
+        return None if failing_test(rc) else "killed" if rc == 0 else "invalid"
+    if rc in (126, 127):
         return "invalid"
     if rc == 124:
         return "timeout"
-    return None if (rc == 0) == (expect == "green") else "killed"
+    return None if rc == 0 else "killed"
 
 
 def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, check_timeout):
@@ -8604,7 +8612,8 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
                 if expect == "green":
                     die(f"the unmutated copy fails {cmd} (exit {rc})", code=2)
                 die(f"the unmutated copy does not give the expected red result for {cmd} (exit {rc}): a command marked "
-                    "(fails until must fail as a test does, not exit 0, 124, 126 or 127, or end by a signal", code=2)
+                    "(fails until must fail as a test does, not exit 0, 124, 126 or 127, or end by a signal other "
+                    "than an abort", code=2)
 
             originals = {}
 
@@ -8692,7 +8701,8 @@ def mutate_isolated(args, repo, run_dir, run_id, meta, meta_path, acceptance, ch
     if not build_cmd:
         print("note: without --build a mutant that does not compile counts as killed, not stillborn")
     if invalid:
-        print("note: an invalid mutant's check could not run (exit 126 or 127) or ended by a signal; it tells nothing")
+        print("note: an invalid mutant's check could not run (exit 126 or 127), or a check expected red neither failed "
+              "as a test does nor passed; it tells nothing")
     for r in results:
         if r["result"] not in ("survived", "stillborn", "invalid"):
             continue
@@ -8902,7 +8912,8 @@ def main():
                         "lock; a live executor run is stopped first")
     parser.add_argument("--verdict", nargs=2, metavar=("RUN_ID", "PASS|FAIL"), help="record the phase's outcome; PASS "
                         "needs each acceptance command's expected result: exit 0, or for one marked `(fails until`, a "
-                        "failing test (not a timeout 124, a command that cannot run 126 or 127, or a signal). Acceptance "
+                        "failing test (not a timeout 124, a command that cannot run 126 or 127, or a signal other than an "
+                        "abort, which a failed C or C++ assertion gives). Acceptance "
                         "commands run under /bin/sh -c without pipefail: a pipeline's exit is its last command's")
     parser.add_argument("--fork-graded", action="store_true", help="wt.py join: whether the fork (--repo) has no open "
                         "run and is the candidate of its newest PASS run")
@@ -8957,7 +8968,8 @@ def main():
     parser.add_argument("--mutate", metavar="RUN_ID",
                         help="opt-in mutation testing of a reported run's own changed lines (Python, C/C++) in a "
                              "grading copy of its candidate; each mutant stops at the first acceptance command whose "
-                             "exit code is not its expected result (126, 127 or a signal: invalid)")
+                             "exit code is not its expected result (126 or 127, or a red check that neither fails as "
+                             "a test does nor passes: invalid; a crash by a signal: killed)")
     parser.add_argument("--max", type=int, default=10, help="with --mutate: sample at most N mutants (default 10)")
     parser.add_argument("--mutants", metavar="FILE", help="with --mutate: a JSON list of planner-written mutants "
                         "{id, file, old, new, occ?, check?, what?} to grade in a grading copy of the run's candidate")
