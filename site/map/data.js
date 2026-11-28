@@ -1202,7 +1202,7 @@ window.CONCORD_MAP = {
    "view": "verify-plan"
   },
   "wt": {
-   "detail": "One git worktree per ticket session: isolated branch and files, shared history, big folders linked. new makes the worktree from the main checkout and links the configured folders; fork and join run a phase that shares a file in its own copy and apply its graded change back; done archives the plan and removes the worktree once you have committed and no run is open in it.",
+   "detail": "One git worktree per ticket session: isolated branch and files, shared history, big folders linked. new makes the worktree from the main checkout and links the configured folders; fork and join run a phase that shares a file in its own copy and apply its graded change back; done archives the plan and removes the worktree once you have committed, no run is open in it and its run lock reads.",
    "facts": [
     [
      "Command",
