@@ -63,5 +63,5 @@ REVIEW-JSON
  "verdict": "FIX"}
 END-REVIEW-JSON
 
-"findings": [] when there are none. "verdict": CLEAN, FIX or BLOCK (the dispatcher recomputes it from the findings and
-the clauses). Leave "resolutions" and "hunks" empty when the task lists no open finding and no hunk.
+"findings", "clauses" and "tests" are lists, [] when there are none, and "verdict" is CLEAN, FIX or BLOCK (the
+dispatcher recomputes it from the findings and the clauses); an answer without them is not recorded. Leave "resolutions" and "hunks" empty when the task lists no open finding and no hunk.

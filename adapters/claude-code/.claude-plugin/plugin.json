@@ -1,6 +1,6 @@
 {
   "name": "concord",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "description": "Stay in control while AI agents write your code. One workflow, two modes: /concord:run execute (the planning session writes every phase) or /concord:run delegate (low-cost models implement the bulky phases within a fixed file scope that every run's report checks). Either way a strong model turns the task into a short plan that a verifier challenges and you approve, the failing tests come first, an independent reviewer checks each change at its risk level and a cheap delta review checks each fix; you review the diff and commit. Five skills also work on their own: /concord:plan, /concord:verify-plan, /concord:design-review, /concord:lean-testing and /concord:review-change. Keeps /concord:plan-then-delegate and /concord:delegate as wrappers, plus /concord:rules-review and the implementer and reviewer agents. Needs the dispatcher from the repository's install.sh. Actively developed: new versions ship through this marketplace.",
   "author": {
     "name": "Bao Q. Pham",

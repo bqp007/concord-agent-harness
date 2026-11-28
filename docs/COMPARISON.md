@@ -8,7 +8,7 @@ Concord grew out of reading other workflows and papers, keeping what held up in 
 
 | | Where a human decides | Evidence a run must leave | Who reviews | Enforced by code, not by a prompt |
 |---|---|---|---|---|
-| Concord | approves every plan; commits | the dispatcher's report (scope, red run, acceptance re-run) and a verdict with a cause; a PASS only on the expected acceptance results | a fresh agent at the change's risk tier, then a cheap delta review of each fix | plan approval bound to the text the verifier read, red run, acceptance results and file hashes, PR review tier and finding closure, billing guard; edit scope and no web on OpenCode |
+| Concord | approves every plan; commits | the dispatcher's report (scope, red run, acceptance re-run) and a verdict with a cause; a PASS only on the expected acceptance results | a fresh agent at the change's risk tier, then a cheap delta review of each fix | plan approval bound to the hash of the text the verifier read, red run, a lock on each run's files, the scope check, acceptance results on the graded candidate tree, pinned grading files, PR review tier and finding closure, a billing guard on model names; edit scope and no web fetch on OpenCode |
 | ECC | `/plan` asks for approval before code; the orchestration pipeline adds a gate before commit (both prompt text) | test-first and verification skills write reports quoting real commands | a separate reviewer agent; cross-provider and adversarial reviews on request | hooks that block `--no-verify`, protect config files and gate a first edit |
 | agentic-sdlc | three sign-offs (advisory); git commands ask first | gate reports quoting command, exit code and runner summary | a separate reviewer agent on the session's model | a hook that asks before commit, tag, push and publish (it fails open by design); strike counters in a state script |
 | agent-protocols | none required | checklists inside the skills | an optional persona | nothing |
@@ -29,7 +29,7 @@ agentic-sdlc drives a seven-phase lifecycle with 35 subagents, persisted state a
 
 ## Multi-agent role play
 
-MetaGPT turns a one-line requirement into a repository through a chain of typed documents (requirements, design, tasks, code, tests) written by agents playing product manager, architect, project manager, engineer and QA engineer. ChatDev runs a chat chain of a CEO, a CTO, a programmer, a reviewer and a tester. Concord keeps MetaGPT's typed hand-off, since its plan file names exact files, interfaces and acceptance commands, and drops the personas. Its four roles differ in what they may do, not in what they are told they are: the planner plans and verifies, the executor edits only its phase's files, the reviewer only reads, the owner approves and commits. In both role-play systems the author or the same model reviews the work; in Concord the reviewer is always a fresh agent that did not write the code, though at the low tier it may run on the same cheap model as the executor.
+MetaGPT turns a one-line requirement into a repository through a chain of typed documents (requirements, design, tasks, code, tests) written by agents playing product manager, architect, project manager, engineer and QA engineer. ChatDev runs a chat chain of a CEO, a CTO, a programmer, a reviewer and a tester. Concord keeps MetaGPT's typed hand-off, since its plan file names exact files, interfaces and acceptance commands, and drops the personas. Its four roles differ in what they may do, not in what they are told they are: the planner plans and verifies, the executor edits only its phase's files (refused on OpenCode's edit tools, checked after every run), the reviewer edits no repository file, the owner approves and commits. In both role-play systems the author or the same model reviews the work; in Concord the planner gives each review to a fresh agent that did not write the code, though at the low tier it may run on the same cheap model as the executor, and the dispatcher credits a review at the rank of the reviewer name the planner records.
 
 ## Harness evolution and review research
 
@@ -49,14 +49,14 @@ Harness² from Google Research evolves a harness for a frozen executor model and
 
 - **Unattended self-improvement.** Concord changes its own rules only through a ticket the owner approves, under a line budget.
 - **Large catalogs of agents and personas.** They cover more ground, but every description costs context in every session. Executor mistakes (72 of Concord's 159 failures) are caught by the dispatcher's acceptance re-run and scope check, and plan gaps (51) are fixed by a better plan; another agent fixes neither.
-- **Web access for executors.** Harness² leaves the web open and records a rollout that fetched a grading rubric unprompted. On OpenCode, Concord denies the executor's web fetch and reports network use through the shell.
+- **Web access for executors.** Harness² leaves the web open and records a rollout that fetched a grading rubric unprompted. On OpenCode, Concord denies the executor's web fetch tool; network use through the shell stays open, and the run report says it is not mediated.
 
 ## What Concord still lacks
 
 - **Breadth and one-step install.** ECC and agentic-sdlc cover many more languages and stages. Concord covers one loop, and installs in two steps: a plugin for the commands and agents, which adds about 500 tokens to every session (ECC's catalog added roughly 33,000 on our setup), and a script for the dispatcher.
 - **Enforcement outside OpenCode's edit tools.** Claude Code's permission rules, hooks and sandbox act at the tool layer; Concord's scope check covers OpenCode's edit tools, not shell redirection, so the backup taken before every run is the real safety net.
 - **A controlled evaluation.** Harness², MILO and Harmony Harness report benchmark results over repeated runs. Concord's numbers come from one developer's 46 days, and the planner assigned the failure causes.
-- **The rest of the governance model.** A machine-checked contract registry, path reservations before parallel runs, and evidence bound to a hash of the whole checked state; today only the plan text and the acceptance files are hashed.
+- **The rest of the governance model.** A machine-checked contract registry, and evidence bound to the whole state a check reads. Today a PASS is bound to the plan's approval text, the candidate tree, the pinned grading files and the checkout's Git state and watched files; ignored files outside the write scope, linked folders, the environment and the rest of the machine are not part of it.
 
 ## How it grew
 
