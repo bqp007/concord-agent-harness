@@ -5,6 +5,7 @@
 #   Claude Code names a linked skill after its folder, so it is /concord:<n> in both modes), the rules merged into CLAUDE.md
 #   between <!-- concord:begin --> and <!-- concord:end -->, the settings keys merged into settings.json.
 # --plugin: remove those links, print the marketplace commands; the CLAUDE.md block names the agents concord:<name>.
+# A run that stops after it wrote something names what it wrote (the backup folder keeps what it replaced).
 # Usage: install.sh [--link|--plugin] [--dry-run] [--no-tests] [--repo DIR]
 set -euo pipefail
 shopt -s nullglob
@@ -42,31 +43,44 @@ SKILLS=""; for d in "$A"/skills/*/; do [ -f "${d}SKILL.md" ] && SKILLS="$SKILLS 
 # of them, outside the markers, is a Concord block without markers; a heading that only starts the same way is not.
 HEADS="$(grep -m1 '^# ' "$A/CLAUDE.md")$NL# Default workflow: plan, then delegate"
 
+# Every write is logged in WROTE as the line it prints (say) or, for the link manifest, silently (wrote). A run that exits
+# non-zero after a write names those writes on stderr, the files copied into $DEST/concord counted rather than listed.
+WROTE=""; FINISHED=0
+wrote() { WROTE="$WROTE$1$NL"; }
+say() { echo "$1"; wrote "$1"; }
+report_exit() { local rc=$?
+  [ "$rc" != 0 ] && [ -n "$WROTE" ] || return 0
+  if [ "$FINISHED" = 1 ]; then echo "error: the install is complete, but Concord's test suites failed in the installed copy (exit $rc)" >&2
+  else echo "error: install.sh stopped (exit $rc) after it wrote:" >&2
+    printf '%s' "$WROTE" | awk -v d="copy $DEST/concord/" 'index($0, d) == 1 {n++; next} {print "  " $0}
+      END {if (n) print "  copy " n " files into " substr(d, 6)}' >&2; fi; }
+trap report_exit EXIT
+
 BK=""   # one timestamped backup dir per run, created the first time something is backed up
 ensure_bk() { [ -n "$BK" ] && return 0
   BK="$DEST/concord/backup/$(date +%Y%m%d-%H%M%S)-pre-install"; [ -e "$BK" ] && BK="$BK.$$"
   if [ "$DRY" = 1 ]; then echo "would backup $BK"; return 0; fi
-  mkdir -p "$BK"; echo "backup $BK"; }
+  mkdir -p "$BK"; say "backup $BK"; }
 backup_into() { [ -e "$1" ] || return 0; ensure_bk; [ "$DRY" = 1 ] && return 0
   mkdir -p "$(dirname "$BK/$2")"
   if [ -L "$1" ] && [ -f "$1" ]; then cp -pL "$1" "$BK/$2"; else cp -Rp "$1" "$BK/$2"; fi; }  # a symlinked file: back up its content
 put() { if [ "${3:-}" = keep ] && [ -e "$2" ]; then
     if [ "$DRY" = 1 ]; then echo "would keep $2"; else echo "keep $2"; fi; return 0; fi
   if [ "$DRY" = 1 ]; then echo "would copy $2"; return 0; fi
-  mkdir -p "$(dirname "$2")"; cp -p "$1" "$2"; echo "copy $2"; }
+  mkdir -p "$(dirname "$2")"; cp -p "$1" "$2"; say "copy $2"; }
 
 # Nothing is written before settings.json merges and the CLAUDE.md markers pair: a refusal leaves the installation as it
 # was. A settings file the merge cannot read (not a JSON object, or `hooks` or another merged key of another shape than the
 # merge reads) stops the install here. This run only validates; install_settings merges again from the file as it is at
-# write time, so an edit made in between is kept, and stops with the same message if the edit broke the file.
+# write time, so an edit made in between is kept, and stops with the same message if the edit broke the file. The CLAUDE.md
+# markers are checked here only: install_claude_md checks them again when it writes that file.
 settings_py() {   # $1 = check (validate and report kept hooks) or write (merge and replace settings.json)
 python3 -B -I - "$1" "$DEST/settings.json" "$DEST/CLAUDE.md" "$A/settings.snippet.json" "$DEST" "$HEADS" <<'PY'
 import json, os, re, shutil, sys
 mode, settings, md, snippet, dest, heads = sys.argv[1:7]
 def refuse(msg):
     if mode == "write":
-        sys.exit(f"error: {settings} {msg}; settings.json was left as it was and the rest of the install is done; "
-                 "fix or move it, then run install.sh again")
+        sys.exit(f"error: {settings} {msg}; settings.json was left as it was; fix or move it, then run install.sh again")
     sys.exit(f"error: {settings} {msg}; fix or move it, then run install.sh again (nothing written)")
 base = {}
 if os.path.exists(settings):
@@ -95,6 +109,10 @@ if os.path.exists(snippet):
                 if not isinstance(b[k], dict):
                     refuse(f"holds {path}{k} as a {type(b[k]).__name__}; the merge reads an object there")
                 merge(b[k], v, f"{path}{k}.")
+            elif isinstance(v, list):    # a list (sandbox.excludedCommands) keeps its entries and gains Concord's missing ones
+                if not isinstance(b[k], list):
+                    refuse(f"holds {path}{k} as a {type(b[k]).__name__}; the merge reads a list there")
+                b[k] += [x for x in v if x not in b[k]]
     hooks = snip.pop("hooks", {})
     have_hooks = base.get("hooks", {})
     if not isinstance(have_hooks, dict):
@@ -142,10 +160,15 @@ if os.path.exists(snippet):
         # The temporary file sits beside the real file (a symlinked settings.json is written through) and takes its mode.
         real = os.path.realpath(settings)
         tmp = f"{real}.concord-{os.getpid()}"
-        with open(tmp, "w") as f: json.dump(base, f, indent=2); f.write("\n")
-        if os.path.exists(real): shutil.copymode(real, tmp)
-        os.replace(tmp, real)
-if os.path.exists(md):
+        try:
+            with open(tmp, "w") as f:
+                json.dump(base, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+            if os.path.exists(real): shutil.copymode(real, tmp)
+            os.replace(tmp, real)
+        except OSError as exc:
+            if os.path.exists(tmp): os.unlink(tmp)
+            refuse(f"could not be written ({exc.strerror or exc})")
+if mode == "check" and os.path.exists(md):
     B, E = "<!-- concord:begin -->", "<!-- concord:end -->"
     old = open(md).read().split("\n")
     nb, ne = old.count(B), old.count(E)
@@ -162,16 +185,17 @@ settings_py check || exit 2
 
 # Back up every concord file this install would overwrite (never backup/ itself or runs.jsonl).
 if [ -d "$DEST/concord" ]; then
-  for f in "$DEST"/concord/*.py "$DEST"/concord/*.md "$DEST"/concord/*.conf "$DEST"/concord/*.sb "$DEST"/concord/*.sh; do backup_into "$f" "$(basename "$f")"; done
+  for f in "$DEST"/concord/*.py "$DEST"/concord/*.md "$DEST"/concord/*.conf "$DEST"/concord/*.sb "$DEST"/concord/*.sh "$DEST"/concord/LICENSE; do backup_into "$f" "$(basename "$f")"; done
   [ -d "$DEST/concord/tests" ] && backup_into "$DEST/concord/tests" tests
   [ -d "$DEST/concord/repo-notes" ] && backup_into "$DEST/concord/repo-notes" repo-notes
 fi
 for f in "$SRC"/concord/*.py "$SRC"/concord/*.md "$SRC"/concord/*.sb "$SRC"/concord/*.sh; do [ -e "$f" ] && put "$f" "$DEST/concord/$(basename "$f")"; done
+put "$SRC/LICENSE" "$DEST/concord/LICENSE"   # the MIT notice travels with the installed copy
 for f in "$SRC"/concord/tests/*.sh; do put "$f" "$DEST/concord/tests/$(basename "$f")"; done
 RETIRED_SUITES="card lessons map reuse slim"   # suites Concord shipped and retired; any other suite in tests/ is the user's
 if [ -n "${BK:-}" ] && [ -d "$DEST/concord/tests" ]; then   # the backup above keeps them
   for n in $RETIRED_SUITES; do f="$DEST/concord/tests/${n}_test.sh"; [ -e "$f" ] || continue
-    if [ "$DRY" = 1 ]; then echo "would remove $f"; else rm "$f"; echo "remove $f"; fi
+    if [ "$DRY" = 1 ]; then echo "would remove $f"; else rm "$f"; say "remove $f"; fi
   done
 fi
 for f in "$SRC"/concord/models.conf "$SRC"/concord/executors.conf "$SRC"/concord/worktrees.conf \
@@ -197,8 +221,8 @@ link_one() { if [ -e "$2" ] && [ ! -L "$2" ]; then echo "keep $2 (not a link; le
   if [ -L "$2" ] && ! ours "$2" "$1"; then keep_note "$2"; return 0; fi
   TOUCHED="$TOUCHED$2$NL"; ADDED="$ADDED$2$TAB$1$NL"
   if [ "$DRY" = 1 ]; then echo "would link $2"; return 0; fi
-  mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; echo "link $2"; }
-rm_link() { if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; echo "remove link $1"; fi; }
+  mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; say "link $2"; }
+rm_link() { if [ "$DRY" = 1 ]; then echo "would remove link $1"; else rm -f "$1"; say "remove link $1"; fi; }
 unlink_one() { [ -L "$1" ] || return 0
   ours "$1" "$2" || { keep_note "$1"; return 0; }
   TOUCHED="$TOUCHED$1$NL"; rm_link "$1"; }
@@ -212,7 +236,7 @@ write_manifest() { [ "$DRY" = 1 ] && return 0
   local tmp="$MAN.$$" l; mkdir -p "$DEST/concord"; : > "$tmp"
   if [ -f "$MAN" ]; then while IFS= read -r l; do
     case "$TOUCHED" in *"$NL${l%%"$TAB"*}$NL"*) ;; *) echo "$l" >> "$tmp";; esac; done < "$MAN"; fi
-  printf '%s' "$ADDED" >> "$tmp"; mv "$tmp" "$MAN"; }
+  printf '%s' "$ADDED" >> "$tmp"; mv "$tmp" "$MAN"; wrote "update $MAN"; }
 if [ "$MODE" = link ]; then
   link_one "$A/commands" "$DEST/commands/concord"; for n in $AGENTS; do link_one "$A/agents/$n.md" "$DEST/agents/$n.md"; done
   for n in $SKILLS; do link_one "$A/skills/$n" "$DEST/skills/concord:$n"; done
@@ -225,15 +249,19 @@ write_manifest
 
 # CLAUDE.md: keep the Concord rules between the markers and replace that block where it stands; a file with
 # unpaired markers, or a Concord block without markers, is refused untouched; a symlinked CLAUDE.md is written through; the file is backed up first.
-# --link names the agents <name>; --plugin names them concord:<name>.
+# The new text goes to a temporary file beside the real one, which then replaces it: a failed write leaves CLAUDE.md as it was.
+# --link names the agents <name>; --plugin names them concord:<name>. The block names the home it is installed to: ~/.claude,
+# or the CLAUDE_HOME path.
 install_claude_md() { local md="$DEST/CLAUDE.md"
   if [ "$DRY" = 1 ]; then echo "would update $md"; return 0; fi
   mkdir -p "$DEST"; [ -e "$md" ] && backup_into "$md" CLAUDE.md
-  python3 -B -I - "$A/CLAUDE.md" "$md" "$MODE" "$HEADS" <<'PY' || exit 2
-import os, re, sys
-src, md, mode, heads = sys.argv[1:5]
+  python3 -B -I - "$A/CLAUDE.md" "$md" "$MODE" "$HEADS" "$DEST" "${HOME:-}" <<'PY' || exit 2
+import os, re, shutil, sys
+src, md, mode, heads, dest, home = sys.argv[1:7]
 B, E = "<!-- concord:begin -->", "<!-- concord:end -->"
 block = open(src).read().rstrip("\n").split("\n")
+if not home or os.path.normpath(dest) != os.path.normpath(os.path.join(home, ".claude")):
+    block = [l.replace("~/.claude", os.path.normpath(dest)) for l in block]
 if mode == "plugin":
     block = [re.sub(r"`(reviewer-opus55|reviewer-delta|plan-verifier|implementer-opus48|implementer)`", r"`concord:\1`", l) for l in block]
     block = ["- Agent names: the concord plugin provides Concord's agents as `concord:reviewer-opus55`, "
@@ -250,10 +278,18 @@ elif (nb, ne) == (1, 1) and old.index(B) < old.index(E):
     new = old[:old.index(B)] + block + old[old.index(E) + 1:]
 else:
     sys.exit(f"error: {md} has {nb} begin and {ne} end Concord markers; fix them by hand (left untouched)")
-with open(md, "w") as f:  # writes through a symlink and keeps the file's mode
-    f.write("\n".join(new) + "\n")
+real = os.path.realpath(md)             # a symlinked CLAUDE.md is written through and keeps its mode
+tmp = f"{real}.concord-{os.getpid()}"
+try:
+    with open(tmp, "w") as f:
+        f.write("\n".join(new) + "\n"); f.flush(); os.fsync(f.fileno())
+    if os.path.exists(real): shutil.copymode(real, tmp)
+    os.replace(tmp, real)
+except OSError as exc:
+    if os.path.exists(tmp): os.unlink(tmp)
+    sys.exit(f"error: {md} could not be written ({exc.strerror or exc}); it was left as it was")
 PY
-  echo "update $md"; }
+  say "update $md"; }
 install_claude_md
 
 # settings.json: merge the snippet into the file as it is now (its missing keys added, every existing value kept, the
@@ -263,7 +299,7 @@ install_settings() { local s="$DEST/settings.json" snip="$A/settings.snippet.jso
   if [ "$DRY" = 1 ]; then echo "would update $s"; return 0; fi
   mkdir -p "$DEST"; [ -e "$s" ] && backup_into "$s" settings.json
   settings_py write || exit 2
-  echo "update $s"; }
+  say "update $s"; }
 install_settings
 
 if [ "$MODE" = plugin ]; then
@@ -274,4 +310,5 @@ if [ -n "$REPO" ]; then
   for f in "$SRC"/adapters/claude-code/hookify/*.md; do put "$f" "$REPO/.claude/hookify.$(basename "$f" .md).local.md" keep; done
   echo "note: add .claude/hookify.*.local.md to $REPO/.git/info/exclude unless it is already ignored"
 fi
+FINISHED=1
 if [ "$DRY" = 0 ] && [ "$TESTS" = 1 ]; then bash "$DEST/concord/tests/run_all.sh"; fi

@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "LICENSE"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 permissions:
@@ -20,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # the site names the MIT license; the artifact carries its full text
+      - name: Add the license to the site
+        run: cp LICENSE site/LICENSE
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
