@@ -1072,6 +1072,35 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
 .cause-keys li:nth-child(4) i { opacity: 0.5; }
 .cause-keys li:nth-child(5) i { opacity: 0.36; }
 
+/* Attempts bar: the cause bar's shape in the executor color; the last segment is neutral. */
+.attempts { margin: var(--s2) 0 var(--s5); }
+.attempts .eyebrow { margin-bottom: var(--s2); }
+.attempt-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; gap: 2px; }
+.attempt-bar span { display: block; min-width: 3px; background: var(--exec); }
+.attempt-keys i { background: var(--exec); }
+.attempt-bar span:nth-child(2), .attempt-keys li:nth-child(2) i { opacity: 0.6; }
+.attempt-bar span:nth-child(3), .attempt-keys li:nth-child(3) i { opacity: 0.36; }
+.attempt-bar span:nth-child(4), .attempt-keys li:nth-child(4) i { opacity: 1; background: var(--edge); }
+
+.run-size { color: var(--ink-2); }
+
+/* Cost rows: bar length in proportion to US$ per passing phase; low-cost models teal, frontier models purple. */
+.cost { margin: var(--s5) 0; }
+.cost .eyebrow { margin-bottom: var(--s3); }
+.cost-rows { display: grid; gap: var(--s2); }
+.cost-row {
+  display: grid;
+  grid-template-columns: 9.5rem minmax(0, 1fr) 4.5rem;
+  align-items: center;
+  gap: var(--s3);
+  font-size: 0.9rem;
+  color: var(--ink-2);
+}
+.cost-fill { display: block; height: 12px; min-width: 4px; border-radius: 6px; background: var(--planner); }
+.cost-row.is-ran .cost-fill { background: var(--exec); }
+.cost-value { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--ink); }
+.cost-caption { margin: var(--s2) 0 0 !important; font-size: 0.88rem; color: var(--muted); }
+
 .setting-note {
   margin: 0 !important;
   padding-top: var(--s3);
@@ -1081,6 +1110,8 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
   line-height: 1.58;
 }
 .setting-note strong { color: var(--ink); font-weight: 650; }
+.setting-note p { margin: 0 0 var(--s2) !important; }
+.setting-note p:last-child { margin-bottom: 0 !important; }
 
 /* ---------- Install ---------- */
 
@@ -1144,6 +1175,8 @@ h1, h2, h3, h4 { color: var(--ink); margin: 0; }
   .legend .keys { display: none; }
   .stats, .stats.small { grid-template-columns: 1fr 1fr; }
   .results { padding: var(--s5) var(--s4); }
+  .cost-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+  .cost-track { grid-column: 1 / -1; grid-row: 2; }
   .req { grid-template-columns: 1fr; }
   .p-body { padding: 0 16px 16px 16px; }
   .principle summary { grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--s3); padding: 14px; }
