@@ -256,6 +256,8 @@ BUILD_GLOBS = ("build", "dist", "out", "target", "bin", "obj", "logs", "tmp", "t
 # Never classed as generated: secrets and credentials always count.
 PROTECTED_GLOBS = (".env", ".env.*", ".netrc", ".npmrc", ".pypirc", "*.pem", "*.key", "*.p12", "*.pfx",
                    "id_rsa*", "id_ed25519*", "*secret*", "*credential*")
+# An ignored compiled Python cache is a module's bytecode, not a credential file: its name does not protect it.
+BYTECODE_GLOBS = ("*.pyc", "*.pyo")
 
 # --review: a cheap model reads the finished diff against the prompt in REVIEW.md (read-only).
 REVIEW_FILE = HERE / "REVIEW.md"
@@ -926,16 +928,21 @@ def is_generated(path, globs):
     return any(fnmatch.fnmatch(part, g.lower()) for part in parts for g in globs)
 
 
+def is_protected(path, ignored=False):
+    """Named like a secret or credential, unless it is an ignored compiled Python cache."""
+    return path_matches(path, PROTECTED_GLOBS) and not (ignored and path_matches(path, BYTECODE_GLOBS))
+
+
 def split_out_of_scope(paths, post, globs=GENERATED_GLOBS, pre=None):
     """Split out-of-scope paths into (source, generated). Generated = untracked or gitignored AND named like build or
     cache output (`globs`), or gitignored below a BUILD_GLOBS folder, in each snapshot that lists the path: `post` and,
     when given, `pre`, so a cache file the run deleted is classed like one it created or rewrote. Tracked files,
-    secrets and credentials always count as source."""
+    secrets and credentials always count as source; an ignored bytecode cache is not protected by its name."""
     source, generated = [], []
     named = lambda status: globs + BUILD_GLOBS if status == "!!" else globs
     for p in paths:
         sides = [snap[p][0] for snap in (pre or {}, post) if p in snap] or [""]
-        gen = not path_matches(p, PROTECTED_GLOBS) and all(
+        gen = not is_protected(p, all(status == "!!" for status in sides)) and all(
             status in ("!!", "??") and is_generated(p, named(status)) for status in sides)
         (generated if gen else source).append(p)
     return sorted(source), sorted(generated)

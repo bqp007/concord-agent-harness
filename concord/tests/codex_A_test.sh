@@ -2,7 +2,8 @@
 # concord.py candidate, grading and scope state: the paths a plan declares stay inside the checkout; the candidate holds
 # a skip-worktree file's change; a pinned grading input inside a linked folder is the pinned one in every grading copy;
 # the index is compared entry by entry; a verdict and --grade recheck the state a run is rejected for (permission
-# bits, the index, ignored files) and the plan; a deleted bytecode cache is build output like a new one; the start
+# bits, the index, ignored files) and the plan; a deleted bytecode cache is build output like a new one, and an ignored
+# one is not protected by a secret-like name; the start
 # state is taken before the red run; the run size runs from the start tree to the candidate; drift compares content.
 # Session runs (--begin, --end), no executor, no network.
 # Run: bash ~/.claude/concord/tests/codex_A_test.sh   (exit 0 = all passed).
@@ -111,6 +112,18 @@ printf 'new' > "$R/pkg/__pycache__/n.cpython-39.pyc"; end
   && grep -q "^DELETED: none" "$T/e.txt" \
   && ok "a deleted bytecode cache, ignored or untracked, is build output like a new one: listed as generated, not DELETED" \
   || { bad "deleted .pyc"; grep -E "REJECTED|^generated|^DELETED" "$T/e.txt"; }
+
+echo "== an ignored bytecode cache is not protected by its name"
+newrepo prot 'grep -q 2 a.py'; printf '__pycache__/\n.venv/\n' >> "$R/.gitignore"; git -C "$R" commit -qam ignore
+begin; echo 'x = 2' > "$R/a.py"; mkdir -p "$R/.venv/lib/vault/__pycache__"
+printf 'c' > "$R/.venv/lib/vault/__pycache__/secret_box.cpython-39.pyc"; end
+! grep -q "REJECTED" "$T/e.txt" && grep "^generated" "$T/e.txt" | grep -qF "secret_box.cpython-39.pyc" \
+  && ok "an ignored .pyc whose module name contains 'secret' is generated output; the run is graded" \
+  || { bad "ignored secret-named .pyc"; grep -E "REJECTED|^generated|OUT OF SCOPE" "$T/e.txt"; }
+newrepo prot2 'grep -q 2 a.py'; printf '.venv/\n' >> "$R/.gitignore"; git -C "$R" commit -qam ignore
+begin; echo 'x = 2' > "$R/a.py"; mkdir -p "$R/.venv/lib"; printf 'k' > "$R/.venv/lib/secret_token.log"; end
+rejected "secret_token.log" && ok "an ignored file named like a secret that is not bytecode still rejects the run" \
+  || { bad "ignored secret-named .log not rejected"; grep -E "REJECTED|^generated|OUT OF SCOPE" "$T/e.txt"; }
 
 echo "== the start state is taken before the red run (R-26)"
 newrepo r26 'git config --local concord.probe 1; grep -q 2 a.py'; begin; echo 'x = 2' > "$R/a.py"; end
