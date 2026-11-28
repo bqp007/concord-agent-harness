@@ -512,7 +512,8 @@ def run_mutex(checkout):
 def open_runs(checkout):
     """The run ids of the live holders of the checkout's Concord run lock (<git-dir>/concord.lock), read as concord.py
     reads it: a --begin holder lives until --end or --abort, any other while its pid or its harness's process group
-    runs. The caller holds the mutex (run_mutex)."""
+    runs; no file is no holder, and a file that cannot be read as a lock may hold live runs, so it stops the caller.
+    The caller holds the mutex (run_mutex)."""
     def alive(pid, group):
         try:
             (os.killpg if group else os.kill)(pid, 0)
@@ -525,11 +526,17 @@ def open_runs(checkout):
     lock = Path(git(checkout, "rev-parse", "--path-format=absolute", "--git-dir")) / "concord.lock"
     try:
         data = json.loads(lock.read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return []
-    holders = data.get("holders") if isinstance(data, dict) else None
+    except (OSError, ValueError) as e:
+        die(f"{lock} cannot be read as a lock ({e.__class__.__name__}): it may hold live runs; delete it once no run of "
+            "this checkout is active; nothing removed")
+    if not isinstance(data, dict):
+        die(f"{lock} cannot be read as a lock (not a JSON object): delete it once no run of this checkout is active; "
+            "nothing removed")
+    holders = data.get("holders")
     if not isinstance(holders, list):          # the one-holder file written before 2026-11-15
-        holders = [data] if isinstance(data, dict) and data.get("run") else []
+        holders = [data] if data.get("run") else []
     return [str(h.get("run")) for h in holders if isinstance(h, dict) and (h.get("manual") or any(
         isinstance(h.get(k), int) and not isinstance(h.get(k), bool) and h[k] > 0 and alive(h[k], k == "child")
         for k in ("pid", "child")))]

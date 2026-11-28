@@ -1,6 +1,6 @@
 #!/bin/bash
 # Worktree regressions (no network, no model): wt.py done consults the worktree's Concord run lock before it removes
-# anything; join checks the fork's work only once it holds both run locks; a fork that no Concord run graded joins only
+# anything, and a lock it cannot read stops it; join checks the fork's work only once it holds both run locks; a fork that no Concord run graded joins only
 # with --ungraded.
 # Run: bash ~/.claude/concord/tests/codex_E_test.sh   (exit 0 = all passed; temp repo under $TMPDIR, removed).
 # Tests the dispatcher this file belongs to, copied into the temp dir.
@@ -38,6 +38,13 @@ $WT done TD --repo "$M" --force > "$T/d2.txt" 2>&1; D2=$?
 $DP --abort "$OB" --repo "$WD" > /dev/null 2>&1
 $WT done TD --repo "$M" > "$T/d3.txt" 2>&1 && [ ! -e "$WD" ] && ok "after --abort the same done removes the worktree" \
   || { bad "done after --abort"; cat "$T/d3.txt"; }
+# a run lock that cannot be read may hold live runs: concord.py refuses beside it, and so does done
+$WT new TL --repo "$M" --no-fetch --base main > /dev/null 2>&1; WL="$M/.claude/worktrees/TL"
+printf '{"holders": [' > "$(gd "$WL")/concord.lock"
+$WT done TL --repo "$M" --force > "$T/d4.txt" 2>&1; D4=$?
+[ $D4 -ne 0 ] && [ -d "$WL" ] && grep -qF "cannot be read as a lock" "$T/d4.txt" \
+  && ok "a damaged run lock: done refuses even with --force and removes nothing" || { bad "done beside a damaged lock rc=$D4"; cat "$T/d4.txt"; }
+rm -f "$(gd "$WL")/concord.lock"; $WT done TL --repo "$M" > /dev/null 2>&1
 
 echo "== join checks the fork's work once it holds both run locks"
 # A process holds the destination's run-lock mutex, as concord.py does while a run starts or ends there. join creates the
