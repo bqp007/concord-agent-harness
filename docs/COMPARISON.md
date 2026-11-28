@@ -54,7 +54,7 @@ In five harnesses that flatten typed turns into text before summarizing them, Op
 ## What Concord skipped on purpose
 
 - **Unattended self-improvement.** Concord changes its own rules only through a ticket the owner approves, under a line budget.
-- **Large catalogs of agents and personas.** They cover more ground, but every description costs context in every session. Executor mistakes (72 of Concord's 159 failures) are caught by the dispatcher's acceptance re-run and scope check, and plan gaps (51) are fixed by a better plan; another agent fixes neither.
+- **Large catalogs of agents and personas.** They cover more ground, but every description costs context in every session. Of Concord's 159 recorded failures, the planner labeled 72 as executor mistakes and 51 as plan gaps. Concord meets them with checks (the dispatcher's acceptance re-run and scope check) and with a verified plan, not with more agents.
 - **Web access for executors.** Harness² leaves executor network access unrestricted, and its README notes that rubrics may be online. On OpenCode, Concord denies the executor's web fetch and reports network use through the shell.
 
 ## What Concord still lacks
