@@ -68,7 +68,8 @@ pushpr(){ local n=$1; shift; ( set -e; cd "$C"; git fetch -q origin "refs/pull/$
   git add -A; git commit -qm fix; git push -q origin "HEAD:refs/pull/$n/head"; git checkout -q main ) || { echo "setup failed: push $n"; exit 1; }
   prjson "$n"; }
 # runpr N RISK FILES ACTIONS [BRANCH]: a Concord run of FILES (Risk RISK) on a branch off main, committed and pushed as PR N's
-# head; VERDICT=PASS|FAIL records that verdict before the commit (FORCE=1: with --force); ACC is the acceptance (default true)
+# head; VERDICT=PASS|FAIL records that verdict before the commit (FORCE=1: with --force); ACC is the acceptance (default true);
+# AFTER runs (eval) after the verdict, before the commit
 runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
   mkdir -p "$C/.claude"; printf '# Plan\n## Phase 1 - run %s\nExecutor: deepseek-flash\nRisk: %s\nFiles: %s\nAcceptance:\n- `%s`\n' "$n" "$risk" "$files" "${ACC:-true}" > "$C/.claude/PLAN_$n.md"
   ( set -e; cd "$C"; git checkout -q main; git checkout -qb "$br" ) || { echo "setup failed: branch $br"; exit 1; }
@@ -76,6 +77,7 @@ runpr(){ local n=$1 risk=$2 files=$3 actions=$4 br=${5:-pr$1}
   FAKE_ACTIONS="$actions" $DP 1 --plan ".claude/PLAN_$n.md" --via qwen --model fake/m --no-baseline --repo "$C" > "$T/out.txt" 2>&1
   RUNID=$(sed -n 's/^DELEGATE RESULT \([^ ]*\).*/\1/p' "$T/out.txt" | head -1); [ -n "$RUNID" ] || { echo "setup failed: run for PR $n"; cat "$T/out.txt"; exit 1; }
   if [ -n "${VERDICT:-}" ]; then $DP --verdict "$RUNID" "$VERDICT" $([ "$VERDICT" = FAIL ] && echo --cause EXECUTOR) $([ -n "${FORCE:-}" ] && echo --force --note forced) --repo "$C" > "$T/v.txt" 2>&1 || { echo "setup failed: $VERDICT of run $n"; cat "$T/v.txt"; exit 1; }; fi
+  [ -z "${AFTER:-}" ] || eval "$AFTER" || { echo "setup failed: after the verdict of run $n"; exit 1; }
   ( set -e; cd "$C"; git add -A; git commit -qm "run $n"; git push -qf origin "HEAD:refs/pull/$n/head"; git checkout -q main; git branch -qD "$br" ) || { echo "setup failed: commit $n"; exit 1; }
   prjson "$n"; }
 flash(){ local n=$1 m=$2; shift 2; $DP --review-pr "$n" --via qwen --model "$m" "$@" --repo "$C" > "$T/out.txt" 2>&1; }
@@ -181,6 +183,13 @@ $DP --review-pr 212 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC1=$?
 [ $RC1 -eq 2 ] && ! grep -q '^PACKET' "$T/out.txt" \
   && ok "R-18 a Risk: low run whose exact change is the PR's commit but whose PASS was forced: --tier low is refused" \
   || { bad "R-18 a forced PASS lowered the tier, rc=$RC1"; tail -1 "$T/out.txt"; }
+# forced once, then graded again with its acceptance passing and given a PASS without --force: the later verdict stands
+ACC="test -e $T/ok213" FORCE=1 VERDICT=PASS AFTER='touch "$T/ok213" && $DP --grade "$RUNID" --repo "$C" > "$T/g.txt" 2>&1 && $DP --verdict "$RUNID" PASS --repo "$C" > "$T/v.txt" 2>&1' \
+  runpr 213 low f213.txt "printf 'D\n' > f213.txt"
+$DP --review-pr 213 --packet --tier low --repo "$C" > "$T/out.txt" 2>&1; RC1=$?
+[ -z "$(mj "$RUNS/$RUNID/meta.json" 'm.get("verdict_forced") or ""')" ] && [ $RC1 -eq 0 ] && grep -q '^PACKET' "$T/out.txt" \
+  && ok "R-18 a run forced once and later given a normal PASS counts as passed: --tier low is granted" \
+  || { bad "R-18 a later normal PASS still read as forced, rc=$RC1"; tail -1 "$T/out.txt"; }
 
 echo "== R-33 phase reviews read deletions; binary and cut files count for no review"
 D3="$T/del"; phrepo "$D3" '# Plan\n## Phase 1 - x\nExecutor: deepseek-flash\nRisk: low\nFiles: gone.py\nAcceptance:\n- `test ! -e gone.py`\n' gone.py 'g = 1\n'
